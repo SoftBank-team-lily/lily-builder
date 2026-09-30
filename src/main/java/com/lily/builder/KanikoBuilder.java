@@ -1,6 +1,5 @@
 package com.lily.builder;
 
-import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
@@ -26,7 +25,12 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class KanikoBuilder {
 
-    static final String DOCKER_CONFIG = "kaniko-docker-config";
+    /**
+     * ECR push 인증. 클러스터의 ecr-credentials CronJob 이 lily-builds namespace 에 6시간마다 갱신하는
+     * docker 인증 Secret(kubernetes.io/dockerconfigjson)을 그대로 마운트한다.
+     * 노드 IAM 역할(IMDS)을 쓰지 않으므로 빌드(= 사용자 Dockerfile 의 RUN)는 AWS 권한이 없는 worker 에서 돈다.
+     */
+    static final String REGISTRY_AUTH_SECRET = "ecr-pull";
 
     private final KubernetesClient k8s;
     private final BuilderProperties props;
@@ -56,9 +60,6 @@ public class KanikoBuilder {
                         .addToStringData("GIT_USERNAME", "x-access-token")
                         .addToStringData("GIT_PASSWORD", request.token())
                         .build()).create();
-            }
-            if (props.ecr()) {
-                ensureEcrConfig(ns);
             }
             k8s.batch().v1().jobs().inNamespace(ns).resource(job(jobName, request, image, hasToken)).create();
             Job done = awaitFinished(ns, jobName);
@@ -110,14 +111,16 @@ public class KanikoBuilder {
                     .endTemplate()
                 .endSpec();
         if (props.ecr()) {
-            // ECR push 는 노드 IAM 역할로 인증한다. AWS 권한은 lily-server 역할에만 있고
-            // worker 는 Pod 가 인스턴스 자격증명을 받지 못하게 막아 두었으므로 (IMDS hop limit 1) 빌드는 lily-server 에서 돈다.
-            // control-plane 을 보호하려고 메모리 상한을 둔다
+            // 사용자 Dockerfile 이 실행되므로 AWS 권한이 있는 lily-server 에 두지 않는다 (worker 는 IMDS 차단).
+            // worker 는 사용자 앱과 같은 노드라 메모리 상한을 둔다
             builder.editSpec().editTemplate().editSpec()
-                    .addToNodeSelector("node-role.kubernetes.io/control-plane", "true")
-                    .addNewToleration().withKey("node-role.kubernetes.io/control-plane")
-                        .withOperator("Exists").withEffect("NoSchedule").endToleration()
+                    .addNewVolume().withName("docker-config")
+                        .withNewSecret().withSecretName(REGISTRY_AUTH_SECRET)
+                            .addNewItem().withKey(".dockerconfigjson").withPath("config.json").endItem()
+                        .endSecret()
+                    .endVolume()
                     .editFirstContainer()
+                        .addNewVolumeMount().withName("docker-config").withMountPath("/kaniko/.docker").withReadOnly(true).endVolumeMount()
                         .withNewResources()
                             .addToRequests("cpu", new Quantity("500m"))
                             .addToRequests("memory", new Quantity("512Mi"))
@@ -125,23 +128,8 @@ public class KanikoBuilder {
                         .endResources()
                     .endContainer()
                     .endSpec().endTemplate().endSpec();
-            builder.editSpec().editTemplate().editSpec()
-                    .addNewVolume().withName("docker-config")
-                        .withNewConfigMap().withName(DOCKER_CONFIG).endConfigMap()
-                    .endVolume()
-                    .editFirstContainer()
-                        .addNewVolumeMount().withName("docker-config").withMountPath("/kaniko/.docker").endVolumeMount()
-                    .endContainer()
-                    .endSpec().endTemplate().endSpec();
         }
         return builder.build();
-    }
-
-    private void ensureEcrConfig(String ns) {
-        k8s.configMaps().inNamespace(ns).resource(new ConfigMapBuilder()
-                .withNewMetadata().withName(DOCKER_CONFIG).endMetadata()
-                .withData(Map.of("config.json", "{\"credsStore\":\"ecr-login\"}"))
-                .build()).serverSideApply();
     }
 
     private static EnvVar secretEnv(String secret, String key) {
