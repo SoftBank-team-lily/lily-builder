@@ -3,6 +3,7 @@ package com.lily.builder;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
+import io.fabric8.kubernetes.api.model.Quantity;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.api.model.batch.v1.Job;
 import io.fabric8.kubernetes.api.model.batch.v1.JobBuilder;
@@ -109,6 +110,21 @@ public class KanikoBuilder {
                     .endTemplate()
                 .endSpec();
         if (props.ecr()) {
+            // ECR push 는 노드 IAM 역할로 인증한다. AWS 권한은 lily-server 역할에만 있고
+            // worker 는 Pod 가 인스턴스 자격증명을 받지 못하게 막아 두었으므로 (IMDS hop limit 1) 빌드는 lily-server 에서 돈다.
+            // control-plane 을 보호하려고 메모리 상한을 둔다
+            builder.editSpec().editTemplate().editSpec()
+                    .addToNodeSelector("node-role.kubernetes.io/control-plane", "true")
+                    .addNewToleration().withKey("node-role.kubernetes.io/control-plane")
+                        .withOperator("Exists").withEffect("NoSchedule").endToleration()
+                    .editFirstContainer()
+                        .withNewResources()
+                            .addToRequests("cpu", new Quantity("500m"))
+                            .addToRequests("memory", new Quantity("512Mi"))
+                            .addToLimits("memory", new Quantity("2Gi"))
+                        .endResources()
+                    .endContainer()
+                    .endSpec().endTemplate().endSpec();
             builder.editSpec().editTemplate().editSpec()
                     .addNewVolume().withName("docker-config")
                         .withNewConfigMap().withName(DOCKER_CONFIG).endConfigMap()
