@@ -22,7 +22,8 @@ class KanikoBuilderTest {
     private static final String NS = "lily-builds";
 
     private KanikoBuilder builder(String registry, boolean insecure) {
-        return new KanikoBuilder(client, new BuilderProperties(NS, registry, insecure, "http://cicd", "kaniko:test", 10), 50);
+        return new KanikoBuilder(client, new BuilderProperties(NS, registry, insecure, "http://cicd", "kaniko:test", 10,
+                new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false)), 50);
     }
 
     private static BuildRequest request(String rootDir, String token) {

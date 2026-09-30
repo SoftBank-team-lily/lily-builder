@@ -26,7 +26,8 @@ class BuildServiceTest {
     private final KanikoBuilder kaniko = mock(KanikoBuilder.class);
     private final RestClient.Builder http = RestClient.builder().baseUrl("http://cicd");
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
-    private final BuildService service = new BuildService(kaniko, new CicdClient(http.build()), new SyncRunner());
+    private final InMemoryBuildStore store = new InMemoryBuildStore();
+    private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner());
 
     private static BuildRequest request(String database) {
         return new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 8080,
@@ -89,6 +90,19 @@ class BuildServiceTest {
         assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
         assertThat(build.getLogs()).anyMatch(l -> l.contains("ready timeout"));
         assertThat(service.get(build.getId())).containsSame(build);
+    }
+
+    @Test
+    void 이력은_저장소에_남고_최신순이다() throws Exception {
+        when(kaniko.build(anyString(), any(), anyString())).thenThrow(new IllegalStateException("x"));
+
+        Build first = service.start(request(""));
+        Thread.sleep(5);
+        Build second = service.start(request(""));
+
+        assertThat(service.history()).extracting(Build::getId).containsExactly(second.getId(), first.getId());
+        // 접수, 빌드 시작, 실패 때마다 저장한다
+        assertThat(store.saves).isGreaterThanOrEqualTo(6);
     }
 
     static class SyncRunner extends BuildService.BuildRunner {

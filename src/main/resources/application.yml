@@ -17,3 +17,9 @@ lily:
     # 빌드가 끝나면 배포를 요청할 lily-cicd 주소
     cicd-url: ${CICD_URL:http://localhost:8090}
     build-timeout-seconds: ${BUILD_TIMEOUT_SECONDS:900}
+    # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
+    dynamodb:
+      table: ${BUILDS_TABLE:lily-builds}
+      endpoint: ${DYNAMODB_ENDPOINT:}          # 비우면 AWS. DynamoDB Local 이면 http://localhost:8000
+      region: ${AWS_REGION:ap-northeast-2}
+      create-table: ${DYNAMODB_CREATE_TABLE:false}   # 로컬 전용

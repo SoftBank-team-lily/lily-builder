@@ -1,5 +1,7 @@
 # lily-builder 를 k3s 에 올리는 매니페스트.
 # - 빌드 Job(Kaniko)은 lily-builds namespace 에 뜬다. 빌더는 그 namespace 의 Job/Secret/ConfigMap/로그만 다룬다
+# - "배포된 앱" 화면을 위해 전체 namespace 의 Deployment/Service/Ingress 를 읽기만 한다
+# - 배포 이력은 DynamoDB(lily-builds 테이블). AWS 권한 때문에 lily-server 에서만 돈다 (프로비저너와 같은 이유)
 # - ECR 에 push 하려면 Kaniko 가 뜨는 노드의 IAM 역할에 ECR push 권한이 있어야 한다
 apiVersion: v1
 kind: Namespace
@@ -42,6 +44,34 @@ roleRef:
   kind: Role
   name: lily-builder
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lily-builder-read-apps
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lily-builder-read-apps
+subjects:
+  - kind: ServiceAccount
+    name: lily-builder
+    namespace: lily-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lily-builder-read-apps
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,6 +90,15 @@ spec:
         app: lily-builder
     spec:
       serviceAccountName: lily-builder
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: lily-builder
           image: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/lily-builder:latest
@@ -71,6 +110,10 @@ spec:
               value: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com
             - name: CICD_URL
               value: http://lily-cicd.lily-system.svc
+            - name: AWS_REGION
+              value: ap-northeast-2
+            - name: BUILDS_TABLE
+              value: lily-builds
           resources:
             requests:
               cpu: 50m

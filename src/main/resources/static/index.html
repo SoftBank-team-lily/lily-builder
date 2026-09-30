@@ -5,22 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Lily Deploy</title>
   <style>
-    :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --accent:#be185d; --ok:#15803d; --err:#b91c1c; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --accent:#f472b6; --ok:#4ade80; --err:#f87171; } }
+    :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --accent:#be185d; --ok:#15803d; --warn:#b45309; --err:#b91c1c; --soft:rgba(127,127,127,.08); }
+    @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --accent:#f472b6; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; } }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
-    main { max-width:640px; margin:0 auto; padding:32px 16px; }
+    main { max-width:980px; margin:0 auto; padding:32px 16px 64px; }
     h1 { font-size:22px; margin:0 0 4px; }
-    p.sub { color:var(--muted); margin:0 0 24px; }
+    h2 { font-size:17px; margin:40px 0 4px; display:flex; align-items:baseline; gap:10px; }
+    h2 small { font-size:13px; }
+    p.sub { color:var(--muted); margin:0 0 20px; }
+    nav { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:8px; }
+    nav button { background:none; color:var(--muted); border:0; border-bottom:2px solid transparent; border-radius:0; margin:0; padding:8px 12px; font-weight:600; }
+    nav button.on { color:var(--fg); border-bottom-color:var(--accent); }
+    .panel { display:none; } .panel.on { display:block; }
+    form { max-width:640px; }
     label { display:block; font-weight:600; margin:14px 0 4px; }
     small { color:var(--muted); font-weight:400; }
     input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); font:inherit; }
-    .row { display:flex; gap:12px; } .row > div { flex:1; }
+    .row { display:flex; gap:12px; } .row > div { flex:1; min-width:0; }
     button { margin-top:20px; padding:10px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
     button:disabled { opacity:.5; cursor:default; }
-    #result { margin-top:28px; display:none; }
-    .status { font-weight:700; } .SUCCEEDED { color:var(--ok); } .FAILED { color:var(--err); }
-    pre { background:rgba(127,127,127,.1); padding:12px; border-radius:6px; overflow-x:auto; font-size:12px; white-space:pre-wrap; }
+    .scroll { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:14px; margin-top:8px; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; white-space:nowrap; }
+    th { color:var(--muted); font-weight:600; font-size:13px; }
+    tbody tr.click { cursor:pointer; } tbody tr.click:hover, tbody tr.sel { background:var(--soft); }
+    td.mono, .mono { font-family:ui-monospace, monospace; font-size:12px; }
+    .empty { color:var(--muted); padding:16px 10px; }
+    .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid currentColor; }
+    .SUCCEEDED, .HEALTHY { color:var(--ok); } .FAILED, .DOWN { color:var(--err); }
+    .BUILDING, .DEPLOYING, .QUEUED, .DEGRADED { color:var(--warn); } .STOPPED { color:var(--muted); }
+    .slot { display:block; } .slot.off { color:var(--muted); }
+    #detail { margin-top:16px; display:none; }
+    pre { background:var(--soft); padding:12px; border-radius:6px; overflow-x:auto; font-size:12px; white-space:pre-wrap; margin:8px 0 0; }
+    a { color:var(--accent); }
+    .err { color:var(--err); }
   </style>
 </head>
 <body>
@@ -28,52 +47,91 @@
   <h1>Lily Deploy</h1>
   <p class="sub">GitHub 레포를 빌드해서 k3s 에 배포합니다. 레포에 Dockerfile 이 있어야 합니다.</p>
 
-  <form id="form">
-    <label>GitHub 주소</label>
-    <input name="repoUrl" required placeholder="https://github.com/SoftBank-team-lily/lily-blog-sample">
+  <nav>
+    <button data-tab="deploy" class="on">새 배포</button>
+    <button data-tab="apps">배포된 앱</button>
+    <button data-tab="history">배포 이력</button>
+  </nav>
 
-    <div class="row">
-      <div><label>브랜치 <small>비우면 main</small></label><input name="branch" placeholder="main"></div>
-      <div><label>폴더 <small>Dockerfile 위치</small></label><input name="rootDir" placeholder="(루트)"></div>
+  <section id="deploy" class="panel on">
+    <form id="form">
+      <label>GitHub 주소</label>
+      <input name="repoUrl" required placeholder="https://github.com/SoftBank-team-lily/lily-blog-sample">
+
+      <div class="row">
+        <div><label>브랜치 <small>비우면 main</small></label><input name="branch" placeholder="main"></div>
+        <div><label>폴더 <small>Dockerfile 위치</small></label><input name="rootDir" placeholder="(루트)"></div>
+      </div>
+
+      <label>토큰 <small>private 레포만</small></label>
+      <input name="token" type="password" autocomplete="off">
+
+      <div class="row">
+        <div><label>앱 이름 <small>소문자·숫자·-</small></label><input name="appName" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" maxlength="55" placeholder="blog"></div>
+        <div><label>포트</label><input name="targetPort" type="number" value="8080" min="1" max="65535" required></div>
+      </div>
+
+      <label>DB</label>
+      <select name="database">
+        <option value="">필요 없음</option>
+        <option value="postgres">PostgreSQL</option>
+        <option value="mysql">MySQL</option>
+      </select>
+
+      <div class="row">
+        <div><label>Readiness 경로 <small>비우면 기본값</small></label><input name="readinessPath" placeholder="/actuator/health/readiness"></div>
+        <div><label>Liveness 경로</label><input name="livenessPath" placeholder="/actuator/health/liveness"></div>
+      </div>
+
+      <label>환경변수 <small>한 줄에 KEY=VALUE</small></label>
+      <textarea name="env" rows="3" placeholder="SPRING_PROFILES_ACTIVE=prod"></textarea>
+
+      <button id="submit">배포</button>
+      <p id="formError" class="err"></p>
+    </form>
+  </section>
+
+  <section id="apps" class="panel">
+    <h2>지금 떠 있는 앱 <small>k3s 기준 · 10초마다 갱신</small></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>앱</th><th>상태</th><th>전략</th><th>슬롯 · 이미지</th><th>접속</th></tr></thead>
+        <tbody id="appRows"><tr><td colspan="5" class="empty">불러오는 중</td></tr></tbody>
+      </table>
     </div>
+  </section>
 
-    <label>토큰 <small>private 레포만</small></label>
-    <input name="token" type="password" autocomplete="off">
-
-    <div class="row">
-      <div><label>앱 이름 <small>소문자·숫자·-</small></label><input name="appName" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" maxlength="55" placeholder="blog"></div>
-      <div><label>포트</label><input name="targetPort" type="number" value="8080" min="1" max="65535" required></div>
+  <section id="history" class="panel">
+    <h2>배포 이력 <small>빌더 기준 · 최신순 · 행을 누르면 로그</small></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>시각</th><th>앱</th><th>결과</th><th>레포 · 브랜치</th><th>DB</th><th>이미지</th></tr></thead>
+        <tbody id="historyRows"><tr><td colspan="6" class="empty">불러오는 중</td></tr></tbody>
+      </table>
     </div>
-
-    <label>DB</label>
-    <select name="database">
-      <option value="">필요 없음</option>
-      <option value="postgres">PostgreSQL</option>
-      <option value="mysql">MySQL</option>
-    </select>
-
-    <div class="row">
-      <div><label>Readiness 경로 <small>비우면 기본값</small></label><input name="readinessPath" placeholder="/actuator/health/readiness"></div>
-      <div><label>Liveness 경로</label><input name="livenessPath" placeholder="/actuator/health/liveness"></div>
+    <div id="detail">
+      <div><b id="detailTitle"></b> <span id="detailStatus" class="badge"></span> <span id="detailUrl"></span></div>
+      <pre id="detailLogs"></pre>
     </div>
-
-    <label>환경변수 <small>한 줄에 KEY=VALUE</small></label>
-    <textarea name="env" rows="3" placeholder="SPRING_PROFILES_ACTIVE=prod"></textarea>
-
-    <button id="submit">배포</button>
-  </form>
-
-  <section id="result">
-    <div>상태: <span id="status" class="status"></span></div>
-    <div id="url"></div>
-    <pre id="logs"></pre>
   </section>
 </main>
 <script>
-  const form = document.getElementById('form');
-  form.addEventListener('submit', async (e) => {
+  const $ = (id) => document.getElementById(id);
+  let selected = null;
+
+  // 탭
+  document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+  function showTab(name) {
+    document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', p.id === name));
+    if (name === 'apps') loadApps();
+    if (name === 'history') loadHistory();
+  }
+
+  // 새 배포
+  $('form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const f = new FormData(form);
+    const f = new FormData($('form'));
     const env = {};
     (f.get('env') || '').split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
       const i = line.indexOf('=');
@@ -84,35 +142,100 @@
       appName: f.get('appName'), targetPort: Number(f.get('targetPort')), database: f.get('database'),
       readinessPath: f.get('readinessPath'), livenessPath: f.get('livenessPath'), env
     };
-    document.getElementById('submit').disabled = true;
-    const res = await fetch('/api/builds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) {
-      show({ status: 'FAILED', logs: ['요청 오류 ' + res.status + ': ' + await res.text()] });
-      document.getElementById('submit').disabled = false;
-      return;
+    $('submit').disabled = true;
+    $('formError').textContent = '';
+    try {
+      const res = await fetch('/api/builds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res.ok) { $('formError').textContent = '요청 오류 ' + res.status + ': ' + await res.text(); return; }
+      selected = (await res.json()).id;
+      showTab('history');
+    } finally {
+      $('submit').disabled = false;
     }
-    poll((await res.json()).id);
   });
 
-  async function poll(id) {
-    const build = await (await fetch('/api/builds/' + id)).json();
-    show(build);
-    if (build.status === 'SUCCEEDED' || build.status === 'FAILED') {
-      document.getElementById('submit').disabled = false;
-      return;
+  // 배포된 앱 (k3s)
+  async function loadApps() {
+    const tbody = $('appRows');
+    try {
+      const res = await fetch('/api/apps');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const apps = await res.json();
+      tbody.replaceChildren();
+      if (apps.length === 0) return tbody.append(emptyRow(5, '떠 있는 앱이 없습니다'));
+      apps.forEach(a => {
+        const slots = cell();
+        a.slots.forEach(s => {
+          const line = el('span', 'slot mono' + (s.serving ? '' : ' off'),
+            (s.serving ? '● ' : '○ ') + s.slot + ' ' + s.readyReplicas + '/' + s.replicas + '  ' + (s.image || ''));
+          slots.append(line);
+        });
+        tbody.append(row([
+          text(a.appName + (a.namespace === 'default' ? '' : ' (' + a.namespace + ')')),
+          badge(a.health, a.health + ' ' + a.readyReplicas + '/' + a.replicas),
+          text(a.strategy),
+          slots,
+          link(a.url)
+        ]));
+      });
+    } catch (e) {
+      tbody.replaceChildren(emptyRow(5, '클러스터 조회 실패: ' + e.message));
     }
-    setTimeout(() => poll(id), 2000);
   }
 
-  function show(build) {
-    document.getElementById('result').style.display = 'block';
-    const s = document.getElementById('status');
-    s.textContent = build.status; s.className = 'status ' + build.status;
-    const url = document.getElementById('url');
-    url.innerHTML = '';
-    if (build.url) { const a = document.createElement('a'); a.href = build.url; a.textContent = build.url; a.target = '_blank'; url.append('접속: ', a); }
-    document.getElementById('logs').textContent = (build.logs || []).join('\n');
+  // 배포 이력 (DynamoDB)
+  async function loadHistory() {
+    const tbody = $('historyRows');
+    try {
+      const res = await fetch('/api/builds');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const builds = await res.json();
+      tbody.replaceChildren();
+      if (builds.length === 0) return tbody.append(emptyRow(6, '배포 이력이 없습니다'));
+      builds.forEach(b => {
+        const tr = row([
+          text(new Date(b.createdAt).toLocaleString()),
+          text(b.appName),
+          badge(b.status, b.status),
+          text(shortRepo(b.repoUrl) + ' · ' + b.branch + (b.rootDir ? ' /' + b.rootDir : '')),
+          text(b.database || '-'),
+          text(b.image ? b.image.split('/').pop() : '-', 'mono')
+        ]);
+        tr.className = 'click' + (b.id === selected ? ' sel' : '');
+        tr.addEventListener('click', () => { selected = b.id; showDetail(b); loadHistory(); });
+        tbody.append(tr);
+        if (b.id === selected) showDetail(b);
+      });
+    } catch (e) {
+      tbody.replaceChildren(emptyRow(6, '이력 조회 실패: ' + e.message));
+    }
   }
+
+  function showDetail(b) {
+    $('detail').style.display = 'block';
+    $('detailTitle').textContent = b.appName + ' · ' + new Date(b.createdAt).toLocaleString();
+    $('detailStatus').textContent = b.status;
+    $('detailStatus').className = 'badge ' + b.status;
+    $('detailUrl').replaceChildren(b.url ? anchor(b.url) : '');
+    $('detailLogs').textContent = (b.logs || []).join('\n');
+  }
+
+  // 열려 있는 탭만 주기적으로 갱신
+  setInterval(() => {
+    if ($('apps').classList.contains('on')) loadApps();
+    if ($('history').classList.contains('on')) loadHistory();
+  }, 5000);
+
+  // 작은 DOM 헬퍼 (사용자 입력은 textContent 로만 넣는다)
+  function el(tag, cls, content) { const e = document.createElement(tag); if (cls) e.className = cls; if (content != null) e.textContent = content; return e; }
+  function cell() { return el('td'); }
+  function text(v, cls) { return el('td', cls, v); }
+  function badge(cls, v) { const td = cell(); td.append(el('span', 'badge ' + cls, v)); return td; }
+  function anchor(url) { const a = el('a', null, url); a.href = url; a.target = '_blank'; return a; }
+  function link(url) { const td = cell(); if (url) td.append(anchor(url)); else td.textContent = '-'; return td; }
+  function row(cells) { const tr = el('tr'); cells.forEach(c => tr.append(c)); return tr; }
+  function emptyRow(n, msg) { const tr = el('tr'); const td = el('td', 'empty', msg); td.colSpan = n; tr.append(td); return tr; }
+  function shortRepo(url) { return (url || '').replace('https://github.com/', ''); }
 </script>
 </body>
 </html>
