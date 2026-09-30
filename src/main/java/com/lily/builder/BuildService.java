@@ -27,12 +27,15 @@ public class BuildService {
     private final KanikoBuilder kaniko;
     private final CicdClient cicd;
     private final BuildRunner runner;
+    private final EcrRepositories ecr;
 
-    public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner) {
+    public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                        EcrRepositories ecr) {
         this.store = store;
         this.kaniko = kaniko;
         this.cicd = cicd;
         this.runner = runner;
+        this.ecr = ecr;
     }
 
     public Build start(BuildRequest request) {
@@ -56,6 +59,9 @@ public class BuildService {
     void execute(Build build, BuildRequest request) {
         String tag = ZonedDateTime.now(ZoneOffset.UTC).format(TAG);
         try {
+            if (ecr.ensure(request.appName())) {
+                build.log("build: created ecr repository " + request.appName());
+            }
             update(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
             String image = kaniko.build(build.getId(), request, tag);
             build.image(image);
