@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
  * 온프레미스 과부하    → PUT  /api/burst/apps/{app}/replicas  대기 슬롯을 올린다
  * 준비 확인            → GET  /api/burst/apps/{app}           readyReplicas 가 1 이상이면 넘기기 시작
  * 부하 해소            → PUT  /api/burst/apps/{app}/replicas  0 으로 내린다
+ * 온프레미스 DB        → POST /api/burst/apps/{app}/database  클라우드와 같은 DB 를 터널 주소로 받는다
  * </pre>
  */
 @RestController
@@ -24,10 +25,28 @@ public class BurstController {
 
     private final BuildService builds;
     private final CicdClient cicd;
+    private final ProvisionerClient provisioner;
 
-    public BurstController(BuildService builds, CicdClient cicd) {
+    public BurstController(BuildService builds, CicdClient cicd, ProvisionerClient provisioner) {
         this.builds = builds;
         this.cicd = cicd;
+        this.provisioner = provisioner;
+    }
+
+    /**
+     * 온프레미스 앱의 DB. projectId = appName 이라 클라우드 배포(lily-cicd)와 같은 DB 를 쓴다.
+     * host/port 는 온프레미스에서 RDS 로 가는 터널 주소. 계정·비밀번호는 클라우드와 같다
+     */
+    @PostMapping("/apps/{appName}/database")
+    public ProvisionerClient.Connection database(@PathVariable String appName,
+                                                 @Valid @RequestBody DatabaseRequest request) {
+        return provisioner.ensure(appName, request.engine(), request.host(), request.port());
+    }
+
+    public record DatabaseRequest(
+            @NotNull @jakarta.validation.constraints.Pattern(regexp = "postgres|mysql") String engine,
+            @NotNull @jakarta.validation.constraints.Pattern(regexp = "[A-Za-z0-9.-]{1,253}") String host,
+            @NotNull @Min(1) @Max(65535) Integer port) {
     }
 
     /** 대기 배포. host 에는 온프레미스 공개 주소를 넣는다 (그 Host 헤더로 넘어온 요청을 클라우드 Ingress 가 받도록) */

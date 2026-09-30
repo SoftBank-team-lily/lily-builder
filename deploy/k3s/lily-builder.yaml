@@ -114,6 +114,22 @@ spec:
               value: ap-northeast-2
             - name: BUILDS_TABLE
               value: lily-builds
+            # 클라우드 버스팅 API 토큰 (lily-builder-burst.yaml 참고). Secret 이 없으면 버스팅 API 는 꺼진다
+            - name: BURST_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: lily-burst
+                  key: BURST_API_TOKEN
+                  optional: true
+            # 온프레미스 앱 DB (버스팅 DB 공유). lily-db-provisioner 의 토큰을 같이 쓴다
+            - name: PROVISIONER_URL
+              value: http://db-provisioner.lily-system.svc
+            - name: PROVISIONER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: db-provisioner-env
+                  key: PROVISIONER_API_TOKEN
+                  optional: true
           resources:
             requests:
               cpu: 50m
