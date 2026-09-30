@@ -3,96 +3,361 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lily Deploy</title>
+  <title>Lily</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <style>
-    :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --accent:#be185d; --ok:#15803d; --warn:#b45309; --err:#b91c1c; --soft:rgba(127,127,127,.08); }
-    @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --accent:#f472b6; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; } }
+    :root {
+      --bg: #ffffff;
+      --surface: #ffffff;
+      --ink: #333333;
+      --muted: #5c5c5c;
+      --line: #c1c1c2;
+      --accent: #9b1b30;
+      --accent-ink: #ffffff;
+      --ok: #166534;
+      --warn: #9a3412;
+      --err: #991b1b;
+      --soft: #f5f5f5;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
+      --space-6: 32px;
+      --space-7: 48px;
+      --space-8: 64px;
+      --radius: 0;
+    }
     * { box-sizing: border-box; }
-    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
-    main { max-width:980px; margin:0 auto; padding:32px 16px 64px; }
-    h1 { font-size:22px; margin:0 0 4px; }
-    h2 { font-size:17px; margin:40px 0 4px; display:flex; align-items:baseline; gap:10px; }
-    h2 small { font-size:13px; }
-    p.sub { color:var(--muted); margin:0 0 20px; }
-    nav { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:8px; }
-    nav button { background:none; color:var(--muted); border:0; border-bottom:2px solid transparent; border-radius:0; margin:0; padding:8px 12px; font-weight:600; }
-    nav button.on { color:var(--fg); border-bottom-color:var(--accent); }
-    .panel { display:none; } .panel.on { display:block; }
-    form { max-width:640px; }
-    label { display:block; font-weight:600; margin:14px 0 4px; }
-    small { color:var(--muted); font-weight:400; }
-    input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); font:inherit; }
-    .row { display:flex; gap:12px; } .row > div { flex:1; min-width:0; }
-    button { margin-top:20px; padding:10px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
-    button:disabled { opacity:.5; cursor:default; }
-    .scroll { overflow-x:auto; }
-    table { width:100%; border-collapse:collapse; font-size:14px; margin-top:8px; }
-    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; white-space:nowrap; }
-    th { color:var(--muted); font-weight:600; font-size:13px; }
-    tbody tr.click { cursor:pointer; } tbody tr.click:hover, tbody tr.sel { background:var(--soft); }
-    td.mono, .mono { font-family:ui-monospace, monospace; font-size:12px; }
-    .empty { color:var(--muted); padding:16px 10px; }
-    .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid currentColor; }
-    .SUCCEEDED, .HEALTHY { color:var(--ok); } .FAILED, .DOWN { color:var(--err); }
-    .BUILDING, .DEPLOYING, .QUEUED, .DEGRADED { color:var(--warn); } .STOPPED { color:var(--muted); }
-    .slot { display:block; } .slot.off { color:var(--muted); }
-    #detail { margin-top:16px; display:none; }
-    pre { background:var(--soft); padding:12px; border-radius:6px; overflow-x:auto; font-size:12px; white-space:pre-wrap; margin:8px 0 0; }
-    a { color:var(--accent); }
-    .err { color:var(--err); }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 18px/1.6 "Pretendard Variable", Pretendard, system-ui, sans-serif;
+    }
+    a { color: var(--accent); }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      height: 72px;
+      padding: 0 var(--space-5);
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: var(--space-3);
+      background: none;
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+    }
+    .brand b { font-size: 22px; letter-spacing: -0.03em; }
+    .brand span { color: var(--muted); font-size: 16px; font-weight: 500; }
+    nav { display: flex; gap: var(--space-2); margin-left: auto; height: 100%; }
+    nav button {
+      background: none;
+      border: 0;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      padding: 0 12px;
+      color: var(--ink);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    nav button[aria-current="page"] { border-bottom-color: var(--accent); }
+
+    main { padding: 0 0 80px; }
+    .pad { max-width: 1120px; margin: 0 auto; padding: var(--space-7) var(--space-5) 0; }
+    h1 { font-size: 32px; line-height: 1.35; letter-spacing: -0.03em; margin: 0 0 var(--space-3); font-weight: 700; }
+    h2 { font-size: 20px; margin: var(--space-6) 0 var(--space-3); font-weight: 700; }
+    .lede { color: var(--muted); margin: 0 0 var(--space-5); max-width: 40rem; font-size: 18px; }
+
+    .hero { max-width: 1120px; margin: 0 auto; padding: var(--space-8) var(--space-5) var(--space-6); }
+    .hero h1 { font-size: 40px; max-width: 18em; word-break: keep-all; }
+    .grid-wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-5) var(--space-8); }
+
+    .home-actions { display: flex; gap: var(--space-3); align-items: center; margin-bottom: var(--space-6); }
+    .primary, .ghost {
+      border-radius: 0;
+      padding: 14px 28px;
+      font-weight: 700;
+      font-size: 18px;
+      cursor: pointer;
+    }
+    .primary { background: var(--accent); color: var(--accent-ink); border: 0; }
+    .primary:disabled { opacity: 0.55; cursor: default; }
+    .ghost { background: transparent; border: 1px solid var(--line); }
+    .path {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+    }
+    .path li {
+      background: #fff;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: var(--space-5);
+      min-height: 160px;
+    }
+    .path .idx { display: block; color: var(--accent); font-size: 16px; font-weight: 700; margin-bottom: var(--space-3); }
+    .path strong { display: block; font-size: 20px; margin-bottom: var(--space-2); }
+    .path span { color: var(--muted); font-size: 18px; }
+
+    .sheet {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: var(--space-5);
+    }
+    .steps { display: flex; gap: var(--space-4); margin: 0 0 var(--space-5); padding: 0; list-style: none; }
+    .steps li { color: var(--muted); font-weight: 650; }
+    .steps li[aria-current="step"] { color: var(--ink); }
+    .steps .n {
+      display: inline-grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      margin-right: 8px;
+      border: 1px solid var(--line);
+      font-size: 16px;
+    }
+    .steps li[aria-current="step"] .n { background: var(--accent); color: #fff; border-color: var(--accent); }
+    label { display: block; font-weight: 650; margin: var(--space-4) 0 var(--space-1); }
+    label span { color: var(--muted); font-weight: 400; }
+    input, select, textarea {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      background: #fff;
+    }
+    ::placeholder { color: #8a8a8a; }
+    .row { display: flex; gap: var(--space-3); }
+    .row > div { flex: 1; min-width: 0; }
+    .actions { display: flex; gap: var(--space-2); margin-top: var(--space-5); }
+    .err { color: var(--err); min-height: 1.4em; margin: var(--space-2) 0 0; }
+
+    .stage-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+    .stage {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      gap: var(--space-3);
+      align-items: center;
+      padding: var(--space-3) var(--space-4);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+    .stage[data-state="done"] { border-color: var(--line); }
+    .stage[data-state="active"] { border-color: var(--accent); }
+    .stage[data-state="failed"] { border-color: #fecaca; }
+    .mark {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--line);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+    }
+    .stage[data-state="done"] .mark { background: var(--ok); color: #fff; border-color: var(--ok); }
+    .stage[data-state="failed"] .mark { background: var(--err); color: #fff; border-color: var(--err); }
+    .stage[data-state="active"] .mark {
+      border-color: var(--accent);
+      border-right-color: transparent;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .stage small { color: var(--muted); }
+    pre {
+      background: var(--soft);
+      border-radius: var(--radius);
+      padding: var(--space-3);
+      overflow-x: auto;
+      font-size: 16px;
+      white-space: pre-wrap;
+    }
+
+    .dash-head { display: flex; justify-content: space-between; gap: var(--space-4); align-items: flex-start; flex-wrap: wrap; }
+    .sample {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin: var(--space-4) 0 var(--space-5); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+    .metric { background: #fff; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: var(--space-4); }
+    .metric b { display: block; font-size: 28px; letter-spacing: -0.03em; line-height: 1.3; }
+    .metric span { color: var(--muted); font-size: 16px; }
+    .bars { display: flex; align-items: flex-end; gap: 4px; height: 72px; margin-top: var(--space-3); }
+    .bars i { display: block; flex: 1; background: var(--accent); opacity: 0.75; border-radius: 2px 2px 0 0; }
+    .meta { color: var(--muted); font-size: 14px; }
+
+    .scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 18px; background: #fff; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+    th { color: var(--muted); font-size: 16px; font-weight: 700; }
+    tbody tr.click { cursor: pointer; }
+    tbody tr.click:hover, tbody tr.sel { background: var(--soft); }
+    .mono { font-family: ui-monospace, monospace; font-size: 16px; }
+    .empty { color: var(--muted); }
+    .badge { display: inline-block; padding: 2px 8px; font-size: 16px; font-weight: 700; border: 1px solid currentColor; }
+    .SUCCEEDED, .HEALTHY { color: var(--ok); }
+    .FAILED, .DOWN { color: var(--err); }
+    .BUILDING, .DEPLOYING, .QUEUED, .DEGRADED { color: var(--warn); }
+    .STOPPED { color: var(--muted); }
+    .slot { display: block; }
+    .slot.off { color: var(--muted); }
+    .view { display: none; }
+    .view.on { display: block; }
+
+    @media (max-width: 720px) {
+      .path, .metrics { grid-template-columns: 1fr; }
+      .row { display: grid; }
+      .hero h1, h1 { font-size: 32px; }
+      .brand span { display: none; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <h1>Lily Deploy</h1>
-  <p class="sub">GitHub 레포를 빌드해서 k3s 에 배포합니다. 레포에 Dockerfile 이 있어야 합니다.</p>
-
-  <nav>
-    <button data-tab="deploy" class="on">새 배포</button>
-    <button data-tab="apps">배포된 앱</button>
-    <button data-tab="history">배포 이력</button>
+<header class="top">
+  <button class="brand" type="button" id="homeBtn"><b>Lily</b><span>배포 플랫폼</span></button>
+  <nav aria-label="주요">
+    <button type="button" data-view="home" aria-current="page">배포</button>
+    <button type="button" data-view="apps">실행 중</button>
+    <button type="button" data-view="history">이력</button>
   </nav>
+</header>
+<main>
+  <section id="home" class="view on">
+    <div class="hero">
+      <h1>GitHub 레포 URL 하나로 빌드부터 배포, 트래픽 전환, 모니터링까지 자동으로 처리하는 배포 플랫폼</h1>
+      <div class="home-actions">
+        <button class="primary" type="button" id="startBtn">배포하기</button>
+      </div>
+    </div>
+    <div class="grid-wrap">
+      <ol class="path">
+        <li><span class="idx">01</span><strong>소스</strong><span>GitHub 주소, 브랜치, 비공개 토큰</span></li>
+        <li><span class="idx">02</span><strong>실행</strong><span>앱 이름, 포트, 데이터베이스</span></li>
+        <li><span class="idx">03</span><strong>진행</strong><span>빌드와 배포를 단계로 보여 줍니다</span></li>
+      </ol>
+    </div>
+  </section>
 
-  <section id="deploy" class="panel on">
-    <form id="form">
-      <label>GitHub 주소</label>
-      <input name="repoUrl" required placeholder="https://github.com/SoftBank-team-lily/lily-blog-sample">
+  <section id="wizard" class="view pad" aria-labelledby="wizardTitle">
+    <form id="form" class="sheet">
+      <h1 id="wizardTitle">배포 설정</h1>
+      <ol class="steps" aria-label="설정 단계">
+        <li id="stepLabel1" aria-current="step"><span class="n">1</span>소스</li>
+        <li id="stepLabel2"><span class="n">2</span>실행</li>
+      </ol>
 
-      <div class="row">
-        <div><label>브랜치 <small>비우면 main</small></label><input name="branch" placeholder="main"></div>
-        <div><label>폴더 <small>Dockerfile 위치</small></label><input name="rootDir" placeholder="(루트)"></div>
+      <div id="step1">
+        <label for="repoUrl">GitHub 주소</label>
+        <input id="repoUrl" name="repoUrl" required placeholder="https://github.com/org/app" autocomplete="url">
+        <div class="row">
+          <div>
+            <label for="branch">브랜치 <span>비우면 main</span></label>
+            <input id="branch" name="branch" placeholder="main">
+          </div>
+          <div>
+            <label for="rootDir">폴더 <span>Dockerfile 위치</span></label>
+            <input id="rootDir" name="rootDir" placeholder="레포 루트">
+          </div>
+        </div>
+        <label for="token">토큰 <span>비공개 레포만</span></label>
+        <input id="token" name="token" type="password" autocomplete="off">
       </div>
 
-      <label>토큰 <small>private 레포만</small></label>
-      <input name="token" type="password" autocomplete="off">
-
-      <div class="row">
-        <div><label>앱 이름 <small>소문자·숫자·-</small></label><input name="appName" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" maxlength="55" placeholder="blog"></div>
-        <div><label>포트</label><input name="targetPort" type="number" value="8080" min="1" max="65535" required></div>
+      <div id="step2" hidden>
+        <div class="row">
+          <div>
+            <label for="appName">앱 이름 <span>소문자, 숫자, -</span></label>
+            <input id="appName" name="appName" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" maxlength="55" placeholder="blog">
+          </div>
+          <div>
+            <label for="targetPort">포트</label>
+            <input id="targetPort" name="targetPort" type="number" value="8080" min="1" max="65535" required>
+          </div>
+        </div>
+        <label for="database">데이터베이스</label>
+        <select id="database" name="database">
+          <option value="">필요 없음</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="mysql">MySQL</option>
+        </select>
+        <div class="row">
+          <div>
+            <label for="readinessPath">Readiness 경로 <span>비우면 기본값</span></label>
+            <input id="readinessPath" name="readinessPath" placeholder="/actuator/health/readiness">
+          </div>
+          <div>
+            <label for="livenessPath">Liveness 경로</label>
+            <input id="livenessPath" name="livenessPath" placeholder="/actuator/health/liveness">
+          </div>
+        </div>
+        <label for="env">환경변수 <span>한 줄에 KEY=VALUE</span></label>
+        <textarea id="env" name="env" rows="3" placeholder="SPRING_PROFILES_ACTIVE=prod"></textarea>
       </div>
 
-      <label>DB</label>
-      <select name="database">
-        <option value="">필요 없음</option>
-        <option value="postgres">PostgreSQL</option>
-        <option value="mysql">MySQL</option>
-      </select>
-
-      <div class="row">
-        <div><label>Readiness 경로 <small>비우면 기본값</small></label><input name="readinessPath" placeholder="/actuator/health/readiness"></div>
-        <div><label>Liveness 경로</label><input name="livenessPath" placeholder="/actuator/health/liveness"></div>
+      <p id="formError" class="err" role="alert"></p>
+      <div class="actions">
+        <button class="ghost" type="button" id="backBtn">이전</button>
+        <button class="primary" type="button" id="nextBtn">다음</button>
+        <button class="primary" type="submit" id="submitBtn" hidden>배포 시작</button>
       </div>
-
-      <label>환경변수 <small>한 줄에 KEY=VALUE</small></label>
-      <textarea name="env" rows="3" placeholder="SPRING_PROFILES_ACTIVE=prod"></textarea>
-
-      <button id="submit">배포</button>
-      <p id="formError" class="err"></p>
     </form>
   </section>
 
-  <section id="apps" class="panel">
-    <h2>지금 떠 있는 앱 <small>k3s 기준 · 10초마다 갱신</small></h2>
+  <section id="run" class="view pad" aria-labelledby="runTitle">
+    <h1 id="runTitle">배포 진행</h1>
+    <p class="lede" id="runLede"></p>
+    <ol class="stage-list" id="stages" aria-label="배포 단계"></ol>
+    <p id="runLive" class="meta" aria-live="polite"></p>
+    <h2>로그</h2>
+    <pre id="runLogs"></pre>
+  </section>
+
+  <section id="dashboard" class="view pad" aria-labelledby="dashTitle">
+    <div class="dash-head">
+      <div>
+        <h1 id="dashTitle">앱</h1>
+        <p class="lede" id="dashUrl"></p>
+      </div>
+      <button class="ghost" type="button" id="anotherBtn">다른 앱 배포</button>
+    </div>
+    <h2>운영 지표 <span class="sample">샘플</span></h2>
+    <p class="meta">수집기가 연결되기 전이라 이 배포 건에 고정된 샘플 값입니다.</p>
+    <div class="metrics" id="metrics"></div>
+    <div class="sheet">
+      <h2>최근 1시간 요청 <span class="sample">샘플</span></h2>
+      <div class="bars" id="bars" aria-hidden="true"></div>
+    </div>
+    <h2>로그</h2>
+    <pre id="dashLogs"></pre>
+  </section>
+
+  <section id="apps" class="view pad">
+    <h1>실행 중</h1>
+    <p class="lede">클러스터에 떠 있는 앱입니다. 10초마다 다시 읽습니다.</p>
     <div class="scroll">
       <table>
         <thead><tr><th>앱</th><th>상태</th><th>전략</th><th>슬롯 · 이미지</th><th>접속</th></tr></thead>
@@ -101,39 +366,94 @@
     </div>
   </section>
 
-  <section id="history" class="panel">
-    <h2>배포 이력 <small>빌더 기준 · 최신순 · 행을 누르면 로그</small></h2>
+  <section id="history" class="view pad">
+    <h1>배포 이력</h1>
+    <p class="lede">행을 누르면 진행 화면이나 대시보드로 이동합니다.</p>
     <div class="scroll">
       <table>
-        <thead><tr><th>시각</th><th>앱</th><th>결과</th><th>레포 · 브랜치</th><th>DB</th><th>이미지</th></tr></thead>
+        <thead><tr><th>시각</th><th>앱</th><th>결과</th><th>레포</th><th>DB</th><th>이미지</th></tr></thead>
         <tbody id="historyRows"><tr><td colspan="6" class="empty">불러오는 중</td></tr></tbody>
       </table>
-    </div>
-    <div id="detail">
-      <div><b id="detailTitle"></b> <span id="detailStatus" class="badge"></span> <span id="detailUrl"></span></div>
-      <pre id="detailLogs"></pre>
     </div>
   </section>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let selected = null;
+  const STAGES = [
+    { id: 'QUEUED', title: '대기', detail: '요청을 접수했습니다.' },
+    { id: 'BUILDING', title: '이미지 빌드', detail: '레포를 클론하고 이미지를 만듭니다.' },
+    { id: 'DEPLOYING', title: '클러스터 배포', detail: '준비되면 트래픽을 연결합니다.' },
+    { id: 'SUCCEEDED', title: '배포 완료', detail: '접속 주소를 열 수 있습니다.' }
+  ];
+  let step = 1;
+  let activeId = null;
+  let pollTimer = null;
 
-  // 탭
-  document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
-  function showTab(name) {
-    document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
-    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', p.id === name));
-    if (name === 'apps') loadApps();
-    if (name === 'history') loadHistory();
+  document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
+  $('homeBtn').addEventListener('click', () => show('home'));
+  $('startBtn').addEventListener('click', openWizard);
+  $('anotherBtn').addEventListener('click', openWizard);
+  $('backBtn').addEventListener('click', () => { if (step === 1) show('home'); else setStep(1); });
+  $('nextBtn').addEventListener('click', () => { if (validateStep(1)) setStep(2); });
+  $('form').addEventListener('submit', startBuild);
+
+  function markStep(node, on) {
+    if (on) node.setAttribute('aria-current', 'step');
+    else node.removeAttribute('aria-current');
   }
 
-  // 새 배포
-  $('form').addEventListener('submit', async (e) => {
+  function show(name) {
+    document.querySelectorAll('nav button').forEach((b) => {
+      if (b.dataset.view === name) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('on', v.id === name));
+    if (name !== 'run' && name !== 'dashboard') stopPoll();
+    if (name === 'apps') loadApps();
+    if (name === 'history') loadHistory();
+    const heading = document.querySelector('#' + name + ' h1');
+    if (heading) heading.focus?.();
+  }
+
+  function openWizard() {
+    step = 1;
+    $('formError').textContent = '';
+    setStep(1);
+    show('wizard');
+    $('repoUrl').focus();
+  }
+
+  function setStep(n) {
+    step = n;
+    $('step1').hidden = n !== 1;
+    $('step2').hidden = n !== 2;
+    $('nextBtn').hidden = n !== 1;
+    $('submitBtn').hidden = n !== 2;
+    markStep($('stepLabel1'), n === 1);
+    markStep($('stepLabel2'), n === 2);
+    $('backBtn').textContent = n === 1 ? '취소' : '이전';
+    $('wizardTitle').textContent = n === 1 ? '소스를 확인합니다' : '실행 방식을 정합니다';
+  }
+
+  function validateStep(n) {
+    $('formError').textContent = '';
+    if (n === 1) {
+      const url = $('repoUrl').value.trim();
+      if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+?(\.git)?\/?$/.test(url)) {
+        $('formError').textContent = 'https://github.com/조직/레포 형식의 주소가 필요합니다.';
+        $('repoUrl').focus();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function startBuild(e) {
     e.preventDefault();
+    if (!validateStep(1) || !$('form').reportValidity()) return;
     const f = new FormData($('form'));
     const env = {};
-    (f.get('env') || '').split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+    String(f.get('env') || '').split('\n').map((s) => s.trim()).filter(Boolean).forEach((line) => {
       const i = line.indexOf('=');
       if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
     });
@@ -142,19 +462,158 @@
       appName: f.get('appName'), targetPort: Number(f.get('targetPort')), database: f.get('database'),
       readinessPath: f.get('readinessPath'), livenessPath: f.get('livenessPath'), env
     };
-    $('submit').disabled = true;
+    $('submitBtn').disabled = true;
     $('formError').textContent = '';
     try {
-      const res = await fetch('/api/builds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!res.ok) { $('formError').textContent = '요청 오류 ' + res.status + ': ' + await res.text(); return; }
-      selected = (await res.json()).id;
-      showTab('history');
+      const res = await fetch('/api/builds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        let detail = await res.text();
+        try {
+          const parsed = JSON.parse(detail);
+          detail = parsed.message || parsed.error || detail;
+        } catch (ignore) { /* 본문이 JSON이 아니면 그대로 보여 준다 */ }
+        $('formError').textContent = '배포를 시작하지 못했습니다. ' + detail;
+        return;
+      }
+      const build = await res.json();
+      activeId = build.id;
+      renderRun(build);
+      show('run');
+      poll();
     } finally {
-      $('submit').disabled = false;
+      $('submitBtn').disabled = false;
     }
-  });
+  }
 
-  // 배포된 앱 (k3s)
+  function renderRun(b) {
+    $('runTitle').textContent = b.appName + ' 배포';
+    $('runLede').textContent = shortRepo(b.repoUrl) + ' · ' + (b.branch || 'main');
+    const failedAt = b.status === 'FAILED' ? inferFailedStage(b) : -1;
+    const current = STAGES.findIndex((s) => s.id === b.status);
+    $('stages').replaceChildren();
+    STAGES.forEach((stage, i) => {
+      let state = 'wait';
+      if (b.status === 'FAILED') state = i < failedAt ? 'done' : i === failedAt ? 'failed' : 'wait';
+      else if (b.status === 'SUCCEEDED') state = 'done';
+      else if (i < current) state = 'done';
+      else if (i === current) state = 'active';
+      const li = document.createElement('li');
+      li.className = 'stage';
+      li.dataset.state = state;
+      if (state === 'active') li.setAttribute('aria-current', 'step');
+      const mark = document.createElement('span');
+      mark.className = 'mark';
+      mark.textContent = state === 'done' ? '✓' : state === 'failed' ? '!' : '';
+      mark.setAttribute('aria-hidden', 'true');
+      const text = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = stage.title;
+      const detail = document.createElement('small');
+      detail.textContent = state === 'failed' ? '이 단계에서 멈췄습니다.' : stage.detail;
+      text.append(title, document.createElement('br'), detail);
+      const label = document.createElement('span');
+      label.textContent = state === 'done' ? '완료' : state === 'active' ? '진행 중' : state === 'failed' ? '실패' : '대기';
+      li.append(mark, text, label);
+      $('stages').append(li);
+    });
+    $('runLive').textContent = b.status === 'FAILED'
+      ? '배포가 실패했습니다.'
+      : (STAGES[current] ? STAGES[current].title + ' 단계입니다.' : '');
+    $('runLogs').textContent = (b.logs || []).join('\n') || '아직 로그가 없습니다.';
+    if (b.status === 'SUCCEEDED') renderDashboard(b);
+  }
+
+  function inferFailedStage(b) {
+    const logs = (b.logs || []).join('\n').toLowerCase();
+    if (logs.includes('deploy')) return 2;
+    if (logs.includes('build') || logs.includes('kaniko') || logs.includes('image')) return 1;
+    return 0;
+  }
+
+  function renderDashboard(b) {
+    const m = metricsFor(b.id);
+    $('dashTitle').textContent = b.appName;
+    $('dashUrl').replaceChildren();
+    if (b.url) {
+      const a = document.createElement('a');
+      a.href = b.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = b.url;
+      $('dashUrl').append(a);
+    } else {
+      $('dashUrl').textContent = '접속 주소가 아직 없습니다.';
+    }
+    const cards = [
+      [m.rps + ' req/s', '요청'],
+      [m.p95 + ' ms', 'p95 지연'],
+      [m.errors + '%', '오류율'],
+      [m.cpu + '%', 'CPU'],
+      [m.mem + '%', '메모리'],
+      [m.replicas + ' / ' + m.replicas, 'Ready 파드'],
+      [b.database || '없음', '데이터베이스'],
+      [b.image ? b.image.split('/').pop() : '-', '이미지']
+    ];
+    $('metrics').replaceChildren();
+    cards.forEach(([value, label]) => {
+      const card = document.createElement('div');
+      card.className = 'metric';
+      const num = document.createElement('b');
+      num.textContent = value;
+      const cap = document.createElement('span');
+      cap.textContent = label;
+      card.append(num, cap);
+      $('metrics').append(card);
+    });
+    $('bars').replaceChildren();
+    m.series.forEach((h) => {
+      const bar = document.createElement('i');
+      bar.style.height = h + '%';
+      $('bars').append(bar);
+    });
+    $('dashLogs').textContent = (b.logs || []).join('\n');
+    show('dashboard');
+  }
+
+  function metricsFor(id) {
+    let n = 0;
+    for (const ch of String(id)) n = (n * 33 + ch.charCodeAt(0)) % 997;
+    const series = [];
+    for (let i = 0; i < 24; i++) series.push(25 + ((n * (i + 3)) % 70));
+    return {
+      rps: 12 + (n % 90),
+      p95: 40 + (n % 160),
+      errors: ((n % 12) / 10).toFixed(1),
+      cpu: 18 + (n % 47),
+      mem: 28 + (n % 40),
+      replicas: 1 + (n % 2),
+      series
+    };
+  }
+
+  function poll() {
+    stopPoll();
+    pollTimer = setInterval(async () => {
+      if (!activeId) return;
+      try {
+        const res = await fetch('/api/builds/' + activeId);
+        if (!res.ok) return;
+        const build = await res.json();
+        renderRun(build);
+        if (build.status === 'SUCCEEDED' || build.status === 'FAILED') stopPoll();
+      } catch (e) { /* 다음 주기에 다시 시도 */ }
+    }, 2000);
+  }
+
+  function stopPoll() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
   async function loadApps() {
     const tbody = $('appRows');
     try {
@@ -163,12 +622,11 @@
       const apps = await res.json();
       tbody.replaceChildren();
       if (apps.length === 0) return tbody.append(emptyRow(5, '떠 있는 앱이 없습니다'));
-      apps.forEach(a => {
+      apps.forEach((a) => {
         const slots = cell();
-        a.slots.forEach(s => {
-          const line = el('span', 'slot mono' + (s.serving ? '' : ' off'),
-            (s.serving ? '● ' : '○ ') + s.slot + ' ' + s.readyReplicas + '/' + s.replicas + '  ' + (s.image || ''));
-          slots.append(line);
+        a.slots.forEach((s) => {
+          slots.append(el('span', 'slot mono' + (s.serving ? '' : ' off'),
+            (s.serving ? '● ' : '○ ') + s.slot + ' ' + s.readyReplicas + '/' + s.replicas + '  ' + (s.image || '')));
         });
         tbody.append(row([
           text(a.appName + (a.namespace === 'default' ? '' : ' (' + a.namespace + ')')),
@@ -183,7 +641,6 @@
     }
   }
 
-  // 배포 이력 (DynamoDB)
   async function loadHistory() {
     const tbody = $('historyRows');
     try {
@@ -192,48 +649,50 @@
       const builds = await res.json();
       tbody.replaceChildren();
       if (builds.length === 0) return tbody.append(emptyRow(6, '배포 이력이 없습니다'));
-      builds.forEach(b => {
+      builds.forEach((b) => {
         const tr = row([
           text(new Date(b.createdAt).toLocaleString()),
           text(b.appName),
           badge(b.status, b.status),
-          text(shortRepo(b.repoUrl) + ' · ' + b.branch + (b.rootDir ? ' /' + b.rootDir : '')),
+          text(shortRepo(b.repoUrl) + ' · ' + b.branch),
           text(b.database || '-'),
           text(b.image ? b.image.split('/').pop() : '-', 'mono')
         ]);
-        tr.className = 'click' + (b.id === selected ? ' sel' : '');
-        tr.addEventListener('click', () => { selected = b.id; showDetail(b); loadHistory(); });
+        tr.className = 'click';
+        tr.addEventListener('click', () => openBuild(b));
         tbody.append(tr);
-        if (b.id === selected) showDetail(b);
       });
     } catch (e) {
       tbody.replaceChildren(emptyRow(6, '이력 조회 실패: ' + e.message));
     }
   }
 
-  function showDetail(b) {
-    $('detail').style.display = 'block';
-    $('detailTitle').textContent = b.appName + ' · ' + new Date(b.createdAt).toLocaleString();
-    $('detailStatus').textContent = b.status;
-    $('detailStatus').className = 'badge ' + b.status;
-    $('detailUrl').replaceChildren(b.url ? anchor(b.url) : '');
-    $('detailLogs').textContent = (b.logs || []).join('\n');
+  function openBuild(b) {
+    activeId = b.id;
+    if (b.status === 'SUCCEEDED') renderDashboard(b);
+    else {
+      renderRun(b);
+      show('run');
+      if (b.status !== 'FAILED') poll();
+    }
   }
 
-  // 열려 있는 탭만 주기적으로 갱신
   setInterval(() => {
     if ($('apps').classList.contains('on')) loadApps();
-    if ($('history').classList.contains('on')) loadHistory();
-  }, 5000);
+  }, 10000);
 
-  // 작은 DOM 헬퍼 (사용자 입력은 textContent 로만 넣는다)
-  function el(tag, cls, content) { const e = document.createElement(tag); if (cls) e.className = cls; if (content != null) e.textContent = content; return e; }
+  function el(tag, cls, content) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (content != null) e.textContent = content;
+    return e;
+  }
   function cell() { return el('td'); }
   function text(v, cls) { return el('td', cls, v); }
   function badge(cls, v) { const td = cell(); td.append(el('span', 'badge ' + cls, v)); return td; }
-  function anchor(url) { const a = el('a', null, url); a.href = url; a.target = '_blank'; return a; }
+  function anchor(url) { const a = el('a', null, url); a.href = url; a.target = '_blank'; a.rel = 'noopener'; return a; }
   function link(url) { const td = cell(); if (url) td.append(anchor(url)); else td.textContent = '-'; return td; }
-  function row(cells) { const tr = el('tr'); cells.forEach(c => tr.append(c)); return tr; }
+  function row(cells) { const tr = el('tr'); cells.forEach((c) => tr.append(c)); return tr; }
   function emptyRow(n, msg) { const tr = el('tr'); const td = el('td', 'empty', msg); td.colSpan = n; tr.append(td); return tr; }
   function shortRepo(url) { return (url || '').replace('https://github.com/', ''); }
 </script>
