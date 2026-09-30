@@ -11,6 +11,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param kanikoImage    Kaniko 실행 이미지
  * @param buildTimeoutSeconds 빌드 한 번에 기다리는 최대 시간
  * @param dynamodb       배포 이력 테이블
+ * @param burstToken     /api/burst/** (온프레미스 에이전트용) 인증 토큰. 비우면 버스팅 API 를 끈다
  */
 @ConfigurationProperties("lily.builder")
 public record BuilderProperties(
@@ -20,7 +21,8 @@ public record BuilderProperties(
         String cicdUrl,
         @DefaultValue("gcr.io/kaniko-project/executor:v1.23.2") String kanikoImage,
         @DefaultValue("900") long buildTimeoutSeconds,
-        @DefaultValue Dynamodb dynamodb) {
+        @DefaultValue Dynamodb dynamodb,
+        @DefaultValue("") String burstToken) {
 
     /** ECR 이면 Kaniko 에 내장된 ecr-login 으로 인증한다 (실행 노드의 IAM 역할) */
     public boolean ecr() {

@@ -21,6 +21,9 @@ import java.util.Map;
  * @param readinessPath 비우면 lily-cicd 기본값 (/actuator/health/readiness)
  * @param livenessPath  비우면 lily-cicd 기본값 (/actuator/health/liveness)
  * @param env           앱에 넣을 환경변수
+ * @param host          Ingress 호스트 전체. 비우면 lily-cicd 기본값 ({@code {appName}.{domain}}).
+ *                      클라우드 버스팅에서 온프레미스 공개 주소로 들어온 요청을 그대로 받을 때 넣는다
+ * @param standby       true 면 배포가 끝난 뒤 레플리카를 0 으로 내려 대기시킨다 (클라우드 버스팅)
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -32,7 +35,21 @@ public record BuildRequest(
         @Pattern(regexp = "postgres|mysql|") String database,
         String readinessPath,
         String livenessPath,
-        Map<String, String> env) {
+        Map<String, String> env,
+        @Pattern(regexp = "([a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+)?") String host,
+        Boolean standby) {
+
+    /** 배포 폼 (호스트 지정, 대기 없이) */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        int targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, null, null);
+    }
+
+    public boolean isStandby() {
+        return Boolean.TRUE.equals(standby);
+    }
 
     public String branchOrDefault() {
         return branch == null || branch.isBlank() ? "main" : branch;
