@@ -38,7 +38,22 @@ public class CicdClient {
         body.put("livenessPath", blankToNull(request.livenessPath()));
         body.put("database", blankToNull(request.database()));
         body.put("extraEnv", request.env() == null ? Map.of() : request.env());
+        body.put("host", blankToNull(request.host()));
         return http.post().uri("/api/deployments").body(body).retrieve().body(Result.class);
+    }
+
+    /** 활성 슬롯 상태. 앱이 없으면 null */
+    public AppStatus status(String appName) {
+        return http.get().uri("/api/apps/{app}", appName).retrieve()
+                .onStatus(s -> s.value() == 404, (req, res) -> { })
+                .body(AppStatus.class);
+    }
+
+    /** 활성 슬롯 레플리카 조정 */
+    public AppStatus scale(String appName, int replicas) {
+        return http.put().uri("/api/apps/{app}/replicas", appName)
+                .body(Map.of("replicas", replicas))
+                .retrieve().body(AppStatus.class);
     }
 
     private static String blankToNull(String value) {
@@ -47,4 +62,7 @@ public class CicdClient {
 
     /** lily-cicd 의 DeploymentResultDto */
     public record Result(String status, String activeColor, String targetHostUrl, java.util.List<String> logs) {}
+
+    /** lily-cicd 의 AppController.AppStatus */
+    public record AppStatus(String appName, String namespace, String activeColor, int replicas, int readyReplicas) {}
 }

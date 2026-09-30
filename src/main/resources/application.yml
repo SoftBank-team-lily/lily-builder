@@ -16,6 +16,8 @@ lily:
     insecure: ${BUILDER_INSECURE:false}
     # 빌드가 끝나면 배포를 요청할 lily-cicd 주소
     cicd-url: ${CICD_URL:http://localhost:8090}
+    # 온프레미스 에이전트가 부르는 /api/burst/** 의 토큰. 비우면 버스팅 API 를 끈다
+    burst-token: ${BURST_API_TOKEN:}
     build-timeout-seconds: ${BUILD_TIMEOUT_SECONDS:900}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:

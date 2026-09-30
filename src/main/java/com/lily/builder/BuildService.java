@@ -74,6 +74,11 @@ public class BuildService {
                 result.logs().forEach(line -> build.log("cicd: " + line));
             }
             build.url(result == null ? null : result.targetHostUrl());
+            if (request.isStandby()) {
+                // 클라우드 버스팅 대기: 이미지·Ingress·DB 는 준비해 두고 Pod 만 0 으로
+                cicd.scale(request.appName(), 0);
+                build.log("standby: scaled to 0");
+            }
             update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
         } catch (RestClientResponseException e) {
             fail(build, "cicd " + e.getStatusCode().value() + ": " + e.getResponseBodyAsString());
