@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lily Deploy</title>
+  <style>
+    :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --accent:#be185d; --ok:#15803d; --err:#b91c1c; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --accent:#f472b6; --ok:#4ade80; --err:#f87171; } }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+    main { max-width:640px; margin:0 auto; padding:32px 16px; }
+    h1 { font-size:22px; margin:0 0 4px; }
+    p.sub { color:var(--muted); margin:0 0 24px; }
+    label { display:block; font-weight:600; margin:14px 0 4px; }
+    small { color:var(--muted); font-weight:400; }
+    input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); font:inherit; }
+    .row { display:flex; gap:12px; } .row > div { flex:1; }
+    button { margin-top:20px; padding:10px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:default; }
+    #result { margin-top:28px; display:none; }
+    .status { font-weight:700; } .SUCCEEDED { color:var(--ok); } .FAILED { color:var(--err); }
+    pre { background:rgba(127,127,127,.1); padding:12px; border-radius:6px; overflow-x:auto; font-size:12px; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Lily Deploy</h1>
+  <p class="sub">GitHub 레포를 빌드해서 k3s 에 배포합니다. 레포에 Dockerfile 이 있어야 합니다.</p>
+
+  <form id="form">
+    <label>GitHub 주소</label>
+    <input name="repoUrl" required placeholder="https://github.com/SoftBank-team-lily/lily-blog-sample">
+
+    <div class="row">
+      <div><label>브랜치 <small>비우면 main</small></label><input name="branch" placeholder="main"></div>
+      <div><label>폴더 <small>Dockerfile 위치</small></label><input name="rootDir" placeholder="(루트)"></div>
+    </div>
+
+    <label>토큰 <small>private 레포만</small></label>
+    <input name="token" type="password" autocomplete="off">
+
+    <div class="row">
+      <div><label>앱 이름 <small>소문자·숫자·-</small></label><input name="appName" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?" maxlength="55" placeholder="blog"></div>
+      <div><label>포트</label><input name="targetPort" type="number" value="8080" min="1" max="65535" required></div>
+    </div>
+
+    <label>DB</label>
+    <select name="database">
+      <option value="">필요 없음</option>
+      <option value="postgres">PostgreSQL</option>
+      <option value="mysql">MySQL</option>
+    </select>
+
+    <div class="row">
+      <div><label>Readiness 경로 <small>비우면 기본값</small></label><input name="readinessPath" placeholder="/actuator/health/readiness"></div>
+      <div><label>Liveness 경로</label><input name="livenessPath" placeholder="/actuator/health/liveness"></div>
+    </div>
+
+    <label>환경변수 <small>한 줄에 KEY=VALUE</small></label>
+    <textarea name="env" rows="3" placeholder="SPRING_PROFILES_ACTIVE=prod"></textarea>
+
+    <button id="submit">배포</button>
+  </form>
+
+  <section id="result">
+    <div>상태: <span id="status" class="status"></span></div>
+    <div id="url"></div>
+    <pre id="logs"></pre>
+  </section>
+</main>
+<script>
+  const form = document.getElementById('form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const env = {};
+    (f.get('env') || '').split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+      const i = line.indexOf('=');
+      if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    const body = {
+      repoUrl: f.get('repoUrl'), branch: f.get('branch'), token: f.get('token'), rootDir: f.get('rootDir'),
+      appName: f.get('appName'), targetPort: Number(f.get('targetPort')), database: f.get('database'),
+      readinessPath: f.get('readinessPath'), livenessPath: f.get('livenessPath'), env
+    };
+    document.getElementById('submit').disabled = true;
+    const res = await fetch('/api/builds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      show({ status: 'FAILED', logs: ['요청 오류 ' + res.status + ': ' + await res.text()] });
+      document.getElementById('submit').disabled = false;
+      return;
+    }
+    poll((await res.json()).id);
+  });
+
+  async function poll(id) {
+    const build = await (await fetch('/api/builds/' + id)).json();
+    show(build);
+    if (build.status === 'SUCCEEDED' || build.status === 'FAILED') {
+      document.getElementById('submit').disabled = false;
+      return;
+    }
+    setTimeout(() => poll(id), 2000);
+  }
+
+  function show(build) {
+    document.getElementById('result').style.display = 'block';
+    const s = document.getElementById('status');
+    s.textContent = build.status; s.className = 'status ' + build.status;
+    const url = document.getElementById('url');
+    url.innerHTML = '';
+    if (build.url) { const a = document.createElement('a'); a.href = build.url; a.textContent = build.url; a.target = '_blank'; url.append('접속: ', a); }
+    document.getElementById('logs').textContent = (build.logs || []).join('\n');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,92 @@
+# lily-builder 를 k3s 에 올리는 매니페스트.
+# - 빌드 Job(Kaniko)은 lily-builds namespace 에 뜬다. 빌더는 그 namespace 의 Job/Secret/ConfigMap/로그만 다룬다
+# - ECR 에 push 하려면 Kaniko 가 뜨는 노드의 IAM 역할에 ECR push 권한이 있어야 한다
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lily-builds
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lily-builder
+  namespace: lily-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lily-builder
+  namespace: lily-builds
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["create", "get", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lily-builder
+  namespace: lily-builds
+subjects:
+  - kind: ServiceAccount
+    name: lily-builder
+    namespace: lily-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lily-builder
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lily-builder
+  namespace: lily-system
+  labels:
+    app: lily-builder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lily-builder
+  template:
+    metadata:
+      labels:
+        app: lily-builder
+    spec:
+      serviceAccountName: lily-builder
+      containers:
+        - name: lily-builder
+          image: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/lily-builder:latest
+          ports:
+            - name: http
+              containerPort: 8070
+          env:
+            - name: BUILDER_REGISTRY
+              value: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com
+            - name: CICD_URL
+              value: http://lily-cicd.lily-system.svc
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lily-builder
+  namespace: lily-system
+spec:
+  selector:
+    app: lily-builder
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

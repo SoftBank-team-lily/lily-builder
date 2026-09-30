@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: lily-builder
+
+server:
+  # lily-blog-sample(8080), lily-cicd(8090) 와 겹치지 않게
+  port: 8070
+
+lily:
+  builder:
+    # Kaniko Job 을 띄울 namespace
+    namespace: ${BUILDER_NAMESPACE:lily-builds}
+    # 이미지를 올릴 레지스트리. ECR 이면 Kaniko 가 실행 노드의 IAM 역할로 인증한다
+    registry: ${BUILDER_REGISTRY:}
+    # http 레지스트리(로컬 테스트용)면 true
+    insecure: ${BUILDER_INSECURE:false}
+    # 빌드가 끝나면 배포를 요청할 lily-cicd 주소
+    cicd-url: ${CICD_URL:http://localhost:8090}
+    build-timeout-seconds: ${BUILD_TIMEOUT_SECONDS:900}
