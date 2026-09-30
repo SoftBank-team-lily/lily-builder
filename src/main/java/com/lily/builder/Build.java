@@ -10,7 +10,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class Build {
 
-    public enum Status { QUEUED, BUILDING, DEPLOYING, SUCCEEDED, FAILED }
+    /** ROLLED_BACK: canary 판정에서 떨어져 새 버전을 버렸다. 트래픽은 이전 버전 그대로 */
+    public enum Status { QUEUED, BUILDING, DEPLOYING, SUCCEEDED, FAILED, ROLLED_BACK }
+
+    /**
+     * 배포 화면의 여섯 단계. 로그로 정한다 (저장 형식을 바꾸지 않으려고).
+     * 첫 배포처럼 canary 판정을 건너뛰면 2 에서 5 로 넘어간다.
+     */
+    public static final List<String> STAGES = List.of(
+            "레포 확인", "빌드", "새 버전 띄우기", "트래픽 10%로 새 버전 내보내기", "에러율·응답 시간 판정", "트래픽 100%로 전환");
 
     private final String id;
     private final String appName;
@@ -73,6 +81,55 @@ public final class Build {
     public String getImage() { return image; }
     public String getUrl() { return url; }
     public List<String> getLogs() { return List.copyOf(logs); }
+
+    /** 0~5. {@link #STAGES} 의 번호 */
+    public int getStage() {
+        int stage = 0;
+        for (String line : logs) {
+            stage = Math.max(stage, stageOf(line));
+        }
+        if (status == Status.SUCCEEDED) {
+            return STAGES.size() - 1;
+        }
+        return stage;
+    }
+
+    public String getStageName() {
+        return STAGES.get(getStage());
+    }
+
+    /** canary 판정 결과 한 줄 (PASS / FAIL / skipped). 판정 전이면 null */
+    public String getCanary() {
+        String result = null;
+        for (String line : logs) {
+            int at = line.indexOf("canary: ");
+            if (at >= 0 && (line.contains("canary: PASS") || line.contains("canary: FAIL")
+                    || line.contains("canary: skipped"))) {
+                result = line.substring(at);
+            }
+        }
+        return result;
+    }
+
+    private static int stageOf(String line) {
+        if (line.startsWith("build: pushed") || line.startsWith("deploy: ")) {
+            return 2;
+        }
+        if (line.startsWith("build: ")) {
+            return 1;
+        }
+        if (line.startsWith("progress: canary-traffic")) {
+            return 3;
+        }
+        if (line.startsWith("progress: canary-analysis") && !line.contains("canary: skipped")) {
+            return 4;
+        }
+        if (line.startsWith("progress: service") || line.startsWith("progress: router")
+                || line.startsWith("progress: monitor") || line.startsWith("progress: scale-down")) {
+            return 5;
+        }
+        return 0;
+    }
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
