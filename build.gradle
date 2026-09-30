@@ -25,6 +25,8 @@ dependencies {
     runtimeOnly 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
     // 배포 이력 저장 (플랫폼 DB)
     implementation 'software.amazon.awssdk:dynamodb'
+    // 앱별 ECR 저장소 생성 (없으면 push 가 NAME_UNKNOWN 으로 실패)
+    implementation 'software.amazon.awssdk:ecr'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'io.fabric8:kubernetes-server-mock:6.13.5'

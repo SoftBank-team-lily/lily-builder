@@ -27,7 +27,10 @@ class BuildServiceTest {
     private final RestClient.Builder http = RestClient.builder().baseUrl("http://cicd");
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
     private final InMemoryBuildStore store = new InMemoryBuildStore();
-    private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner());
+    private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner(),
+            // ECR 이 아닌 레지스트리라 저장소 생성은 건너뛴다
+            new EcrRepositories(new BuilderProperties("ns", "localhost:5000", true, "http://cicd", "kaniko", 10,
+                    new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false))));
 
     private static BuildRequest request(String database) {
         return new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 8080,
