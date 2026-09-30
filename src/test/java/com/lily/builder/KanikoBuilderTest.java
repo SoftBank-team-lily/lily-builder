@@ -53,12 +53,14 @@ class KanikoBuilderTest {
     }
 
     @Test
-    void ECR_이면_ecr_login_설정을_마운트한다() {
+    void ECR_이면_레지스트리_인증_Secret_을_마운트하고_노드_역할을_쓰지_않는다() {
         Job job = builder("123.dkr.ecr.ap-northeast-2.amazonaws.com", false)
                 .job("build-1", request(null, null), "img", false);
 
-        assertThat(job.getSpec().getTemplate().getSpec().getVolumes().get(0).getConfigMap().getName())
-                .isEqualTo(KanikoBuilder.DOCKER_CONFIG);
+        assertThat(job.getSpec().getTemplate().getSpec().getVolumes().get(0).getSecret().getSecretName())
+                .isEqualTo(KanikoBuilder.REGISTRY_AUTH_SECRET);
+        // 사용자 Dockerfile 이 AWS 권한이 있는 lily-server 에서 돌지 않도록
+        assertThat(job.getSpec().getTemplate().getSpec().getNodeSelector()).isNullOrEmpty();
         assertThat(job.getSpec().getTemplate().getSpec().getContainers().get(0).getArgs())
                 .doesNotContain("--insecure");
     }
