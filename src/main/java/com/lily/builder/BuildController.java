@@ -2,6 +2,7 @@ package com.lily.builder;
 
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -10,16 +11,21 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 @RestController
 public class BuildController {
 
+    private static final Pattern APP_NAME = Pattern.compile("[a-z0-9]([-a-z0-9]*[a-z0-9])?");
+
     private final BuildService service;
     private final ClusterApps clusterApps;
+    private final CicdClient cicd;
 
-    public BuildController(BuildService service, ClusterApps clusterApps) {
+    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd) {
         this.service = service;
         this.clusterApps = clusterApps;
+        this.cicd = cicd;
     }
 
     /** 빌드·배포는 몇 분 걸려서 바로 id 만 돌려준다. 진행 상황은 GET 으로 본다 */
@@ -44,4 +50,32 @@ public class BuildController {
     public List<ClusterApps.RunningApp> apps() {
         return clusterApps.list();
     }
+
+    /**
+     * 직전 릴리스로 앱과 스키마를 되돌린다. lily-cicd 응답(200 ROLLED_BACK/PARTIAL, 409 거부)을 그대로 넘긴다.
+     * 되돌릴 수 없는 스키마면 {@code appOnly=true} 로 앱만 되돌릴 수 있다.
+     */
+    @PostMapping("/api/apps/{appName}/rollback")
+    public ResponseEntity<String> rollback(@PathVariable String appName,
+                                           @RequestBody(required = false) RollbackRequest request) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.rollback(appName, request != null && request.appOnly()));
+    }
+
+    /** 슬롯별 릴리스(이미지, 스키마 버전, 배포 시각)와 롤백 가능 여부 */
+    @GetMapping("/api/apps/{appName}/release")
+    public ResponseEntity<String> release(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.release(appName));
+    }
+
+    private static ResponseEntity<String> passthrough(CicdClient.Passthrough response) {
+        return ResponseEntity.status(response.status()).contentType(MediaType.APPLICATION_JSON).body(response.body());
+    }
+
+    public record RollbackRequest(boolean appOnly) {}
 }

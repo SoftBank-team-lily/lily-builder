@@ -304,6 +304,8 @@
           <option value="postgres">PostgreSQL</option>
           <option value="mysql">MySQL</option>
         </select>
+        <label for="migrationsPath">마이그레이션 폴더 <span>V·U 파일로 스키마를 옮기고, 롤백하면 되돌립니다</span></label>
+        <input id="migrationsPath" name="migrationsPath" placeholder="src/main/resources/db/migration">
         <div class="row">
           <div>
             <label for="readinessPath">Readiness 경로 <span>비우면 기본값</span></label>
@@ -360,10 +362,12 @@
     <p class="lede">클러스터에 떠 있는 앱입니다. 10초마다 다시 읽습니다.</p>
     <div class="scroll">
       <table>
-        <thead><tr><th>앱</th><th>상태</th><th>전략</th><th>슬롯 · 이미지</th><th>접속</th></tr></thead>
-        <tbody id="appRows"><tr><td colspan="5" class="empty">불러오는 중</td></tr></tbody>
+        <thead><tr><th>앱</th><th>상태</th><th>전략</th><th>슬롯 · 스키마 · 이미지</th><th>접속</th><th>되돌리기</th></tr></thead>
+        <tbody id="appRows"><tr><td colspan="6" class="empty">불러오는 중</td></tr></tbody>
       </table>
     </div>
+    <p id="appsMsg" class="lede" role="status" aria-live="polite"></p>
+    <pre id="appsLogs" hidden></pre>
   </section>
 
   <section id="history" class="view pad">
@@ -382,7 +386,7 @@
   const STAGES = [
     { id: 'QUEUED', title: '대기', detail: '요청을 접수했습니다.' },
     { id: 'BUILDING', title: '이미지 빌드', detail: '레포를 클론하고 이미지를 만듭니다.' },
-    { id: 'DEPLOYING', title: '클러스터 배포', detail: '준비되면 트래픽을 연결합니다.' },
+    { id: 'DEPLOYING', title: '클러스터 배포', detail: '스키마를 옮기고, 준비되면 트래픽을 연결합니다.' },
     { id: 'SUCCEEDED', title: '배포 완료', detail: '접속 주소를 열 수 있습니다.' }
   ];
   let step = 1;
@@ -460,7 +464,8 @@
     const body = {
       repoUrl: f.get('repoUrl'), branch: f.get('branch'), token: f.get('token'), rootDir: f.get('rootDir'),
       appName: f.get('appName'), targetPort: Number(f.get('targetPort')), database: f.get('database'),
-      readinessPath: f.get('readinessPath'), livenessPath: f.get('livenessPath'), env
+      readinessPath: f.get('readinessPath'), livenessPath: f.get('livenessPath'), env,
+      migrationsPath: f.get('migrationsPath')
     };
     $('submitBtn').disabled = true;
     $('formError').textContent = '';
@@ -621,24 +626,75 @@
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const apps = await res.json();
       tbody.replaceChildren();
-      if (apps.length === 0) return tbody.append(emptyRow(5, '떠 있는 앱이 없습니다'));
+      if (apps.length === 0) return tbody.append(emptyRow(6, '떠 있는 앱이 없습니다'));
       apps.forEach((a) => {
         const slots = cell();
         a.slots.forEach((s) => {
           slots.append(el('span', 'slot mono' + (s.serving ? '' : ' off'),
-            (s.serving ? '● ' : '○ ') + s.slot + ' ' + s.readyReplicas + '/' + s.replicas + '  ' + (s.image || '')));
+            (s.serving ? '● ' : '○ ') + s.slot + ' ' + s.readyReplicas + '/' + s.replicas
+            + (s.schemaVersion ? '  schema ' + s.schemaVersion : '') + '  ' + (s.image || '')));
         });
+        const undo = cell();
+        // blue-green 에서 거둬 둔 이전 슬롯이 있을 때만 되돌릴 수 있다
+        if (a.strategy === 'blue-green' && a.slots.length > 1) {
+          const btn = el('button', 'ghost', '직전 릴리스로');
+          btn.type = 'button';
+          btn.addEventListener('click', () => rollback(a.appName, false, btn));
+          undo.append(btn);
+        } else {
+          undo.textContent = '-';
+        }
         tbody.append(row([
           text(a.appName + (a.namespace === 'default' ? '' : ' (' + a.namespace + ')')),
           badge(a.health, a.health + ' ' + a.readyReplicas + '/' + a.replicas),
           text(a.strategy),
           slots,
-          link(a.url)
+          link(a.url),
+          undo
         ]));
       });
     } catch (e) {
-      tbody.replaceChildren(emptyRow(5, '클러스터 조회 실패: ' + e.message));
+      tbody.replaceChildren(emptyRow(6, '클러스터 조회 실패: ' + e.message));
     }
+  }
+
+  /** 앱과 스키마를 직전 릴리스로. 스키마를 되돌릴 수 없으면(409) 앱만 되돌릴지 한 번 더 묻는다 */
+  async function rollback(appName, appOnly, btn) {
+    const what = appOnly ? '앱만' : '앱과 스키마를';
+    if (!confirm(appName + ' 의 ' + what + ' 직전 릴리스로 되돌립니다. 데이터 행은 남습니다.')) return;
+    btn.disabled = true;
+    $('appsMsg').textContent = appName + ' 되돌리는 중입니다.';
+    let res;
+    let body = {};
+    try {
+      res = await fetch('/api/apps/' + encodeURIComponent(appName) + '/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appOnly })
+      });
+      try { body = await res.json(); } catch (ignore) { /* 본문이 없으면 상태 코드만 쓴다 */ }
+    } catch (e) {
+      $('appsMsg').textContent = '되돌리지 못했습니다. ' + e.message;
+      btn.disabled = false;
+      return;
+    }
+    const logs = body.logs || [];
+    $('appsLogs').textContent = logs.join('\n');
+    $('appsLogs').hidden = logs.length === 0;
+    btn.disabled = false;
+    if (res.ok) {
+      $('appsMsg').textContent = appName + ': ' + (body.status === 'PARTIAL'
+        ? '앱은 되돌렸지만 스키마 되돌리기는 실패했습니다. 로그를 확인하세요.'
+        : '직전 릴리스로 되돌렸습니다.') + (body.schemaVersion ? ' 스키마 ' + body.schemaVersion : '');
+    } else if (res.status === 409 && !appOnly && /appOnly/.test(body.message || '')) {
+      $('appsMsg').textContent = '스키마를 되돌릴 수 없습니다. ' + body.message;
+      if (confirm('스키마를 되돌릴 수 없습니다.\n' + body.message + '\n\n스키마는 그대로 두고 앱만 되돌릴까요?')) {
+        return rollback(appName, true, btn);
+      }
+    } else {
+      $('appsMsg').textContent = '되돌리지 못했습니다. ' + (body.message || ('HTTP ' + res.status));
+    }
+    loadApps();
   }
 
   async function loadHistory() {

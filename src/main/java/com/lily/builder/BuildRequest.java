@@ -24,6 +24,8 @@ import java.util.Map;
  * @param host          Ingress 호스트 전체. 비우면 lily-cicd 기본값 ({@code {appName}.{domain}}).
  *                      클라우드 버스팅에서 온프레미스 공개 주소로 들어온 요청을 그대로 받을 때 넣는다
  * @param standby       true 면 배포가 끝난 뒤 레플리카를 0 으로 내려 대기시킨다 (클라우드 버스팅)
+ * @param migrationsPath 마이그레이션 폴더 (rootDir 기준). 비우면 src/main/resources/db/migration
+ * @param migrate       false 면 마이그레이션을 플랫폼에 넘기지 않고 앱의 Flyway 에 맡긴다. 비우면 true
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -37,30 +39,40 @@ public record BuildRequest(
         String livenessPath,
         Map<String, String> env,
         @Pattern(regexp = "([a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+)?") String host,
-        Boolean standby) {
+        Boolean standby,
+        @Pattern(regexp = "[\\w./-]*") String migrationsPath,
+        Boolean migrate) {
 
-    /** 배포 폼 (호스트 지정, 대기 없이) */
+    /** 배포 폼 (호스트 지정, 대기 없이, 기본 마이그레이션 폴더) */
     public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
                         int targetPort, String database, String readinessPath, String livenessPath,
                         Map<String, String> env) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
-                env, null, null);
+                env, null, null, null, null);
     }
 
     public boolean isStandby() {
         return Boolean.TRUE.equals(standby);
     }
 
+    public boolean migrateOrDefault() {
+        return migrate == null || migrate;
+    }
+
     public String branchOrDefault() {
         return branch == null || branch.isBlank() ? "main" : branch;
     }
 
-    /** Kaniko 의 git 컨텍스트. 예: {@code git://github.com/org/repo.git#refs/heads/main} */
-    public String gitContext() {
+    /**
+     * Kaniko 의 git 컨텍스트. 커밋을 주면 그 커밋으로 고정한다.
+     * 예: {@code git://github.com/org/repo.git#refs/heads/main#0123abc...}
+     */
+    public String gitContext(String commit) {
         String path = repoUrl.replaceFirst("^https://", "").replaceFirst("/$", "");
         if (!path.endsWith(".git")) {
             path += ".git";
         }
-        return "git://" + path + "#refs/heads/" + branchOrDefault();
+        String context = "git://" + path + "#refs/heads/" + branchOrDefault();
+        return commit == null || commit.isBlank() ? context : context + "#" + commit;
     }
 }

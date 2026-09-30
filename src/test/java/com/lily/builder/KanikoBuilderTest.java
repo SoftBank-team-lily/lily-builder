@@ -33,14 +33,17 @@ class KanikoBuilderTest {
 
     @Test
     void git_컨텍스트_변환() {
-        assertThat(request(null, null).gitContext()).isEqualTo("git://github.com/org/repo.git#refs/heads/dev");
+        assertThat(request(null, null).gitContext(null)).isEqualTo("git://github.com/org/repo.git#refs/heads/dev");
         assertThat(new BuildRequest("https://github.com/org/repo.git/", "", null, null, "a", 80, "", null, null, null)
-                .gitContext()).isEqualTo("git://github.com/org/repo.git#refs/heads/main");
+                .gitContext(null)).isEqualTo("git://github.com/org/repo.git#refs/heads/main");
+        // 커밋을 주면 브랜치가 움직여도 그 커밋을 빌드한다
+        assertThat(request(null, null).gitContext("0123456789abcdef0123456789abcdef01234567"))
+                .isEqualTo("git://github.com/org/repo.git#refs/heads/dev#0123456789abcdef0123456789abcdef01234567");
     }
 
     @Test
     void job_인자() {
-        Job job = builder("reg:5000", true).job("build-1", request("/backend/", null), "reg:5000/blog:t", false);
+        Job job = builder("reg:5000", true).job("build-1", request("/backend/", null), "reg:5000/blog:t", false, null);
         List<String> args = job.getSpec().getTemplate().getSpec().getContainers().get(0).getArgs();
 
         assertThat(args).contains(
@@ -55,7 +58,7 @@ class KanikoBuilderTest {
     @Test
     void ECR_이면_레지스트리_인증_Secret_을_마운트하고_노드_역할을_쓰지_않는다() {
         Job job = builder("123.dkr.ecr.ap-northeast-2.amazonaws.com", false)
-                .job("build-1", request(null, null), "img", false);
+                .job("build-1", request(null, null), "img", false, null);
 
         assertThat(job.getSpec().getTemplate().getSpec().getVolumes().get(0).getSecret().getSecretName())
                 .isEqualTo(KanikoBuilder.REGISTRY_AUTH_SECRET);
@@ -67,7 +70,7 @@ class KanikoBuilderTest {
 
     @Test
     void 토큰은_Secret_으로만_넘긴다() {
-        Job job = builder("reg", false).job("build-1", request(null, "ghp_secret"), "img", true);
+        Job job = builder("reg", false).job("build-1", request(null, "ghp_secret"), "img", true, null);
         var env = job.getSpec().getTemplate().getSpec().getContainers().get(0).getEnv();
 
         assertThat(env).extracting(e -> e.getValueFrom().getSecretKeyRef().getName()).containsOnly("build-1");
@@ -77,7 +80,7 @@ class KanikoBuilderTest {
     @Test
     void 빌드_성공하면_이미지를_돌려주고_토큰_Secret_을_지운다() throws Exception {
         CompletableFuture<String> result = CompletableFuture.supplyAsync(
-                () -> builder("reg", false).build("1", request(null, "ghp_secret"), "t"));
+                () -> builder("reg", false).build("1", request(null, "ghp_secret"), "t", null));
         markJob("build-1", true);
 
         assertThat(result.get(10, TimeUnit.SECONDS)).isEqualTo("reg/blog:t");
@@ -87,7 +90,7 @@ class KanikoBuilderTest {
     @Test
     void 빌드_실패하면_예외() {
         CompletableFuture<String> result = CompletableFuture.supplyAsync(
-                () -> builder("reg", false).build("2", request(null, null), "t"));
+                () -> builder("reg", false).build("2", request(null, null), "t", null));
         markJob("build-2", false);
 
         assertThatThrownBy(() -> result.get(10, TimeUnit.SECONDS)).hasMessageContaining("kaniko build failed");
@@ -96,7 +99,7 @@ class KanikoBuilderTest {
     @Test
     void 빌드_중_Job_이_지워지면_바로_실패한다() {
         CompletableFuture<String> result = CompletableFuture.supplyAsync(
-                () -> builder("reg", false).build("3", request(null, null), "t"));
+                () -> builder("reg", false).build("3", request(null, null), "t", null));
         awaitJob("build-3");
         client.batch().v1().jobs().inNamespace(NS).withName("build-3").delete();
 
