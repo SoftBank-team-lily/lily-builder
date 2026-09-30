@@ -58,7 +58,7 @@ public class BurstController {
         BuildRequest standby = new BuildRequest(request.repoUrl(), request.branch(), request.token(),
                 request.rootDir(), request.appName(), request.targetPort(), request.database(),
                 request.readinessPath(), request.livenessPath(), request.env(), request.host(), true,
-                request.migrationsPath(), request.migrate());
+                request.migrationsPath(), request.migrate(), request.canaryPath());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(builds.start(standby));
     }
 

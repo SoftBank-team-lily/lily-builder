@@ -34,17 +34,25 @@ public class CicdClient {
         Map<String, Object> body = new HashMap<>();
         body.put("appName", request.appName());
         body.put("imageUrl", image);
-        body.put("targetPort", request.targetPort());
+        body.put("targetPort", request.targetPortOrDefault());
         body.put("appVersion", version);
         body.put("readinessPath", blankToNull(request.readinessPath()));
         body.put("livenessPath", blankToNull(request.livenessPath()));
         body.put("database", blankToNull(request.database()));
         body.put("extraEnv", request.env() == null ? Map.of() : request.env());
         body.put("host", blankToNull(request.host()));
+        body.put("canaryPath", blankToNull(request.canaryPath()));
         if (migrations != null && !migrations.isEmpty()) {
             body.put("migrations", migrations);
         }
         return http.post().uri("/api/deployments").body(body).retrieve().body(Result.class);
+    }
+
+    /** 진행 중이거나 마지막 배포의 단계. 기록이 없으면 null */
+    public Progress progress(String appName) {
+        return http.get().uri("/api/deployments/{app}/progress", appName).retrieve()
+                .onStatus(s -> s.value() == 404, (req, res) -> { })
+                .body(Progress.class);
     }
 
     /** 활성 슬롯 상태. 앱이 없으면 null */
@@ -86,6 +94,12 @@ public class CicdClient {
 
     /** lily-cicd 의 AppController.AppStatus */
     public record AppStatus(String appName, String namespace, String activeColor, int replicas, int readyReplicas) {}
+
+    /** lily-cicd 의 DeployProgress.Snapshot. stage 는 ready, canary-traffic, canary-analysis, service 등 */
+    public record Progress(String stage, String detail, java.time.Instant updatedAt) {}
+
+    /** lily-cicd 의 DeployController.DeployError. canary 판정 실패면 status 가 ROLLED_BACK */
+    public record DeployError(String status, String message, java.util.List<String> logs) {}
 
     /** lily-cicd 응답 그대로 (JSON 본문) */
     public record Passthrough(int status, String body) {}

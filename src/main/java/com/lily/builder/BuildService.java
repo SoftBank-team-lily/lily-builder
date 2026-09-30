@@ -6,6 +6,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -23,6 +24,8 @@ public class BuildService {
 
     private static final Logger log = LoggerFactory.getLogger(BuildService.class);
     private static final DateTimeFormatter TAG = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
 
     private final BuildStore store;
     private final KanikoBuilder kaniko;
@@ -78,7 +81,10 @@ public class BuildService {
 
             update(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
-            CicdClient.Result result = cicd.deploy(request, image, tag, migrations);
+            CicdClient.Result result;
+            try (ProgressWatch ignored = watchProgress(build)) {
+                result = cicd.deploy(request, image, tag, migrations);
+            }
             if (result != null && result.logs() != null) {
                 result.logs().forEach(line -> build.log("cicd: " + line));
             }
@@ -90,9 +96,86 @@ public class BuildService {
             }
             update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
         } catch (RestClientResponseException e) {
+            CicdClient.DeployError error = deployError(e);
+            if (e.getStatusCode().value() == 422 && error != null && "ROLLED_BACK".equals(error.status())) {
+                // canary 판정 실패: 새 버전은 지워졌고 트래픽은 이전 버전 그대로다
+                if (error.logs() != null) {
+                    error.logs().forEach(line -> build.log("cicd: " + line));
+                }
+                rolledBack(build, error.message());
+                return;
+            }
             fail(build, "cicd " + e.getStatusCode().value() + ": " + e.getResponseBodyAsString());
         } catch (RuntimeException e) {
             fail(build, e.getMessage());
+        }
+    }
+
+    /**
+     * lily-cicd 배포 요청은 끝날 때까지 응답하지 않는다. 그동안 1초마다 진행 단계를 물어 로그에 남긴다.
+     * 이번 배포를 시작한 뒤에 바뀐 단계만 남긴다.
+     */
+    private ProgressWatch watchProgress(Build build) {
+        Instant since = Instant.now();
+        ProgressWatch watch = new ProgressWatch();
+        watch.thread = Thread.ofVirtual().name("progress-" + build.getId()).start(() -> {
+            String last = null;
+            while (!watch.done) {
+                try {
+                    CicdClient.Progress progress = cicd.progress(build.getAppName());
+                    if (progress != null && progress.updatedAt() != null && !progress.updatedAt().isBefore(since)) {
+                        String line = "progress: " + progress.stage() + " " + progress.detail();
+                        if (!line.equals(last)) {
+                            last = line;
+                            build.log(line);
+                            store.save(build);
+                        }
+                    }
+                } catch (RuntimeException e) {
+                    log.debug("progress poll failed: id={} message={}", build.getId(), e.getMessage());
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+        return watch;
+    }
+
+    private static final class ProgressWatch implements AutoCloseable {
+        private volatile boolean done;
+        private Thread thread;
+
+        @Override
+        public void close() {
+            done = true;
+            if (thread != null) {
+                thread.interrupt();
+                try {
+                    thread.join(2000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+    }
+
+    private static CicdClient.DeployError deployError(RestClientResponseException e) {
+        try {
+            return JSON.readValue(e.getResponseBodyAsString(), CicdClient.DeployError.class);
+        } catch (Exception parse) {
+            return null;
+        }
+    }
+
+    private void rolledBack(Build build, String reason) {
+        log.info("canary rejected: id={} app={} reason={}", build.getId(), build.getAppName(), reason);
+        try {
+            update(build, Build.Status.ROLLED_BACK, "rolled back: " + reason);
+        } catch (RuntimeException e) {
+            log.error("could not record rolled back build: id={} reason={}", build.getId(), e.getMessage());
         }
     }
 
