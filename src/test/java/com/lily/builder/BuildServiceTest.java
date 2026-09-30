@@ -1,9 +1,11 @@
 package com.lily.builder;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
@@ -12,7 +14,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
@@ -23,14 +27,23 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 /** 빌드 → lily-cicd 호출 → 상태 기록 순서 */
 class BuildServiceTest {
 
+    private static final String COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
     private final KanikoBuilder kaniko = mock(KanikoBuilder.class);
+    private final GitHubSource github = mock(GitHubSource.class);
     private final RestClient.Builder http = RestClient.builder().baseUrl("http://cicd");
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
     private final InMemoryBuildStore store = new InMemoryBuildStore();
     private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner(),
             // ECR 이 아닌 레지스트리라 저장소 생성은 건너뛴다
             new EcrRepositories(new BuilderProperties("ns", "localhost:5000", true, "http://cicd", "kaniko", 10,
-                    new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), "")));
+                    new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), "")), github);
+
+    @BeforeEach
+    void source() {
+        when(github.resolveCommit(any())).thenReturn(COMMIT);
+        when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of());
+    }
 
     private static BuildRequest request(String database) {
         return new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 8080,
@@ -39,7 +52,7 @@ class BuildServiceTest {
 
     @Test
     void 빌드_후_cicd_에_배포를_요청한다() {
-        when(kaniko.build(anyString(), any(), anyString())).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(content().json("""
@@ -59,8 +72,51 @@ class BuildServiceTest {
     }
 
     @Test
+    void 커밋을_고정하고_마이그레이션을_함께_보낸다() {
+        when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of("V1__init.sql", "create table a(id int);"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"appName":"blog","migrations":{"V1__init.sql":"create table a(id int);"}}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","schemaVersion":"1","logs":["schema: migrated none -> 1"]}""",
+                        MediaType.APPLICATION_JSON));
+
+        Build build = service.start(request("postgres"));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("source: commit " + COMMIT, "source: migrations [V1__init.sql]",
+                "cicd: schema: migrated none -> 1");
+        cicd.verify();
+    }
+
+    @Test
+    void 마이그레이션이_없으면_migrations_를_보내지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(request -> assertThat(((MockClientHttpRequest) request).getBodyAsString()).doesNotContain("migrations"))
+                .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getLogs()).contains("source: migrations none (src/main/resources/db/migration)");
+        cicd.verify();
+    }
+
+    @Test
+    void 브랜치를_찾지_못하면_빌드하지_않는다() {
+        when(github.resolveCommit(any())).thenThrow(new IllegalStateException("브랜치 main 를 찾지 못했다"));
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs()).anyMatch(l -> l.contains("브랜치 main 를 찾지 못했다"));
+        verifyNoInteractions(kaniko);
+    }
+
+    @Test
     void DB_를_고르지_않으면_database_를_보내지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString())).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("{\"database\":null}"))
                 .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
@@ -71,7 +127,7 @@ class BuildServiceTest {
 
     @Test
     void 빌드가_실패하면_배포하지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString())).thenThrow(new IllegalStateException("kaniko build failed"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenThrow(new IllegalStateException("kaniko build failed"));
 
         Build build = service.start(request(""));
 
@@ -82,7 +138,7 @@ class BuildServiceTest {
 
     @Test
     void 배포가_실패하면_cicd_응답을_남긴다() {
-        when(kaniko.build(anyString(), any(), anyString())).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
                         .body("{\"status\":\"FAILED\",\"message\":\"ready timeout\"}")
@@ -97,7 +153,7 @@ class BuildServiceTest {
 
     @Test
     void 이력은_저장소에_남고_최신순이다() throws Exception {
-        when(kaniko.build(anyString(), any(), anyString())).thenThrow(new IllegalStateException("x"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenThrow(new IllegalStateException("x"));
 
         Build first = service.start(request(""));
         Thread.sleep(5);

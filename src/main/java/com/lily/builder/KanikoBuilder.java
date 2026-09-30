@@ -47,8 +47,12 @@ public class KanikoBuilder {
         this.pollMillis = pollMillis;
     }
 
-    /** 빌드가 끝나면 이미지 주소를 돌려준다. 실패하면 Kaniko 로그 끝부분을 담아 예외를 던진다 */
-    public String build(String buildId, BuildRequest request, String tag) {
+    /**
+     * 빌드가 끝나면 이미지 주소를 돌려준다. 실패하면 Kaniko 로그 끝부분을 담아 예외를 던진다.
+     *
+     * @param commit 빌드할 커밋 SHA. null 이면 브랜치 끝
+     */
+    public String build(String buildId, BuildRequest request, String tag, String commit) {
         String image = props.registry() + "/" + request.appName() + ":" + tag;
         String jobName = "build-" + buildId;
         String ns = props.namespace();
@@ -61,7 +65,7 @@ public class KanikoBuilder {
                         .addToStringData("GIT_PASSWORD", request.token())
                         .build()).create();
             }
-            k8s.batch().v1().jobs().inNamespace(ns).resource(job(jobName, request, image, hasToken)).create();
+            k8s.batch().v1().jobs().inNamespace(ns).resource(job(jobName, request, image, hasToken, commit)).create();
             Job done = awaitFinished(ns, jobName);
             if (!succeeded(done)) {
                 throw new IllegalStateException("kaniko build failed\n" + tail(ns, jobName));
@@ -76,9 +80,9 @@ public class KanikoBuilder {
         }
     }
 
-    Job job(String name, BuildRequest request, String image, boolean hasToken) {
+    Job job(String name, BuildRequest request, String image, boolean hasToken, String commit) {
         List<String> args = new ArrayList<>(List.of(
-                "--context=" + request.gitContext(),
+                "--context=" + request.gitContext(commit),
                 "--dockerfile=Dockerfile",
                 "--destination=" + image));
         if (request.rootDir() != null && !request.rootDir().isBlank()) {

@@ -5,11 +5,12 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 
-/** lily-cicd 의 POST /api/deployments 호출. 블루-그린 Ready 대기까지 끝나야 응답이 온다 */
+/** lily-cicd 호출. 배포는 스키마 마이그레이션과 블루-그린 Ready 대기까지 끝나야 응답이 온다 */
 @Component
 public class CicdClient {
 
@@ -19,8 +20,8 @@ public class CicdClient {
     public CicdClient(BuilderProperties props) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
-        // lily-cicd 는 Ready 대기(기본 120초)까지 끝나고 응답한다
-        factory.setReadTimeout(Duration.ofSeconds(300));
+        // lily-cicd 는 스키마 마이그레이션과 Ready 대기(기본 120초)까지 끝나고 응답한다. lily-cicd 요청 타임아웃(400초)보다 길게
+        factory.setReadTimeout(Duration.ofSeconds(420));
         this.http = RestClient.builder().requestFactory(factory).baseUrl(props.cicdUrl()).build();
     }
 
@@ -28,7 +29,8 @@ public class CicdClient {
         this.http = http;
     }
 
-    public Result deploy(BuildRequest request, String image, String version) {
+    /** @param migrations 파일명 → SQL. 비어 있으면 보내지 않는다 (앱의 Flyway 가 스키마를 맡는다) */
+    public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations) {
         Map<String, Object> body = new HashMap<>();
         body.put("appName", request.appName());
         body.put("imageUrl", image);
@@ -39,6 +41,9 @@ public class CicdClient {
         body.put("database", blankToNull(request.database()));
         body.put("extraEnv", request.env() == null ? Map.of() : request.env());
         body.put("host", blankToNull(request.host()));
+        if (migrations != null && !migrations.isEmpty()) {
+            body.put("migrations", migrations);
+        }
         return http.post().uri("/api/deployments").body(body).retrieve().body(Result.class);
     }
 
@@ -56,13 +61,32 @@ public class CicdClient {
                 .retrieve().body(AppStatus.class);
     }
 
+    /** 직전 릴리스로 앱과 스키마를 되돌린다. lily-cicd 의 상태 코드와 본문을 그대로 돌려준다 (200, 409, 400, 500) */
+    public Passthrough rollback(String appName, boolean appOnly) {
+        return exchange(http.post().uri("/api/deployments/{app}/rollback", appName).body(Map.of("appOnly", appOnly)));
+    }
+
+    /** 슬롯별 릴리스와 롤백 가능 여부 */
+    public Passthrough release(String appName) {
+        return exchange(http.get().uri("/api/deployments/{app}", appName));
+    }
+
+    private static Passthrough exchange(RestClient.RequestHeadersSpec<?> spec) {
+        return spec.exchange((req, res) -> new Passthrough(res.getStatusCode().value(),
+                new String(res.getBody().readAllBytes(), StandardCharsets.UTF_8)));
+    }
+
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
     }
 
     /** lily-cicd 의 DeploymentResultDto */
-    public record Result(String status, String activeColor, String targetHostUrl, java.util.List<String> logs) {}
+    public record Result(String status, String activeColor, String targetHostUrl, String schemaVersion,
+                         java.util.List<String> logs) {}
 
     /** lily-cicd 의 AppController.AppStatus */
     public record AppStatus(String appName, String namespace, String activeColor, int replicas, int readyReplicas) {}
+
+    /** lily-cicd 응답 그대로 (JSON 본문) */
+    public record Passthrough(int status, String body) {}
 }

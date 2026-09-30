@@ -20,6 +20,7 @@ import java.util.Set;
  *   <li>Service {@code {app}-svc}, selector 에 {@code app}. blue-green 은 {@code color} 도 있다</li>
  *   <li>Deployment {@code {app}-{slot}}, 라벨 {@code app} + {@code color}(blue-green) 또는 {@code track}(canary)</li>
  *   <li>Ingress {@code {app}-ingress} 의 host 가 접속 주소</li>
+ *   <li>Deployment 어노테이션 {@code lily.io/schema-version}, {@code lily.io/deployed-at}: 그 슬롯 릴리스의 스키마 버전과 배포 시각</li>
  * </ul>
  */
 @Component
@@ -79,7 +80,9 @@ public class ClusterApps {
         String image = containers.isEmpty() ? null : containers.get(0).getImage();
         String version = containers.isEmpty() ? null : containers.get(0).getEnv().stream()
                 .filter(e -> "APP_VERSION".equals(e.getName())).map(e -> e.getValue()).findFirst().orElse(null);
-        return new Slot(d.getMetadata().getName(), slot, serving, image, version, replicas, ready);
+        Map<String, String> annotations = d.getMetadata().getAnnotations() == null ? Map.of() : d.getMetadata().getAnnotations();
+        return new Slot(d.getMetadata().getName(), slot, serving, image, version, replicas, ready,
+                annotations.get("lily.io/schema-version"), annotations.get("lily.io/deployed-at"));
     }
 
     /**
@@ -88,7 +91,11 @@ public class ClusterApps {
     public record RunningApp(String appName, String namespace, String strategy, String url, String health,
                              int readyReplicas, int replicas, List<Slot> slots) {}
 
-    /** @param serving 지금 트래픽을 받는 슬롯인지 */
+    /**
+     * @param serving       지금 트래픽을 받는 슬롯인지
+     * @param schemaVersion 이 슬롯 릴리스가 끝났을 때의 스키마 버전. 플랫폼이 스키마를 맡지 않으면 null
+     * @param deployedAt    배포 시각 (ISO-8601). 롤백 기능 이전 배포면 null
+     */
     public record Slot(String name, String slot, boolean serving, String image, String version,
-                       int replicas, int readyReplicas) {}
+                       int replicas, int readyReplicas, String schemaVersion, String deployedAt) {}
 }

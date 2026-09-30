@@ -10,11 +10,12 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * 폼 입력 → Kaniko 빌드 → lily-cicd 배포.
+ * 폼 입력 → 커밋 고정·마이그레이션 수집 → Kaniko 빌드 → lily-cicd 배포.
  * 단계가 바뀔 때마다 배포 이력 저장소에 기록한다. 화면은 저장소를 조회한다.
  */
 @Service
@@ -28,14 +29,16 @@ public class BuildService {
     private final CicdClient cicd;
     private final BuildRunner runner;
     private final EcrRepositories ecr;
+    private final GitHubSource github;
 
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
-                        EcrRepositories ecr) {
+                        EcrRepositories ecr, GitHubSource github) {
         this.store = store;
         this.kaniko = kaniko;
         this.cicd = cicd;
         this.runner = runner;
         this.ecr = ecr;
+        this.github = github;
     }
 
     public Build start(BuildRequest request) {
@@ -59,17 +62,23 @@ public class BuildService {
     void execute(Build build, BuildRequest request) {
         String tag = ZonedDateTime.now(ZoneOffset.UTC).format(TAG);
         try {
+            String commit = github.resolveCommit(request);
+            build.log("source: commit " + commit);
+            Map<String, String> migrations = github.migrations(request, commit);
+            build.log(migrations.isEmpty()
+                    ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
+                    : "source: migrations " + migrations.keySet());
             if (ecr.ensure(request.appName())) {
                 build.log("build: created ecr repository " + request.appName());
             }
             update(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
-            String image = kaniko.build(build.getId(), request, tag);
+            String image = kaniko.build(build.getId(), request, tag, commit);
             build.image(image);
             build.log("build: pushed " + image);
 
             update(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
-            CicdClient.Result result = cicd.deploy(request, image, tag);
+            CicdClient.Result result = cicd.deploy(request, image, tag, migrations);
             if (result != null && result.logs() != null) {
                 result.logs().forEach(line -> build.log("cicd: " + line));
             }
