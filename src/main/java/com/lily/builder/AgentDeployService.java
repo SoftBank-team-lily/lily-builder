@@ -52,7 +52,7 @@ public class AgentDeployService {
     private final ObjectMapper json = new ObjectMapper();
     /** 진행 중인 온프레미스 빌드 id → 에이전트 key. 다른 에이전트가 보낸 상태는 받지 않는다 */
     private final Map<String, String> running = new ConcurrentHashMap<>();
-    /** 롤백 id → 에이전트가 SUCCEEDED/FAILED 를 보낼 때까지 기다리는 응답 */
+    /** 롤백·거점 전환 id → 에이전트가 SUCCEEDED/FAILED 를 보낼 때까지 기다리는 응답 */
     private final Map<String, CompletableFuture<String>> rollbackWaiters = new ConcurrentHashMap<>();
 
     public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
@@ -149,6 +149,58 @@ public class AgentDeployService {
         } finally {
             rollbackWaiters.remove(id);
         }
+    }
+
+    /**
+     * 이 앱의 최근 성공이 온프레미스 배포면 그 에이전트에 거점 전환을 보낸다.
+     * @param target {@code cloud} 또는 {@code onprem}
+     */
+    public Optional<String> home(String app, String target) {
+        if (!"cloud".equals(target) && !"onprem".equals(target)) {
+            throw new IllegalArgumentException("home 은 cloud 또는 onprem 이다");
+        }
+        Optional<String> key = agentFor(app);
+        if (key.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!hub.connected(key.get())) {
+            throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
+        }
+        String id = "h" + UUID.randomUUID().toString().replace("-", "").substring(0, 7);
+        CompletableFuture<String> done = new CompletableFuture<>();
+        rollbackWaiters.put(id, done);
+        try {
+            hub.send(key.get(), json.writeValueAsString(Map.of(
+                    "type", "home", "app", app, "home", target, "id", id)));
+            String line = done.get(props.buildTimeoutSeconds(), TimeUnit.SECONDS);
+            return Optional.of(json.writeValueAsString(Map.of(
+                    "status", "MOVED",
+                    "home", target,
+                    "message", line == null ? "" : line)));
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("온프레미스 거점 전환 응답이 제한 시간 안에 오지 않았다");
+        } catch (ExecutionException e) {
+            String message = e.getCause() == null ? "거점 전환에 실패했다" : e.getCause().getMessage();
+            throw new IllegalStateException(message);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("온프레미스 거점 전환이 중단되었다");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("거점 전환 요청을 만들지 못했다");
+        } finally {
+            rollbackWaiters.remove(id);
+        }
+    }
+
+    private Optional<String> agentFor(String app) {
+        Optional<Build> latest = store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()) && build.getStatus() == Build.Status.SUCCEEDED)
+                .max(Comparator.comparing(Build::getCreatedAt));
+        if (latest.isEmpty()) {
+            return Optional.empty();
+        }
+        String key = agentKey(latest.get());
+        return key == null ? Optional.empty() : Optional.of(key);
     }
 
     private static String agentKey(Build build) {

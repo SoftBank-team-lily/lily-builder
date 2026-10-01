@@ -91,6 +91,33 @@ public class BuildController {
         return passthrough(cicd.rollback(appName, request != null && request.appOnly()));
     }
 
+    /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409 */
+    @PostMapping("/api/apps/{appName}/home")
+    public ResponseEntity<String> home(@PathVariable String appName, @RequestBody(required = false) HomeRequest request) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        String target = request == null ? "" : request.home();
+        try {
+            Optional<String> moved = agents.home(appName, target);
+            if (moved.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(rejected("온프레미스 에이전트를 찾지 못했다"));
+            }
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(moved.get());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().contentType(MediaType.APPLICATION_JSON).body(rejected(e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
+    }
+
+    public record HomeRequest(String home) {
+    }
+
     /** 슬롯별 릴리스(이미지, 스키마 버전, 배포 시각)와 롤백 가능 여부 */
     @GetMapping("/api/apps/{appName}/release")
     public ResponseEntity<String> release(@PathVariable String appName) {

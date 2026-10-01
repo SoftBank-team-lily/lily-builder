@@ -193,4 +193,21 @@ class AgentDeployServiceTest {
 
         assertThat(response).contains("ROLLED_BACK").contains("unchanged").contains("slot=blue");
     }
+
+    @Test
+    void 최근_성공이_온프레미스면_그_에이전트에_거점_전환을_보낸다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("home".equals(body.path("type").asText())) {
+                service.agentStatus(KEY, body.path("id").asText(), "SUCCEEDED", "home: CLOUD", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        String response = service.home("blog-1b62c0", "cloud").orElseThrow();
+
+        assertThat(response).contains("MOVED").contains("cloud").contains("CLOUD");
+    }
 }
