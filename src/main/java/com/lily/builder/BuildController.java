@@ -41,6 +41,16 @@ public class BuildController {
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.start(request));
     }
 
+    /** 배포 전에 레포가 쓰는 DB 를 본다. 화면이 사용자에게 맞는지 묻는다 */
+    @PostMapping("/api/detect")
+    public ResponseEntity<?> detect(@Valid @RequestBody DetectRequest request) {
+        try {
+            return ResponseEntity.ok(service.inspect(request));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.unprocessableEntity().body(Map.of("message", String.valueOf(e.getMessage())));
+        }
+    }
+
     /** 배포 이력 (빌더 기준, 최신순) */
     @GetMapping("/api/builds")
     public List<Build> history() {
