@@ -26,6 +26,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets", "configmaps"]
     verbs: ["create", "get", "patch", "delete"]
+  # 에이전트별 역방향 터널 포트 (lily-agent-db-ports). resourceVersion 을 걸고 고친다
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["lily-agent-db-ports"]
+    verbs: ["update"]
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
@@ -141,6 +146,7 @@ spec:
           # 플랫폼 연결 (사용자 PC 에이전트에 Cloudflare 토큰·DB 터널 키를 주지 않는다). Secret 이 없으면 quick tunnel, DB 없는 앱만
           #   PLATFORM_CLOUDFLARE_API_TOKEN / _ACCOUNT_ID / _ZONE_ID / _ZONE_NAME
           #   PLATFORM_TUNNEL_SSH_HOST / PLATFORM_TUNNEL_REMOTE_HOST / PLATFORM_TUNNEL_CA_KEY
+          #   PLATFORM_TUNNEL_REVERSE_HOST (배스천 사설 IP. 있으면 온프레미스 DB 를 클라우드 대기 배포에 역방향 터널로 연다)
           envFrom:
             - secretRef:
                 name: lily-agent-platform

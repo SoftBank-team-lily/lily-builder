@@ -49,16 +49,22 @@ public class BurstController {
             @NotNull @Min(1) @Max(65535) Integer port) {
     }
 
-    /** 대기 배포. host 에는 온프레미스 공개 주소를 넣는다 (그 Host 헤더로 넘어온 요청을 클라우드 Ingress 가 받도록) */
+    /**
+     * 대기 배포. host 에는 온프레미스 공개 주소를 넣는다 (그 Host 헤더로 넘어온 요청을 클라우드 Ingress 가 받도록).
+     * 온프레미스가 DB 를 가진 앱이면 에이전트가 역방향 터널 주소 기준의 접속 정보를 databaseEnv 로 보낸다
+     */
     @PostMapping("/apps/{appName}/standby")
     public ResponseEntity<Build> standby(@PathVariable String appName, @Valid @RequestBody BuildRequest request) {
         if (!appName.equals(request.appName())) {
             return ResponseEntity.badRequest().build();
         }
+        // databaseEnv: 온프레미스 DB(내 PC·사용자 DB)를 역방향 터널로 쓴다. RDS 를 만들지 않고 스키마는 온프레미스가 맡는다
+        boolean given = request.givenDatabase();
         BuildRequest standby = new BuildRequest(request.repoUrl(), request.branch(), request.token(),
-                request.rootDir(), request.appName(), request.targetPort(), request.database(),
+                request.rootDir(), request.appName(), request.targetPort(), given ? "" : request.database(),
                 request.readinessPath(), request.livenessPath(), request.env(), request.host(), true,
-                request.migrationsPath(), request.migrate(), request.canaryPath());
+                request.migrationsPath(), given ? Boolean.FALSE : request.migrate(), request.canaryPath(),
+                null, null, given ? request.databaseEnv() : null);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(builds.start(standby));
     }
 

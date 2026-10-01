@@ -42,7 +42,11 @@ public class CicdClient {
         body.put("extraEnv", request.env() == null ? Map.of() : request.env());
         body.put("host", blankToNull(request.host()));
         body.put("canaryPath", blankToNull(request.canaryPath()));
-        if (migrations != null && !migrations.isEmpty()) {
+        if (request.givenDatabase()) {
+            // 온프레미스 DB 를 역방향 터널로 쓴다. lily-cicd 는 DB 를 만들지 않고 이 값을 슬롯 Secret 에 넣는다
+            body.put("database", null);
+            body.put("databaseEnv", request.databaseEnv());
+        } else if (migrations != null && !migrations.isEmpty()) {
             body.put("migrations", migrations);
         }
         return http.post().uri("/api/deployments").body(body).retrieve().body(Result.class);

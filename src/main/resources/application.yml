@@ -42,6 +42,10 @@ lily:
         # 배스천 lily-tunnel 의 authorized_keys 에 cert-authority 로 등록한 CA 의 개인키 (PEM 본문)
         ca-key: ${PLATFORM_TUNNEL_CA_KEY:}
         validity-hours: ${PLATFORM_TUNNEL_VALIDITY_HOURS:24}
+        # 온프레미스 DB(내 PC·사용자 DB)를 클라우드 대기 배포에 여는 역방향 터널. 배스천 사설 IP. 비우면 끈다
+        reverse-host: ${PLATFORM_TUNNEL_REVERSE_HOST:}
+        reverse-port-from: ${PLATFORM_TUNNEL_REVERSE_PORT_FROM:20000}
+        reverse-port-to: ${PLATFORM_TUNNEL_REVERSE_PORT_TO:20999}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:
       table: ${BUILDS_TABLE:lily-builds}

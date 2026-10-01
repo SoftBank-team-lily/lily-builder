@@ -28,6 +28,9 @@ public record PlatformProperties(
     /**
      * @param caKey         SSH CA 개인키 (OpenSSH PEM 본문). 배스천의 lily-tunnel authorized_keys 에 cert-authority 로 등록한 키
      * @param validityHours 인증서 유효 시간. 에이전트는 다시 연결할 때마다 새로 받는다
+     * @param reverseHost   역방향 터널이 열리는 배스천의 사설 IP. 클라우드 Pod 가 이 주소로 온프레미스 DB 에 붙는다.
+     *                      비우면 역방향 터널을 주지 않는다 (온프레미스 DB 앱은 클라우드 대기 배포를 하지 못한다)
+     * @param reversePortFrom 에이전트마다 하나씩 나눠 주는 포트 범위 (배스천 보안그룹에서 VPC 에만 연다)
      */
     public record Tunnel(
             @DefaultValue("") String sshHost,
@@ -35,10 +38,17 @@ public record PlatformProperties(
             @DefaultValue("") String remoteHost,
             @DefaultValue("5432") int remotePort,
             @DefaultValue("") String caKey,
-            @DefaultValue("24") int validityHours) {
+            @DefaultValue("24") int validityHours,
+            @DefaultValue("") String reverseHost,
+            @DefaultValue("20000") int reversePortFrom,
+            @DefaultValue("20999") int reversePortTo) {
 
         public boolean configured() {
             return !sshHost.isBlank() && !remoteHost.isBlank() && !caKey.isBlank();
+        }
+
+        public boolean reverseConfigured() {
+            return configured() && !reverseHost.isBlank() && reversePortFrom > 0 && reversePortTo >= reversePortFrom;
         }
     }
 }

@@ -12,6 +12,7 @@ import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorato
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -44,14 +45,20 @@ public class AgentHub {
 
     /** 에이전트가 처음 보내는 hello */
     void hello(String key, String agentId, String publicUrl, boolean database) {
+        hello(key, agentId, publicUrl, database, Set.of());
+    }
+
+    /** @param databaseModes 에이전트가 받을 수 있는 DB 위치 (local, external). 이 필드 전의 에이전트는 비어 있다 */
+    void hello(String key, String agentId, String publicUrl, boolean database, Set<String> databaseModes) {
         Connection connection = connections.get(key);
         if (connection != null) {
             connection.agentId = agentId;
             connection.publicUrl = publicUrl;
             connection.database = database;
+            connection.databaseModes = Set.copyOf(databaseModes);
             connection.lastSeenAt = Instant.now();
         }
-        log.info("agent hello: key={} agentId={} database={}", key, agentId, database);
+        log.info("agent hello: key={} agentId={} database={} modes={}", key, agentId, database, databaseModes);
     }
 
     void seen(String key) {
@@ -89,6 +96,12 @@ public class AgentHub {
     public boolean supportsDatabase(String key) {
         Connection connection = connections.get(key);
         return connection != null && connection.database;
+    }
+
+    /** 에이전트가 이 DB 위치(local, external)를 처리한다 */
+    public boolean supportsDatabaseMode(String key, String mode) {
+        Connection connection = connections.get(key);
+        return connection != null && connection.databaseModes.contains(mode);
     }
 
     public String agentId(String key) {
@@ -152,6 +165,7 @@ public class AgentHub {
         private volatile String publicUrl;
         private volatile boolean database;
         private volatile Tunnel tunnel;
+        private volatile Set<String> databaseModes = Set.of();
 
         Connection(WebSocketSession session, Instant connectedAt) {
             this.session = session;

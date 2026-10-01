@@ -27,6 +27,11 @@ import java.util.Map;
  * @param migrationsPath 마이그레이션 폴더 (rootDir 기준). 비우면 src/main/resources/db/migration
  * @param migrate       false 면 마이그레이션을 플랫폼에 넘기지 않고 앱의 Flyway 에 맡긴다. 비우면 true
  * @param canaryPath    canary 판정 때 새 버전과 이전 버전에 보낼 경로. 비우면 readiness 경로 (lily-cicd docs/canary-analysis.md)
+ * @param databaseMode  온프레미스 앱의 DB 위치. cloud: 클라우드 RDS 를 터널로 (기본), local: 에이전트가 내 PC 에 띄운 DB,
+ *                      external: 사용자가 준 DB 주소 (databaseUrl). 클라우드 배포에서는 쓰지 않는다
+ * @param databaseUrl   external 일 때 DB 주소. {@code postgresql://user:pass@host:port/db} 또는 {@code mysql://...}. 저장하지 않는다
+ * @param databaseEnv   DB 접속 환경변수를 직접 준다 (온프레미스 DB 를 역방향 터널로 쓰는 클라우드 대기 배포).
+ *                      있으면 DB 를 만들지 않고 마이그레이션도 보내지 않는다 (스키마는 온프레미스가 맡는다)
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -43,9 +48,21 @@ public record BuildRequest(
         Boolean standby,
         @Pattern(regexp = "[\\w./-]*") String migrationsPath,
         Boolean migrate,
-        @Pattern(regexp = "(/[!-~]*)?") String canaryPath) {
+        @Pattern(regexp = "(/[!-~]*)?") String canaryPath,
+        @Pattern(regexp = "cloud|local|external|") String databaseMode,
+        @Size(max = 500) @Pattern(regexp = "((postgres|postgresql|mysql)://[!-~]+)?") String databaseUrl,
+        Map<String, String> databaseEnv) {
 
     public static final int DEFAULT_TARGET_PORT = 8080;
+
+    /** DB 위치는 정하지 않는다 (클라우드 배포, 또는 온프레미스 기본값 cloud) */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, null, null, null);
+    }
 
     /** canary 경로 기본값 */
     public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
@@ -77,13 +94,13 @@ public record BuildRequest(
     /** 추정한 값으로 채운 요청 */
     public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
-                env, host, standby, migrationsPath, migrate, canaryPath);
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv);
     }
 
     /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
     public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
-                env, host, standby, migrationsPath, migrate, canaryPath);
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv);
     }
 
     private static boolean blank(String value) {
@@ -92,6 +109,16 @@ public record BuildRequest(
 
     public int targetPortOrDefault() {
         return targetPort == null ? DEFAULT_TARGET_PORT : targetPort;
+    }
+
+    /** 온프레미스 DB 위치. 비우면 cloud (이 필드 전의 동작) */
+    public String databaseModeOrDefault() {
+        return blank(databaseMode) ? "cloud" : databaseMode;
+    }
+
+    /** 호출자가 DB 접속 정보를 정해 보냈다 */
+    public boolean givenDatabase() {
+        return databaseEnv != null && !databaseEnv.isEmpty();
     }
 
     public boolean isStandby() {

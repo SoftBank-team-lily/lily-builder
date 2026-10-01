@@ -29,8 +29,10 @@ import java.util.concurrent.Executors;
  * 에이전트가 붙는 소켓 {@code /api/agents/connect?token=...}. lily-on-premise 의 CONTROL_PLANE_URL 이 이 주소다.
  *
  * <pre>
- * 에이전트 → hello  {"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false}
+ * 에이전트 → hello  {"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false,
+ *                    "databaseModes":["cloud","local","external"]}
  * builder  → welcome {"type":"welcome","tunnelAgentId":"agent-{key}","cloudflare":{...},"database":{...}}  플랫폼 연결
+ *            database.reverseHost·reversePort: 온프레미스 DB 를 클라우드에 여는 역방향 터널 (배스천 사설 IP 의 이 에이전트 포트)
  * 에이전트 → cloudflare {"type":"cloudflare","rid":"..","method":"GET","path":"/zones/..."}  → 같은 rid 로 {"ok":..,"result":..}
  * builder  → job    {"type":"job","id":"{빌드 id}","repoUrl":...}   (AgentDeployService)
  * 에이전트 → status {"type":"status","id":"{빌드 id}","status":"BUILDING","line":"...","url":"..."}
@@ -52,17 +54,19 @@ public class AgentSocket implements WebSocketConfigurer {
     private final AgentDeployService deploys;
     private final AgentCloudflare cloudflare;
     private final TunnelCertificates certificates;
+    private final AgentDatabasePorts ports;
     private final ObjectMapper json = new ObjectMapper();
     /** Cloudflare 중계는 수 초 걸린다. 소켓 수신 스레드를 막지 않게 따로 돌린다 */
     private final ExecutorService relay = Executors.newVirtualThreadPerTaskExecutor();
 
     public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys,
-                       AgentCloudflare cloudflare, TunnelCertificates certificates) {
+                       AgentCloudflare cloudflare, TunnelCertificates certificates, AgentDatabasePorts ports) {
         this.tokens = tokens;
         this.hub = hub;
         this.deploys = deploys;
         this.cloudflare = cloudflare;
         this.certificates = certificates;
+        this.ports = ports;
     }
 
     /**
@@ -88,7 +92,18 @@ public class AgentSocket implements WebSocketConfigurer {
                 database.put("sshUser", tunnel.sshUser());
                 database.put("remoteHost", tunnel.remoteHost());
                 database.put("remotePort", tunnel.remotePort());
-                database.put("certificate", certificates.sign(key, publicKey));
+                Integer reversePort = null;
+                if (ports.enabled()) {
+                    try {
+                        reversePort = ports.portOf(key);
+                        database.put("reverseHost", tunnel.reverseHost());
+                        database.put("reversePort", reversePort);
+                    } catch (RuntimeException e) {
+                        // 역방향 터널 없이도 RDS 터널과 내 PC DB 는 쓴다. 클라우드 대기 배포만 못 한다
+                        log.warn("agent reverse port failed: key={} message={}", key, e.getMessage());
+                    }
+                }
+                database.put("certificate", certificates.sign(key, publicKey, reversePort));
                 welcome.put("database", database);
                 hub.platformDatabase(key, hello.path("databaseHost").asText("172.17.0.1"),
                         hello.path("databasePort").asInt(15432));
@@ -170,8 +185,10 @@ public class AgentSocket implements WebSocketConfigurer {
                 hub.seen(key);
                 switch (node.path("type").asText()) {
                     case "hello" -> {
+                        java.util.Set<String> modes = new java.util.HashSet<>();
+                        node.path("databaseModes").forEach(mode -> modes.add(mode.asText()));
                         hub.hello(key, node.path("agentId").asText(null), node.path("publicUrl").asText(""),
-                                node.path("database").asBoolean(false));
+                                node.path("database").asBoolean(false), modes);
                         welcome(key, node);
                     }
                     case "cloudflare" -> relay(key, node);
