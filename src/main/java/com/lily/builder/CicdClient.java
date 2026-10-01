@@ -74,6 +74,22 @@ public class CicdClient {
         return exchange(http.post().uri("/api/deployments/{app}/rollback", appName).body(Map.of("appOnly", appOnly)));
     }
 
+    /** 모든 슬롯을 0 으로 줄인다. Service·Ingress·DB 는 남는다 (200, 404, 409) */
+    public Passthrough stop(String appName) {
+        return exchange(http.post().uri("/api/apps/{app}/stop", appName));
+    }
+
+    /** 트래픽을 받는 슬롯을 기본 레플리카로 되돌린다 (200, 404, 409) */
+    public Passthrough start(String appName) {
+        return exchange(http.post().uri("/api/apps/{app}/start", appName));
+    }
+
+    /** 앱을 클러스터에서 지운다. database 면 DB 도 DROP (200, 404, 409) */
+    public Passthrough remove(String appName, boolean database) {
+        return exchange(http.delete().uri(uri -> uri.path("/api/apps/{app}")
+                .queryParam("database", database).build(appName)));
+    }
+
     /** 슬롯별 릴리스와 롤백 가능 여부 */
     public Passthrough release(String appName) {
         return exchange(http.get().uri("/api/deployments/{app}", appName));
