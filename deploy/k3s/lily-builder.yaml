@@ -138,6 +138,13 @@ spec:
                   name: db-provisioner-env
                   key: PROVISIONER_API_TOKEN
                   optional: true
+          # 플랫폼 연결 (사용자 PC 에이전트에 Cloudflare 토큰·DB 터널 키를 주지 않는다). Secret 이 없으면 quick tunnel, DB 없는 앱만
+          #   PLATFORM_CLOUDFLARE_API_TOKEN / _ACCOUNT_ID / _ZONE_ID / _ZONE_NAME
+          #   PLATFORM_TUNNEL_SSH_HOST / PLATFORM_TUNNEL_REMOTE_HOST / PLATFORM_TUNNEL_CA_KEY
+          envFrom:
+            - secretRef:
+                name: lily-agent-platform
+                optional: true
           resources:
             requests:
               cpu: 50m

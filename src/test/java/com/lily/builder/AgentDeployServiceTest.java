@@ -32,7 +32,8 @@ class AgentDeployServiceTest {
     private final BuildService.BuildRunner runner = new BuildServiceTest.SyncRunner();
     private final AgentDeployService service = new AgentDeployService(store, github, builds, hub, runner,
             new BuilderProperties("ns", "reg", false, "http://cicd", "kaniko", 900,
-                    new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), ""));
+                    new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), ""),
+            mock(ProvisionerClient.class));
 
     private static BuildRequest request(String appName) {
         return new BuildRequest("https://github.com/org/blog", null, null, null, appName, null, "auto", null, null,

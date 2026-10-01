@@ -49,6 +49,7 @@ public class AgentDeployService {
     private final AgentHub hub;
     private final BuildService.BuildRunner runner;
     private final BuilderProperties props;
+    private final ProvisionerClient provisioner;
     private final ObjectMapper json = new ObjectMapper();
     /** 진행 중인 온프레미스 빌드 id → 에이전트 key. 다른 에이전트가 보낸 상태는 받지 않는다 */
     private final Map<String, String> running = new ConcurrentHashMap<>();
@@ -56,8 +57,10 @@ public class AgentDeployService {
     private final Map<String, CompletableFuture<String>> rollbackWaiters = new ConcurrentHashMap<>();
 
     public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
-                              BuildService.BuildRunner runner, BuilderProperties props) {
+                              BuildService.BuildRunner runner, BuilderProperties props,
+                              ProvisionerClient provisioner) {
         this.store = store;
+        this.provisioner = provisioner;
         this.github = github;
         this.builds = builds;
         this.hub = hub;
@@ -95,14 +98,24 @@ public class AgentDeployService {
                 // DB 없이 보내면 앱이 DB 에 붙으려다 기동하지 못하고, 헬스 체크 제한 시간(3분) 뒤에야 실패한다.
                 // (lily-blog-sample 은 이미지가 prod 프로파일로 고정이라 내장 DB 로 뜨지 않는다) 보내기 전에 이유와 함께 끝낸다
                 throw new IllegalStateException("이 앱은 DB(" + database + ")가 필요한데 내 PC 에이전트에 DB 터널이 없다."
-                        + " 에이전트 PC 의 lily-on-premise/test/burst 에 burst.env 와 keys/ 를 두고 다시 실행한다");
+                        + " 에이전트를 최신 이미지로 다시 실행한다");
+            }
+            // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
+            Map<String, String> databaseEnv = null;
+            if (database != null && !database.isBlank() && hub.platformDatabase(agentKey)) {
+                AgentHub.Tunnel at = hub.tunnel(agentKey);
+                databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
+                build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port());
             }
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));
             store.save(build);
             Map<String, String> migrations = github.migrations(resolved, commit);
-            hub.send(agentKey, json.writeValueAsString(
-                    job(build.getId(), resolved, database, dockerfile, migrations, resolved.canaryPath())));
+            Map<String, Object> job = job(build.getId(), resolved, database, dockerfile, migrations, resolved.canaryPath());
+            if (databaseEnv != null) {
+                job.put("databaseEnv", databaseEnv);
+            }
+            hub.send(agentKey, json.writeValueAsString(job));
         } catch (RuntimeException | JsonProcessingException e) {
             fail(build, e.getMessage());
         }
@@ -201,6 +214,15 @@ public class AgentDeployService {
         }
         String key = agentKey(latest.get());
         return key == null ? Optional.empty() : Optional.of(key);
+    }
+
+    /** 이 앱을 가장 최근에 이 에이전트로 배포했다. 플랫폼 존의 {app}.{zone} 을 그 에이전트만 다룬다 */
+    public boolean ownedBy(String agentKey, String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(build -> agentKey.equals(agentKey(build)))
+                .orElse(false);
     }
 
     private static String agentKey(Build build) {

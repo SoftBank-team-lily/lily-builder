@@ -66,6 +66,25 @@ public class AgentHub {
         return connection != null && connection.session.isOpen();
     }
 
+    /** 플랫폼이 DB 터널 인증서를 줬다. 잡에 터널 주소 기준 DB 접속 정보를 실어야 한다 */
+    void platformDatabase(String key, String host, int port) {
+        Connection connection = connections.get(key);
+        if (connection != null) {
+            connection.database = true;
+            connection.tunnel = new Tunnel(host, port);
+        }
+    }
+
+    public boolean platformDatabase(String key) {
+        Connection connection = connections.get(key);
+        return connection != null && connection.tunnel != null;
+    }
+
+    public Tunnel tunnel(String key) {
+        Connection connection = connections.get(key);
+        return connection == null ? null : connection.tunnel;
+    }
+
     /** DB 터널이 있어 database 가 있는 잡을 받을 수 있다 */
     public boolean supportsDatabase(String key) {
         Connection connection = connections.get(key);
@@ -132,12 +151,17 @@ public class AgentHub {
         private volatile String agentId;
         private volatile String publicUrl;
         private volatile boolean database;
+        private volatile Tunnel tunnel;
 
         Connection(WebSocketSession session, Instant connectedAt) {
             this.session = session;
             this.connectedAt = connectedAt;
             this.lastSeenAt = connectedAt;
         }
+    }
+
+    /** 에이전트 컨테이너가 DB 터널을 여는 주소 (앱 컨테이너가 이 주소로 DB 에 붙는다) */
+    public record Tunnel(String host, int port) {
     }
 
     /**
