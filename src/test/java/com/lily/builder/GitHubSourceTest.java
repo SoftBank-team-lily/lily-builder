@@ -120,4 +120,18 @@ class GitHubSourceTest {
         assertThat(GitHubSource.folder(request("/api/", null, "/db//migration/", null))).isEqualTo("api/db/migration");
         assertThat(GitHubSource.repo(request(null, null, null, null))).isEqualTo("org/repo");
     }
+
+    @Test
+    void 커밋의_파일_하나를_rootDir_기준으로_읽고_없으면_null() {
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/backend/Dockerfile"))
+                .andExpect(header("Authorization", "Bearer ghp_x"))
+                .andRespond(withSuccess("EXPOSE 3000", MediaType.TEXT_PLAIN));
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/backend/package.json"))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+
+        BuildRequest request = request("/backend/", "ghp_x", null, null);
+        assertThat(source.file(request, SHA, "Dockerfile")).isEqualTo("EXPOSE 3000");
+        assertThat(source.file(request, SHA, "package.json")).isNull();
+        server.verify();
+    }
 }

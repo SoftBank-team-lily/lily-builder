@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
@@ -106,6 +107,21 @@ public class GitHubSource {
             throw new IllegalStateException("마이그레이션 합계 " + bytes / 1024 + "KiB 가 " + MAX_TOTAL_BYTES / 1024 + "KiB 를 넘는다");
         }
         return files;
+    }
+
+    /**
+     * 커밋의 파일 하나 ({rootDir}/{path}). 없으면 null. raw 주소라 API rate limit 에 들어가지 않는다.
+     */
+    public String file(BuildRequest request, String commit, String path) {
+        String root = request.rootDir() == null ? "" : request.rootDir();
+        String joined = (root + "/" + path).replaceAll("/+", "/").replaceAll("^/", "");
+        try {
+            return get(request, URI.create(rawBase + "/" + repo(request) + "/" + commit + "/" + joined))
+                    .retrieve()
+                    .body(String.class);
+        } catch (HttpClientErrorException.NotFound e) {
+            return null;
+        }
     }
 
     /** 레포 기준 마이그레이션 폴더. 예: {@code backend/src/main/resources/db/migration} */
