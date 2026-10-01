@@ -20,6 +20,8 @@ dependencyManagement {
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
+    // 온프레미스 에이전트가 붙는 소켓 (AgentSocket)
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
     implementation 'io.fabric8:kubernetes-client:6.13.5'
     // k3s kubeconfig(/etc/rancher/k3s/k3s.yaml) 의 EC 클라이언트 키를 읽는 데 필요 (없으면 기동 실패)
     runtimeOnly 'org.bouncycastle:bcpkix-jdk18on:1.78.1'

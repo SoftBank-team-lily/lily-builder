@@ -23,6 +23,10 @@ lily:
       url: ${PROVISIONER_URL:}
       api-token: ${PROVISIONER_API_TOKEN:}
     build-timeout-seconds: ${BUILD_TIMEOUT_SECONDS:900}
+    # 온프레미스 에이전트 (/api/agents). 토큰 서명 키가 32자 미만이면 끈다
+    agents:
+      token-secret: ${AGENT_TOKEN_SECRET:}
+      ping-seconds: ${AGENT_PING_SECONDS:25}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:
       table: ${BUILDS_TABLE:lily-builds}

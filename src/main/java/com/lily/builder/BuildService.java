@@ -115,8 +115,9 @@ public class BuildService {
     /**
      * 비어 있거나 auto 인 포트·DB·헬스 경로를 레포 파일로 정한다. 요청에 값이 있으면 그 값을 쓴다.
      * 레포 주소만 받는 화면에서 포트가 8080 이 아닌 앱, DB 가 필요 없는 앱도 배포되게 하려고 둔다.
+     * 온프레미스 배포({@link AgentDeployService})도 같은 값으로 잡을 만든다.
      */
-    private BuildRequest detect(Build build, BuildRequest request, String commit) {
+    BuildRequest detect(Build build, BuildRequest request, String commit) {
         if (!request.needsDetection()) {
             return request;
         }
