@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -138,6 +139,8 @@ class AgentDeployServiceTest {
         service.agentStatus(KEY, id, "HEALTH", "health: waiting", "");
         assertThat(build.getStatus()).isEqualTo(Build.Status.DEPLOYING);
         assertThat(build.getStage()).isEqualTo(2);
+        service.agentStatus(KEY, id, "JUDGING", "judge: candidate", "");
+        assertThat(build.getStage()).isEqualTo(4);
         service.agentStatus(KEY, id, "SUCCEEDED", "done: https://blog.lilycloud.kr", "https://blog.lilycloud.kr");
 
         assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
@@ -172,5 +175,22 @@ class AgentDeployServiceTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> service.start(KEY, request("a".repeat(32))))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 최근_성공이_온프레미스면_그_에이전트에_롤백을_보낸다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("rollback".equals(body.path("type").asText())) {
+                service.agentStatus(KEY, body.path("id").asText(), "SUCCEEDED", "rollback: slot=blue", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        String response = service.rollback("blog-1b62c0").orElseThrow();
+
+        assertThat(response).contains("ROLLED_BACK").contains("unchanged").contains("slot=blue");
     }
 }

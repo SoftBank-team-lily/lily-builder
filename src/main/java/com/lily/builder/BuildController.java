@@ -1,5 +1,7 @@
 package com.lily.builder;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -11,6 +13,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 @RestController
@@ -21,11 +25,14 @@ public class BuildController {
     private final BuildService service;
     private final ClusterApps clusterApps;
     private final CicdClient cicd;
+    private final AgentDeployService agents;
+    private final ObjectMapper json = new ObjectMapper();
 
-    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd) {
+    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents) {
         this.service = service;
         this.clusterApps = clusterApps;
         this.cicd = cicd;
+        this.agents = agents;
     }
 
     /** 빌드·배포는 몇 분 걸려서 바로 id 만 돌려준다. 진행 상황은 GET 으로 본다 */
@@ -61,6 +68,16 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
+        try {
+            Optional<String> onprem = agents.rollback(appName);
+            if (onprem.isPresent()) {
+                return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(onprem.get());
+            }
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
         return passthrough(cicd.rollback(appName, request != null && request.appOnly()));
     }
 
@@ -71,6 +88,14 @@ public class BuildController {
             return ResponseEntity.badRequest().build();
         }
         return passthrough(cicd.release(appName));
+    }
+
+    private String rejected(String message) {
+        try {
+            return json.writeValueAsString(Map.of("status", "REJECTED", "message", message == null ? "" : message));
+        } catch (JsonProcessingException e) {
+            return "{\"status\":\"REJECTED\"}";
+        }
     }
 
     private static ResponseEntity<String> passthrough(CicdClient.Passthrough response) {

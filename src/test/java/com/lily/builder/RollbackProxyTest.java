@@ -8,8 +8,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.util.Optional;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -21,8 +25,14 @@ class RollbackProxyTest {
 
     private final RestClient.Builder http = RestClient.builder().baseUrl("http://cicd");
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
+    private final AgentDeployService agents = mock(AgentDeployService.class);
     private final BuildController controller = new BuildController(
-            mock(BuildService.class), mock(ClusterApps.class), new CicdClient(http.build()));
+            mock(BuildService.class), mock(ClusterApps.class), new CicdClient(http.build()), cloudOnly(agents));
+
+    private static AgentDeployService cloudOnly(AgentDeployService agents) {
+        when(agents.rollback(anyString())).thenReturn(Optional.empty());
+        return agents;
+    }
 
     @Test
     void 롤백_결과를_그대로_돌려준다() {

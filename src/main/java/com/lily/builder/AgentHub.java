@@ -29,7 +29,7 @@ public class AgentHub {
     void opened(String key, WebSocketSession session) {
         // 소켓 쓰기는 한 번에 하나여야 한다. 잡 전송과 ping 이 겹칠 수 있어 감싼다
         Connection connection = new Connection(
-                new ConcurrentWebSocketSessionDecorator(session, 10_000, 512 * 1024), Instant.now());
+                new ConcurrentWebSocketSessionDecorator(session, 10_000, 2 * 1024 * 1024), Instant.now());
         Connection previous = connections.put(key, connection);
         if (previous != null) {
             closeQuietly(previous.session);

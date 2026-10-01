@@ -115,12 +115,15 @@ public final class Build {
     }
 
     private static int stageOf(String line) {
-        // 온프레미스(AgentDeployService): 에이전트가 보낸 단계. canary 단계가 없다
+        // 온프레미스(AgentDeployService): 에이전트가 보낸 단계
         if (line.startsWith("agent: BUILDING")) {
             return 1;
         }
         if (line.startsWith("agent: STARTING") || line.startsWith("agent: HEALTH")) {
             return 2;
+        }
+        if (line.startsWith("agent: JUDGING")) {
+            return 4;
         }
         if (line.startsWith("agent: SWITCHING")) {
             return 5;
