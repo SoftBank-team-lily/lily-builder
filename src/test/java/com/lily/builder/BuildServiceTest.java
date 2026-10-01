@@ -18,6 +18,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
@@ -179,5 +181,83 @@ class BuildServiceTest {
         public void run(Runnable task) {
             task.run();
         }
+    }
+
+    private static BuildRequest auto(Integer port) {
+        return new BuildRequest("https://github.com/org/repo", null, null, null, "web", port,
+                "auto", null, null, Map.of());
+    }
+
+    @Test
+    void 포트와_DB_가_비거나_auto_면_레포를_보고_정한다() {
+        when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn("FROM node:24\nEXPOSE 3000");
+        when(github.file(any(), eq(COMMIT), eq("package.json"))).thenReturn("{\"dependencies\":{\"pg\":\"^8\"}}");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"appName":"web","targetPort":3000,"database":"postgres",
+                         "readinessPath":"/","livenessPath":"/"}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getDatabase()).isEqualTo("postgres");
+        assertThat(build.getLogs()).contains(
+                "detect: port 3000 (Dockerfile EXPOSE)",
+                "detect: database postgres (package.json: \"pg\")",
+                "detect: health / (no spring actuator)");
+        cicd.verify();
+    }
+
+    @Test
+    void auto_인데_드라이버가_없으면_DB_없이_EXPOSE_가_없으면_8080() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"targetPort":8080,"database":null}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getDatabase()).isNull();
+        assertThat(build.getLogs()).contains("detect: port 8080 (default, no EXPOSE)",
+                "detect: database none (no driver found)");
+        cicd.verify();
+    }
+
+    @Test
+    void Spring_actuator_가_있으면_헬스_경로는_lily_cicd_기본값() {
+        when(github.file(any(), eq(COMMIT), eq("build.gradle")))
+                .thenReturn("implementation 'org.springframework.boot:spring-boot-starter-actuator'");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"targetPort":8080,"readinessPath":null,"livenessPath":null}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(8080));
+
+        assertThat(build.getLogs()).noneMatch(line -> line.startsWith("detect: health"));
+        cicd.verify();
+    }
+
+    @Test
+    void 값을_모두_주면_레포를_읽지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"targetPort":9000,"database":"mysql","readinessPath":"/ready","livenessPath":"/live"}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        service.start(new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 9000,
+                "mysql", "/ready", "/live", Map.of()));
+
+        verify(github, never()).file(any(), anyString(), anyString());
+        cicd.verify();
     }
 }

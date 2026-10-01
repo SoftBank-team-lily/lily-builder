@@ -16,10 +16,10 @@ import java.util.Map;
  * @param token         private 레포일 때만. GitHub Personal Access Token
  * @param rootDir       Dockerfile 이 있는 폴더. 비우면 레포 루트 (백엔드/프론트가 한 레포에 있을 때 지정)
  * @param appName       앱 이름. 도메인과 k3s 리소스 이름에 쓰인다 (lily-cicd appName 규칙)
- * @param targetPort    컨테이너 포트. 비우면 8080 (레포 주소만으로 배포하는 화면용)
- * @param database      DB 가 필요하면 postgres 또는 mysql
- * @param readinessPath 비우면 lily-cicd 기본값 (/actuator/health/readiness)
- * @param livenessPath  비우면 lily-cicd 기본값 (/actuator/health/liveness)
+ * @param targetPort    컨테이너 포트. 비우면 Dockerfile EXPOSE, 그것도 없으면 8080
+ * @param database      DB 가 필요하면 postgres 또는 mysql. auto 면 레포의 드라이버로 정한다 (없으면 DB 없이)
+ * @param readinessPath 비우면 lily-cicd 기본값 (/actuator/health/readiness). 레포에 Spring actuator 가 없으면 /
+ * @param livenessPath  비우면 lily-cicd 기본값 (/actuator/health/liveness). 레포에 Spring actuator 가 없으면 /
  * @param env           앱에 넣을 환경변수
  * @param host          Ingress 호스트 전체. 비우면 lily-cicd 기본값 ({@code {appName}.{domain}}).
  *                      클라우드 버스팅에서 온프레미스 공개 주소로 들어온 요청을 그대로 받을 때 넣는다
@@ -35,7 +35,7 @@ public record BuildRequest(
         @Pattern(regexp = "[\\w./-]*") String rootDir,
         @NotBlank @Size(max = 55) @Pattern(regexp = "[a-z0-9]([-a-z0-9]*[a-z0-9])?") String appName,
         @Min(1) @Max(65535) Integer targetPort,
-        @Pattern(regexp = "postgres|mysql|") String database,
+        @Pattern(regexp = "postgres|mysql|auto|") String database,
         String readinessPath,
         String livenessPath,
         Map<String, String> env,
@@ -62,6 +62,26 @@ public record BuildRequest(
                         Map<String, String> env) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, null, null, null, null, null);
+    }
+
+    /** 레포를 보고 DB 를 정한다 */
+    public boolean autoDatabase() {
+        return "auto".equals(database);
+    }
+
+    /** 포트·DB·헬스 경로 중 레포를 봐야 정해지는 값이 있다 ({@link AppDetector}) */
+    public boolean needsDetection() {
+        return targetPort == null || autoDatabase() || blank(readinessPath) || blank(livenessPath);
+    }
+
+    /** 추정한 값으로 채운 요청 */
+    public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
+        return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath);
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
     }
 
     public int targetPortOrDefault() {

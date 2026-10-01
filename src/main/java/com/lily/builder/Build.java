@@ -25,7 +25,8 @@ public final class Build {
     private final String repoUrl;
     private final String branch;
     private final String rootDir;
-    private final String database;
+    /** 요청이 auto 면 레포를 본 뒤 정해진다 */
+    private volatile String database;
     private final Instant createdAt;
     private final List<String> logs;
     private volatile Instant updatedAt;
@@ -68,6 +69,8 @@ public final class Build {
     void image(String image) { this.image = image; }
 
     void url(String url) { this.url = url; }
+
+    void database(String database) { this.database = database; }
 
     public String getId() { return id; }
     public String getAppName() { return appName; }

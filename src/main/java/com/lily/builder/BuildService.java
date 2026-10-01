@@ -67,6 +67,7 @@ public class BuildService {
         try {
             String commit = github.resolveCommit(request);
             build.log("source: commit " + commit);
+            request = detect(build, request, commit);
             Map<String, String> migrations = github.migrations(request, commit);
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
@@ -109,6 +110,50 @@ public class BuildService {
         } catch (RuntimeException e) {
             fail(build, e.getMessage());
         }
+    }
+
+    /**
+     * 비어 있거나 auto 인 포트·DB·헬스 경로를 레포 파일로 정한다. 요청에 값이 있으면 그 값을 쓴다.
+     * 레포 주소만 받는 화면에서 포트가 8080 이 아닌 앱, DB 가 필요 없는 앱도 배포되게 하려고 둔다.
+     */
+    private BuildRequest detect(Build build, BuildRequest request, String commit) {
+        if (!request.needsDetection()) {
+            return request;
+        }
+        AppDetector.Result found = AppDetector.detect(path -> github.file(request, commit, path));
+
+        int port;
+        if (request.targetPort() != null) {
+            port = request.targetPort();
+        } else if (found.port() != null) {
+            port = found.port();
+            build.log("detect: port " + port + " (" + found.portSource() + ")");
+        } else {
+            port = BuildRequest.DEFAULT_TARGET_PORT;
+            build.log("detect: port " + port + " (default, no EXPOSE)");
+        }
+
+        String database = request.database();
+        if (request.autoDatabase()) {
+            database = found.database();
+            build.log(database == null ? "detect: database none (no driver found)"
+                    : "detect: database " + database + " (" + found.databaseSource() + ")");
+            build.database(database);
+        }
+
+        // actuator 가 없으면 lily-cicd 기본 경로(/actuator/health/*)가 404 라 Ready 가 되지 않는다
+        String readiness = request.readinessPath();
+        String liveness = request.livenessPath();
+        if (!found.actuator() && (isBlank(readiness) || isBlank(liveness))) {
+            readiness = isBlank(readiness) ? "/" : readiness;
+            liveness = isBlank(liveness) ? "/" : liveness;
+            build.log("detect: health " + readiness + " (no spring actuator)");
+        }
+        return request.withDetected(port, database, readiness, liveness);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     /**
