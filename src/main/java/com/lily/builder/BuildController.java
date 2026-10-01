@@ -6,10 +6,12 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -89,6 +91,37 @@ public class BuildController {
                     .body(rejected(e.getMessage()));
         }
         return passthrough(cicd.rollback(appName, request != null && request.appOnly()));
+    }
+
+    /** 앱을 내린다 (모든 슬롯 0). Service·Ingress·DB 가 남아서 start 로 되살린다. 배포 중이면 409 */
+    @PostMapping("/api/apps/{appName}/stop")
+    public ResponseEntity<String> stop(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.stop(appName));
+    }
+
+    /** 내린 앱을 기본 레플리카로 다시 띄운다. 배포 중이면 409 */
+    @PostMapping("/api/apps/{appName}/start")
+    public ResponseEntity<String> startApp(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.start(appName));
+    }
+
+    /**
+     * 앱을 클러스터에서 지운다 (Deployment, Service, Ingress, Secret, 릴리스 기록).
+     * {@code database=true} 면 DB 도 DROP 한다. 없으면 404, 배포 중이면 409
+     */
+    @DeleteMapping("/api/apps/{appName}")
+    public ResponseEntity<String> remove(@PathVariable String appName,
+                                         @RequestParam(defaultValue = "false") boolean database) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.remove(appName, database));
     }
 
     /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409 */
