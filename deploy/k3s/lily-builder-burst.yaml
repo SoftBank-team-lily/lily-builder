@@ -5,7 +5,10 @@
 #     kubectl -n lily-system create secret generic lily-burst --from-literal=BURST_API_TOKEN=$(openssl rand -hex 24)
 #     kubectl -n lily-system set env deploy/lily-builder --from=secret/lily-burst
 # - lily-system 은 NetworkPolicy 로 외부 유입을 막아 두었으므로 ingress-nginx → lily-builder 만 추가로 연다
-# - host 는 클러스터 공개 IP 의 nip.io. TLS 가 없어서 토큰이 평문으로 오간다 (데모용)
+# - host
+#     builder.apps.lilycloud.kr: ALB(ACM 와일드카드)가 TLS 를 끝내고 ingress-nginx 로 넘긴다. 에이전트는 이 주소를 쓴다
+#       (BURST_BUILDER_URL=https://builder.apps.lilycloud.kr, CONTROL_PLANE_URL=wss://builder.apps.lilycloud.kr/api/agents/connect)
+#     builder.<공개 IP>.nip.io: TLS 없이 노드로 바로 붙는 예전 주소. 토큰이 평문으로 오가므로 쓰지 않는다
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -19,6 +22,23 @@ spec:
         paths:
           - path: /api/burst
             pathType: Prefix
+            backend:
+              service:
+                name: lily-builder
+                port:
+                  number: 80
+    - host: builder.apps.lilycloud.kr
+      http:
+        paths:
+          - path: /api/burst
+            pathType: Prefix
+            backend:
+              service:
+                name: lily-builder
+                port:
+                  number: 80
+          - path: /api/agents/connect
+            pathType: Exact
             backend:
               service:
                 name: lily-builder
