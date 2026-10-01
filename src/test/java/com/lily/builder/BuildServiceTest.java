@@ -178,6 +178,31 @@ class BuildServiceTest {
     }
 
     @Test
+    void Ready_실패면_cicd_로그를_줄로_남기고_빠진_설정을_고칠_방법으로_돌려준다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body("""
+                                {"status":"FAILED","message":"target deployment 가 120초 안에 Ready 가 되지 않음: blog-blue",
+                                 "logs":["step2: applied deployment blog-blue",
+                                         "diagnosis: container blog restarts=3 waiting=CrashLoopBackOff lastExit=1 Error",
+                                         "diagnosis: log Caused by: PlaceholderResolutionException: Could not resolve placeholder 'jwt.secret' in value"]}""")
+                        .contentType(MediaType.APPLICATION_JSON));
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs()).contains("cicd: step2: applied deployment blog-blue")
+                .noneMatch(l -> l.contains("{\"status\""));
+        assertThat(build.getDiagnosis().cause()).contains("JWT_SECRET");
+        assertThat(build.getDiagnosis().fixes()).singleElement().satisfies(fix -> {
+            assertThat(fix.env()).isEqualTo("JWT_SECRET");
+            assertThat(fix.kind()).isEqualTo(ConfigAdvisor.Kind.GENERATE);
+        });
+        assertThat(build.getDiagnosis().isAutoFixable()).isTrue();
+    }
+
+    @Test
     void 배포_응답이_끊기면_POST를_다시_보내지_않고_진행_상태를_따른다() {
         when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         progressBody.set("""
@@ -339,7 +364,9 @@ class BuildServiceTest {
         BuildService.Detection found = service.inspect(
                 new DetectRequest("https://github.com/org/repo", null, null, null));
 
-        assertThat(found).isEqualTo(new BuildService.Detection("postgres", "build.gradle: org.postgresql", "backend"));
+        assertThat(found.database()).isEqualTo("postgres");
+        assertThat(found.databaseSource()).isEqualTo("build.gradle: org.postgresql");
+        assertThat(found.dir()).isEqualTo("backend");
         verifyNoInteractions(kaniko);
         assertThat(store.findAll()).isEmpty();
     }
@@ -406,6 +433,24 @@ class BuildServiceTest {
     }
 
     @Test
+    void 데스크톱_앱_폴더는_빼고_서버_앱_하나를_빌드한다() {
+        repo(Map.of(
+                "desktop/package.json", "{\"main\":\"out/main.js\",\"scripts\":{\"start\":\"electron .\"},\"devDependencies\":{\"electron\":\"^44\"}}",
+                "web/package.json", "{\"scripts\":{\"build\":\"next build\",\"start\":\"next start\"},\"dependencies\":{\"next\":\"16\"}}"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("desktop", "web"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("source: skipped desktop (electron app)")
+                .anyMatch(line -> line.startsWith("source: app in folder web"));
+    }
+
+    @Test
     void 앱_폴더가_여러_개라_하나로_정할_수_없으면_폴더를_알려주고_실패한다() {
         repo(Map.of("api/go.mod", "module a\n\ngo 1.23\n", "worker/go.mod", "module b\n\ngo 1.23\n"));
         when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("api", "worker"));
@@ -415,6 +460,10 @@ class BuildServiceTest {
         assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
         assertThat(build.getLogs()).anyMatch(line -> line.contains("앱 폴더가 여러 개") && line.contains("api go") && line.contains("worker go"));
         verifyNoInteractions(kaniko);
+        assertThat(build.getDiagnosis().fixes()).singleElement().satisfies(fix -> {
+            assertThat(fix.type()).isEqualTo("rootDir");
+            assertThat(fix.options()).containsExactly("api", "worker");
+        });
     }
 
     @Test

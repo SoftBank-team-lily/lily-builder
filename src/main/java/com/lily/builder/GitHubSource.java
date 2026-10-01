@@ -141,6 +141,26 @@ public class GitHubSource {
                 .toList();
     }
 
+    /**
+     * 커밋의 파일 경로 전체 (레포 루트 기준). API 한 번이다.
+     * 설정 키를 찾으려고 소스 파일 목록이 필요할 때 쓴다 ({@link ConfigScanner}).
+     */
+    public List<String> paths(BuildRequest request, String commit) {
+        Tree tree;
+        try {
+            tree = get(request, URI.create(apiBase + "/repos/" + repo(request) + "/git/trees/" + commit + "?recursive=1"))
+                    .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
+                    .retrieve()
+                    .body(Tree.class);
+        } catch (RestClientResponseException e) {
+            throw new IllegalStateException("레포 파일 목록을 읽지 못했다 (GitHub " + e.getStatusCode().value() + ")", e);
+        }
+        return (tree == null || tree.tree() == null ? List.<Tree.Entry>of() : tree.tree()).stream()
+                .filter(entry -> "blob".equals(entry.type()))
+                .map(Tree.Entry::path)
+                .toList();
+    }
+
     /** 레포 기준 마이그레이션 폴더. 예: {@code backend/src/main/resources/db/migration} */
     static String folder(BuildRequest request) {
         String path = request.migrationsPath() == null || request.migrationsPath().isBlank()

@@ -38,15 +38,31 @@ public class BuildService {
     private final EcrRepositories ecr;
     private final GitHubSource github;
     private final DeployFollow follow;
+    private final ConfigAdvisor config;
+    private final FailureDiagnoser diagnoser;
 
     @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
-                        EcrRepositories ecr, GitHubSource github) {
-        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd));
+                        EcrRepositories ecr, GitHubSource github, ConfigAdvisor config, FailureDiagnoser diagnoser) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser);
     }
 
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                 EcrRepositories ecr, GitHubSource github) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd));
+    }
+
+    /** AI 없이 규칙으로만 판단한다 (테스트) */
+    BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                  EcrRepositories ecr, GitHubSource github, DeployFollow follow) {
+        this(store, kaniko, cicd, runner, ecr, github, follow, offlineConfig(), offlineDiagnoser());
+    }
+
+    BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                 EcrRepositories ecr, GitHubSource github, DeployFollow follow,
+                 ConfigAdvisor config, FailureDiagnoser diagnoser) {
+        this.config = config;
+        this.diagnoser = diagnoser;
         this.store = store;
         this.kaniko = kaniko;
         this.cicd = cicd;
@@ -112,12 +128,18 @@ public class BuildService {
 
     void execute(Build build, BuildRequest request) {
         String tag = ZonedDateTime.now(ZoneOffset.UTC).format(TAG);
+        // 실패하면 어디까지 왔는지로 원인을 본다
+        Attempt attempt = new Attempt(request);
         try {
             String commit = github.resolveCommit(request);
+            attempt.commit = commit;
             build.log("source: commit " + commit);
             Source source = source(build, request, commit);
             String dockerfile = source.dockerfile();
+            attempt.request = source.request();
+            attempt.detectDir = source.detectDir();
             request = detect(build, source.request(), commit, dockerfile, source.detectDir());
+            attempt.request = request;
             Map<String, String> migrations = github.migrations(request, commit);
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
@@ -171,10 +193,106 @@ public class BuildService {
                 rolledBack(build, error.message());
                 return;
             }
-            fail(build, "cicd " + e.getStatusCode().value() + ": " + e.getResponseBodyAsString());
+            if (error != null && error.message() != null) {
+                // 응답 원문(JSON)을 그대로 보이지 않는다. 로그는 줄로, 이유는 한 줄로
+                if (error.logs() != null) {
+                    error.logs().forEach(line -> build.log("cicd: " + line));
+                }
+                failDiagnosed(build, attempt, "cicd: " + error.message());
+                return;
+            }
+            failDiagnosed(build, attempt, "cicd " + e.getStatusCode().value() + ": " + e.getResponseBodyAsString());
         } catch (RuntimeException e) {
-            fail(build, e.getMessage());
+            failDiagnosed(build, attempt, e.getMessage());
         }
+    }
+
+    /** 실패했을 때 어디까지 정해졌는지 */
+    private static final class Attempt {
+        BuildRequest request;
+        String commit;
+        String detectDir;
+
+        Attempt(BuildRequest request) {
+            this.request = request;
+        }
+    }
+
+    /**
+     * 원인과 고칠 방법을 정한 뒤에 FAILED 로 바꾼다. 화면(lily-frontend 실행기)은 FAILED 를 보자마자 결과를 가져가므로 순서가 중요하다.
+     */
+    private void failDiagnosed(Build build, Attempt attempt, String reason) {
+        try {
+            List<String> logs = new java.util.ArrayList<>(build.getLogs());
+            logs.add("failed: " + reason);
+            List<ConfigAdvisor.Advice> advices = attempt.commit == null ? List.of()
+                    : configAdvice(attempt.request, attempt.commit, attempt.detectDir);
+            build.diagnosis(diagnoser.diagnose(logs, new FailureDiagnoser.Context(
+                    attempt.request.targetPort(), build.getDatabase(), null), advices));
+        } catch (RuntimeException e) {
+            log.warn("diagnosis failed: id={} message={}", build.getId(), e.getMessage());
+        }
+        fail(build, reason);
+    }
+
+    static ConfigAdvisor offlineConfig() {
+        return new ConfigAdvisor(AiAdvisor.offline());
+    }
+
+    static FailureDiagnoser offlineDiagnoser() {
+        return new FailureDiagnoser(offlineConfig(), AiAdvisor.offline());
+    }
+
+    /**
+     * 앱 폴더의 설정 키를 찾고 채울 방법을 정한다. GitHub 를 못 읽으면 빈 목록 (배포 판단을 막지 않는다).
+     *
+     * @param detectDir rootDir 기준 앱 폴더. null 이면 rootDir
+     */
+    List<ConfigAdvisor.Advice> configAdvice(BuildRequest request, String commit, String detectDir) {
+        try {
+            String dir = String.join("/", java.util.stream.Stream.of(request.rootDir(), detectDir)
+                    .filter(v -> v != null && !v.isBlank()).map(v -> v.replaceAll("^/+|/+$", "")).toList());
+            String prefix = dir.isEmpty() ? "" : dir + "/";
+            List<String> paths = github.paths(request, commit).stream()
+                    .filter(p -> p.startsWith(prefix))
+                    .map(p -> p.substring(prefix.length()))
+                    .toList();
+            Map<String, String> files = fetchAll(ConfigScanner.wanted(paths),
+                    path -> github.file(request, commit, detectDir == null ? path : detectDir + "/" + path));
+            return config.advise(ConfigScanner.scan(paths, files::get));
+        } catch (RuntimeException e) {
+            log.warn("config scan failed: repo={} message={}", request.repoUrl(), e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** raw 파일을 동시에 받는다. 수백 개를 하나씩 받으면 분 단위가 걸린다 */
+    private static Map<String, String> fetchAll(List<String> paths, java.util.function.Function<String, String> read) {
+        Map<String, String> files = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(16);
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            for (String path : paths) {
+                executor.submit(() -> {
+                    try {
+                        slots.acquire();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    try {
+                        String text = read.apply(path);
+                        if (text != null) {
+                            files.put(path, text);
+                        }
+                    } catch (RuntimeException e) {
+                        log.debug("file skipped: {} {}", path, e.getMessage());
+                    } finally {
+                        slots.release();
+                    }
+                });
+            }
+        }
+        return files;
     }
 
      static final String NOTHING_TO_BUILD = "Dockerfile 이 없고 빌드 방법도 찾지 못했다"
@@ -212,15 +330,16 @@ public class BuildService {
             throw new IllegalStateException(NOTHING_TO_BUILD + ". 폴더 " + request.rootDir() + " 를 확인한다");
         }
 
-        List<Folder> apps = new java.util.ArrayList<>();
-        for (String dir : github.folders(request, commit)) {
-            Folder folder = folder(request.withSource(dir, request.migrationsPath(), request.targetPort()), commit, envKeys);
-            if (folder.found()) {
-                apps.add(folder);
-            }
-        }
+        List<Folder> apps = appFolders(request, commit, envKeys);
         if (apps.isEmpty()) {
             throw new IllegalStateException(NOTHING_TO_BUILD + ". 루트와 최상위 폴더 모두에 없다");
+        }
+        List<Folder> servable = apps.stream().filter(f -> f.client() == null).toList();
+        if (!servable.isEmpty() && servable.size() < apps.size()) {
+            // 데스크톱·모바일 앱은 컨테이너로 띄울 수 없다. 남은 것만 본다
+            build.log("source: skipped " + apps.stream().filter(f -> f.client() != null)
+                    .map(f -> f.dir() + " (" + f.client() + ")").collect(java.util.stream.Collectors.joining(", ")));
+            apps = servable;
         }
         if (apps.size() == 1) {
             Folder app = apps.getFirst();
@@ -249,8 +368,62 @@ public class BuildService {
                 + "). 배포할 폴더를 지정한다");
     }
 
+    /** 레포 최상위 폴더 중 빌드할 수 있는 것 */
+    private List<Folder> appFolders(BuildRequest request, String commit, java.util.Set<String> envKeys) {
+        List<Folder> apps = new java.util.ArrayList<>();
+        for (String dir : github.folders(request, commit)) {
+            BuildRequest sub = request.withSource(dir, request.migrationsPath(), request.targetPort());
+            Folder folder = folder(sub, commit, envKeys);
+            if (folder.found()) {
+                apps.add(folder.withClient(clientApp(sub, commit)));
+            }
+        }
+        return apps;
+    }
+
+    /** 서버로 띄울 수 없는 앱이면 종류 (electron 등). 아니면 null */
+    private String clientApp(BuildRequest request, String commit) {
+        String pkg = github.file(request, commit, "package.json");
+        if (pkg != null) {
+            for (String marker : List.of("electron", "react-native", "expo")) {
+                if (pkg.contains("\"" + marker + "\"")) {
+                    return marker + " app";
+                }
+            }
+        }
+        String gradle = github.file(request, commit, "build.gradle");
+        if (gradle == null) {
+            gradle = github.file(request, commit, "build.gradle.kts");
+        }
+        if (gradle != null && gradle.contains("com.android.application")) {
+            return "android app";
+        }
+        return null;
+    }
+
+    /**
+     * 배포 화면이 보여 줄 앱 폴더 후보.
+     *
+     * @param client 서버로 띄울 수 없는 앱이면 종류. 아니면 null
+     */
+    public record AppCandidate(String dir, String stack, String client) {
+    }
+
     /** 폴더 하나를 본 결과. Dockerfile 이 있으면 generated 는 null */
-    private record Folder(BuildRequest request, boolean hasDockerfile, DockerfileGenerator.Generated generated) {
+    private record Folder(BuildRequest request, boolean hasDockerfile, DockerfileGenerator.Generated generated,
+                          String client) {
+        Folder(BuildRequest request, boolean hasDockerfile, DockerfileGenerator.Generated generated) {
+            this(request, hasDockerfile, generated, null);
+        }
+
+        Folder withClient(String client) {
+            return new Folder(request, hasDockerfile, generated, client);
+        }
+
+        AppCandidate candidate() {
+            return new AppCandidate(dir(), generated == null ? "Dockerfile" : generated.stack(), client);
+        }
+
         boolean found() {
             return hasDockerfile || generated != null;
         }
@@ -343,18 +516,37 @@ public class BuildService {
         BuildRequest request = new BuildRequest(detect.repoUrl(), detect.branch(), detect.token(), detect.rootDir(),
                 "detect", null, "auto", null, null, Map.of());
         String commit = github.resolveCommit(request);
-        Source source = source(new Build("detect", request), request, commit);
+        Build probe = new Build("detect", request);
+        List<AppCandidate> apps = List.of();
+        if (isBlank(request.rootDir()) && !folder(request, commit, java.util.Set.of()).found()) {
+            apps = appFolders(request, commit, java.util.Set.of()).stream().map(Folder::candidate).toList();
+        }
+        Source source;
+        try {
+            source = source(probe, request, commit);
+        } catch (IllegalStateException e) {
+            if (apps.size() > 1) {
+                // 폴더를 고르면 다시 감지한다
+                return new Detection(null, null, null, apps, List.of(), e.getMessage());
+            }
+            throw e;
+        }
         AppDetector.Result found = detectFiles(source.request(), commit, source.dockerfile(), source.detectDir());
         String dir = source.detectDir() != null ? source.detectDir() : source.request().rootDir();
-        return new Detection(found.database(), found.databaseSource(), isBlank(dir) ? null : dir);
+        List<ConfigAdvisor.Advice> keys = configAdvice(source.request(), commit, source.detectDir());
+        return new Detection(found.database(), found.databaseSource(), isBlank(dir) ? null : dir, apps, keys, null);
     }
 
     /**
      * @param database       postgres / mysql. 드라이버가 안 보이면 null
      * @param databaseSource 근거. 예: {@code build.gradle: org.postgresql}
      * @param dir            본 폴더 (레포 루트 기준). 루트면 null
+     * @param apps           레포 루트에 앱이 없을 때 최상위 앱 폴더 후보. 아니면 빈 목록
+     * @param config         앱이 기동할 때 읽는 설정 키와 채울 방법
+     * @param problem        폴더를 하나로 정하지 못했을 때 이유. 화면이 apps 에서 고르게 한다
      */
-    public record Detection(String database, String databaseSource, String dir) {
+    public record Detection(String database, String databaseSource, String dir, List<AppCandidate> apps,
+                            List<ConfigAdvisor.Advice> config, String problem) {
     }
 
     private static boolean isBlank(String value) {

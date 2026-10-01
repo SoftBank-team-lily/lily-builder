@@ -33,6 +33,8 @@ public final class Build {
     private volatile Status status;
     private volatile String image;
     private volatile String url;
+    /** 실패했을 때 원인과 고칠 방법 ({@link FailureDiagnoser}). 그 외 null */
+    private volatile FailureDiagnoser.Diagnosis diagnosis;
 
     Build(String id, BuildRequest request) {
         this(id, request.appName(), request.repoUrl(), request.branchOrDefault(), blankToNull(request.rootDir()),
@@ -72,6 +74,8 @@ public final class Build {
 
     void database(String database) { this.database = database; }
 
+    void diagnosis(FailureDiagnoser.Diagnosis diagnosis) { this.diagnosis = diagnosis; }
+
     public String getId() { return id; }
     public String getAppName() { return appName; }
     public String getRepoUrl() { return repoUrl; }
@@ -83,6 +87,7 @@ public final class Build {
     public Status getStatus() { return status; }
     public String getImage() { return image; }
     public String getUrl() { return url; }
+    public FailureDiagnoser.Diagnosis getDiagnosis() { return diagnosis; }
     public List<String> getLogs() { return List.copyOf(logs); }
 
     /** 0~5. {@link #STAGES} 의 번호 */
