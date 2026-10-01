@@ -108,6 +108,27 @@ class ConfigScannerTest {
     }
 
     @Test
+    void AI_가_입력으로_봐도_규칙의_기본값은_미리_채운다() {
+        okhttp3.mockwebserver.MockWebServer openai = new okhttp3.mockwebserver.MockWebServer();
+        try (openai) {
+            openai.enqueue(new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json").setBody("""
+                    {"choices":[{"message":{"content":"{\\"keys\\":[{\\"env\\":\\"AI_OPENAI_MODEL\\",\\"kind\\":\\"input\\",\\"value\\":\\"\\",\\"hint\\":\\"모델 이름\\"}]}"}}]}"""));
+            openai.start();
+            ConfigAdvisor advisor = new ConfigAdvisor(new AiAdvisor(null, "k", null, openai.url("/").toString().replaceAll("/$", "")));
+            ConfigScanner.Result result = new ConfigScanner.Result(List.of(
+                    new ConfigScanner.Key("ai.openai.model", "AI_OPENAI_MODEL", "a", null, "", true)), false, false);
+
+            assertThat(advisor.advise(result)).singleElement().satisfies(advice -> {
+                assertThat(advice.kind()).isEqualTo(ConfigAdvisor.Kind.DEFAULT);
+                assertThat(advice.value()).isEqualTo("gpt-4o-mini");
+                assertThat(advice.hint()).isEqualTo("모델 이름");
+            });
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    @Test
     void 환경변수_이름은_Spring_이_읽는_형태다() {
         assertThat(ConfigScanner.envName("kakao.rest-api-key")).isEqualTo("KAKAO_REST_API_KEY");
         assertThat(ConfigScanner.envName("app.items[0].name")).isEqualTo("APP_ITEMS_0_NAME");
