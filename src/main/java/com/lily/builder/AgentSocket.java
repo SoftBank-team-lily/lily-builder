@@ -20,13 +20,18 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 에이전트가 붙는 소켓 {@code /api/agents/connect?token=...}. lily-on-premise 의 CONTROL_PLANE_URL 이 이 주소다.
  *
  * <pre>
  * 에이전트 → hello  {"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false}
+ * builder  → welcome {"type":"welcome","tunnelAgentId":"agent-{key}","cloudflare":{...},"database":{...}}  플랫폼 연결
+ * 에이전트 → cloudflare {"type":"cloudflare","rid":"..","method":"GET","path":"/zones/..."}  → 같은 rid 로 {"ok":..,"result":..}
  * builder  → job    {"type":"job","id":"{빌드 id}","repoUrl":...}   (AgentDeployService)
  * 에이전트 → status {"type":"status","id":"{빌드 id}","status":"BUILDING","line":"...","url":"..."}
  * </pre>
@@ -45,12 +50,82 @@ public class AgentSocket implements WebSocketConfigurer {
     private final AgentTokens tokens;
     private final AgentHub hub;
     private final AgentDeployService deploys;
+    private final AgentCloudflare cloudflare;
+    private final TunnelCertificates certificates;
     private final ObjectMapper json = new ObjectMapper();
+    /** Cloudflare 중계는 수 초 걸린다. 소켓 수신 스레드를 막지 않게 따로 돌린다 */
+    private final ExecutorService relay = Executors.newVirtualThreadPerTaskExecutor();
 
-    public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys) {
+    public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys,
+                       AgentCloudflare cloudflare, TunnelCertificates certificates) {
         this.tokens = tokens;
         this.hub = hub;
         this.deploys = deploys;
+        this.cloudflare = cloudflare;
+        this.certificates = certificates;
+    }
+
+    /**
+     * 플랫폼 연결 에이전트에 공개 주소용 존과 DB 터널 인증서를 준다. 플랫폼에 없는 것은 싣지 않는다
+     * (에이전트는 존이 없으면 quick tunnel, 인증서가 없으면 DB 없는 앱만 받는다).
+     */
+    void welcome(String key, JsonNode hello) {
+        if (!hello.path("platform").asBoolean(false) && !hello.hasNonNull("sshPublicKey")) {
+            return;
+        }
+        Map<String, Object> welcome = new LinkedHashMap<>();
+        welcome.put("type", "welcome");
+        welcome.put("tunnelAgentId", AgentCloudflare.tunnelAgentId(key));
+        if (hello.path("platform").asBoolean(false) && cloudflare.enabled()) {
+            welcome.put("cloudflare", cloudflare.zone());
+        }
+        String publicKey = hello.path("sshPublicKey").asText("");
+        if (!publicKey.isBlank() && certificates.enabled()) {
+            try {
+                PlatformProperties.Tunnel tunnel = certificates.settings();
+                Map<String, Object> database = new LinkedHashMap<>();
+                database.put("sshHost", tunnel.sshHost());
+                database.put("sshUser", tunnel.sshUser());
+                database.put("remoteHost", tunnel.remoteHost());
+                database.put("remotePort", tunnel.remotePort());
+                database.put("certificate", certificates.sign(key, publicKey));
+                welcome.put("database", database);
+                hub.platformDatabase(key, hello.path("databaseHost").asText("172.17.0.1"),
+                        hello.path("databasePort").asInt(15432));
+            } catch (RuntimeException e) {
+                log.warn("agent tunnel certificate failed: key={} message={}", key, e.getMessage());
+            }
+        }
+        try {
+            hub.send(key, json.writeValueAsString(welcome));
+        } catch (Exception e) {
+            log.warn("agent welcome failed: key={} message={}", key, e.getMessage());
+        }
+    }
+
+    void relay(String key, JsonNode request) {
+        String rid = request.path("rid").asText("");
+        relay.execute(() -> {
+            Map<String, Object> reply = new LinkedHashMap<>();
+            reply.put("type", "cloudflare");
+            reply.put("rid", rid);
+            try {
+                JsonNode result = cloudflare.call(key, request.path("method").asText(), request.path("path").asText(),
+                        request.hasNonNull("body") ? request.get("body") : null);
+                reply.put("ok", true);
+                reply.put("result", result);
+            } catch (RuntimeException e) {
+                log.info("agent cloudflare call rejected: key={} {} {} → {}", key, request.path("method").asText(),
+                        request.path("path").asText(), e.getMessage());
+                reply.put("ok", false);
+                reply.put("message", e.getMessage());
+            }
+            try {
+                hub.send(key, json.writeValueAsString(reply));
+            } catch (Exception e) {
+                log.warn("agent cloudflare reply failed: key={} message={}", key, e.getMessage());
+            }
+        });
     }
 
     @Override
@@ -94,8 +169,12 @@ public class AgentSocket implements WebSocketConfigurer {
                 JsonNode node = json.readTree(message.getPayload());
                 hub.seen(key);
                 switch (node.path("type").asText()) {
-                    case "hello" -> hub.hello(key, node.path("agentId").asText(null), node.path("publicUrl").asText(""),
-                            node.path("database").asBoolean(false));
+                    case "hello" -> {
+                        hub.hello(key, node.path("agentId").asText(null), node.path("publicUrl").asText(""),
+                                node.path("database").asBoolean(false));
+                        welcome(key, node);
+                    }
+                    case "cloudflare" -> relay(key, node);
                     case "status" -> deploys.agentStatus(key, node.path("id").asText(), node.path("status").asText(),
                             node.path("line").asText(""), node.path("url").asText(""));
                     default -> log.debug("agent message ignored: key={} type={}", key, node.path("type").asText());

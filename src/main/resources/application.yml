@@ -27,6 +27,21 @@ lily:
     agents:
       token-secret: ${AGENT_TOKEN_SECRET:}
       ping-seconds: ${AGENT_PING_SECONDS:25}
+    # 플랫폼 연결: 사용자 PC 에이전트에는 토큰만 두고, 공개 주소(Cloudflare)와 DB 터널 자격은 builder 가 쥔다
+    platform:
+      cloudflare:
+        api-token: ${PLATFORM_CLOUDFLARE_API_TOKEN:}
+        account-id: ${PLATFORM_CLOUDFLARE_ACCOUNT_ID:}
+        zone-id: ${PLATFORM_CLOUDFLARE_ZONE_ID:}
+        zone-name: ${PLATFORM_CLOUDFLARE_ZONE_NAME:}
+      tunnel:
+        ssh-host: ${PLATFORM_TUNNEL_SSH_HOST:}
+        ssh-user: ${PLATFORM_TUNNEL_SSH_USER:lily-tunnel}
+        remote-host: ${PLATFORM_TUNNEL_REMOTE_HOST:}
+        remote-port: ${PLATFORM_TUNNEL_REMOTE_PORT:5432}
+        # 배스천 lily-tunnel 의 authorized_keys 에 cert-authority 로 등록한 CA 의 개인키 (PEM 본문)
+        ca-key: ${PLATFORM_TUNNEL_CA_KEY:}
+        validity-hours: ${PLATFORM_TUNNEL_VALIDITY_HOURS:24}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:
       table: ${BUILDS_TABLE:lily-builds}
