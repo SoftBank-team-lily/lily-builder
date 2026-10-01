@@ -1,5 +1,6 @@
 package com.lily.builder;
 
+import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
@@ -31,6 +32,8 @@ public class KanikoBuilder {
      * 노드 IAM 역할(IMDS)을 쓰지 않으므로 빌드(= 사용자 Dockerfile 의 RUN)는 AWS 권한이 없는 worker 에서 돈다.
      */
     static final String REGISTRY_AUTH_SECRET = "ecr-pull";
+    /** 레포에 Dockerfile 이 없을 때 만든 Dockerfile 을 마운트하는 경로 */
+    static final String GENERATED_DOCKERFILE = "/lily/Dockerfile";
 
     private final KubernetesClient k8s;
     private final BuilderProperties props;
@@ -53,6 +56,13 @@ public class KanikoBuilder {
      * @param commit 빌드할 커밋 SHA. null 이면 브랜치 끝
      */
     public String build(String buildId, BuildRequest request, String tag, String commit) {
+        return build(buildId, request, tag, commit, null);
+    }
+
+    /**
+     * @param dockerfile 레포에 Dockerfile 이 없어 만든 내용. ConfigMap 으로 넣는다. null 이면 레포의 Dockerfile
+     */
+    public String build(String buildId, BuildRequest request, String tag, String commit, String dockerfile) {
         String image = props.registry() + "/" + request.appName() + ":" + tag;
         String jobName = "build-" + buildId;
         String ns = props.namespace();
@@ -65,7 +75,14 @@ public class KanikoBuilder {
                         .addToStringData("GIT_PASSWORD", request.token())
                         .build()).create();
             }
-            k8s.batch().v1().jobs().inNamespace(ns).resource(job(jobName, request, image, hasToken, commit)).create();
+            if (dockerfile != null) {
+                k8s.configMaps().inNamespace(ns).resource(new ConfigMapBuilder()
+                        .withNewMetadata().withName(jobName).endMetadata()
+                        .addToData("Dockerfile", dockerfile)
+                        .build()).create();
+            }
+            k8s.batch().v1().jobs().inNamespace(ns)
+                    .resource(job(jobName, request, image, hasToken, commit, dockerfile != null)).create();
             Job done = awaitFinished(ns, jobName);
             if (!succeeded(done)) {
                 throw new IllegalStateException("kaniko build failed\n" + tail(ns, jobName));
@@ -77,16 +94,33 @@ public class KanikoBuilder {
             if (hasToken) {
                 k8s.secrets().inNamespace(ns).withName(jobName).delete();
             }
+            if (dockerfile != null) {
+                k8s.configMaps().inNamespace(ns).withName(jobName).delete();
+            }
         }
     }
 
     Job job(String name, BuildRequest request, String image, boolean hasToken, String commit) {
+        return job(name, request, image, hasToken, commit, false);
+    }
+
+    /**
+     * @param generated true 면 같은 이름의 ConfigMap 에 둔 Dockerfile 로 빌드한다 (컨텍스트 밖 절대 경로)
+     */
+    Job job(String name, BuildRequest request, String image, boolean hasToken, String commit, boolean generated) {
         List<String> args = new ArrayList<>(List.of(
                 "--context=" + request.gitContext(commit),
-                "--dockerfile=Dockerfile",
+                "--dockerfile=" + (generated ? GENERATED_DOCKERFILE : "Dockerfile"),
                 "--destination=" + image));
         if (request.rootDir() != null && !request.rootDir().isBlank()) {
             args.add("--context-sub-path=" + request.rootDir().replaceAll("^/+|/+$", ""));
+        }
+        if (request.env() != null) {
+            // 브라우저 코드에 빌드할 때 박히는 공개 변수 (VITE_ 등). Dockerfile 에 ARG 가 있으면 쓰인다
+            request.env().entrySet().stream()
+                    .filter(e -> DockerfileGenerator.PUBLIC_ENV.matcher(e.getKey()).matches())
+                    .sorted(Map.Entry.comparingByKey())
+                    .forEach(e -> args.add("--build-arg=" + e.getKey() + "=" + e.getValue()));
         }
         if (props.insecure()) {
             args.add("--insecure");
@@ -114,6 +148,16 @@ public class KanikoBuilder {
                         .endSpec()
                     .endTemplate()
                 .endSpec();
+        if (generated) {
+            builder.editSpec().editTemplate().editSpec()
+                    .addNewVolume().withName("dockerfile")
+                        .withNewConfigMap().withName(name).endConfigMap()
+                    .endVolume()
+                    .editFirstContainer()
+                        .addNewVolumeMount().withName("dockerfile").withMountPath("/lily").withReadOnly(true).endVolumeMount()
+                    .endContainer()
+                    .endSpec().endTemplate().endSpec();
+        }
         if (props.ecr()) {
             // 사용자 Dockerfile 이 실행되므로 AWS 권한이 있는 lily-server 에 두지 않는다 (worker 는 IMDS 차단).
             // worker 는 사용자 앱과 같은 노드라 메모리 상한을 둔다

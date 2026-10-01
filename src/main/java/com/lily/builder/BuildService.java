@@ -23,6 +23,8 @@ import java.util.UUID;
 public class BuildService {
 
     private static final Logger log = LoggerFactory.getLogger(BuildService.class);
+    /** 헬스 경로 대신 보내면 lily-cicd·에이전트가 HTTP 대신 포트가 열렸는지만 본다 */
+    static final String TCP_HEALTH = "tcp";
     private static final DateTimeFormatter TAG = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
             new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
@@ -67,7 +69,8 @@ public class BuildService {
         try {
             String commit = github.resolveCommit(request);
             build.log("source: commit " + commit);
-            request = detect(build, request, commit);
+            String dockerfile = dockerfile(build, request, commit);
+            request = detect(build, request, commit, dockerfile);
             Map<String, String> migrations = github.migrations(request, commit);
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
@@ -76,7 +79,7 @@ public class BuildService {
                 build.log("build: created ecr repository " + request.appName());
             }
             update(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
-            String image = kaniko.build(build.getId(), request, tag, commit);
+            String image = kaniko.build(build.getId(), request, tag, commit, dockerfile);
             build.image(image);
             build.log("build: pushed " + image);
 
@@ -113,15 +116,43 @@ public class BuildService {
     }
 
     /**
+     * 레포에 Dockerfile 이 없으면 빌드 파일을 보고 만든다. 레포에 있으면 null (레포 것을 쓴다).
+     *
+     * @throws IllegalStateException Dockerfile 도 없고 빌드 방법도 모를 때
+     */
+    String dockerfile(Build build, BuildRequest request, String commit) {
+        if (github.file(request, commit, "Dockerfile") != null) {
+            return null;
+        }
+        DockerfileGenerator.Generated generated = DockerfileGenerator.generate(path -> github.file(request, commit, path),
+                request.env() == null ? java.util.Set.of() : request.env().keySet());
+        if (generated == null) {
+            throw new IllegalStateException("Dockerfile 이 없고 빌드 방법도 찾지 못했다"
+                    + " (pom.xml, build.gradle, package.json, requirements.txt, pyproject.toml, go.mod, index.html 이 없다)."
+                    + " 앱이 하위 폴더에 있다면 폴더를 지정한다");
+        }
+        build.log("source: no Dockerfile, generated for " + generated.stack());
+        return generated.dockerfile();
+    }
+
+    /**
      * 비어 있거나 auto 인 포트·DB·헬스 경로를 레포 파일로 정한다. 요청에 값이 있으면 그 값을 쓴다.
      * 레포 주소만 받는 화면에서 포트가 8080 이 아닌 앱, DB 가 필요 없는 앱도 배포되게 하려고 둔다.
      * 온프레미스 배포({@link AgentDeployService})도 같은 값으로 잡을 만든다.
      */
     BuildRequest detect(Build build, BuildRequest request, String commit) {
+        return detect(build, request, commit, null);
+    }
+
+    /**
+     * @param dockerfile 만든 Dockerfile. 레포의 Dockerfile 대신 이걸로 포트를 찾는다. null 이면 레포 것
+     */
+    BuildRequest detect(Build build, BuildRequest request, String commit, String dockerfile) {
         if (!request.needsDetection()) {
             return request;
         }
-        AppDetector.Result found = AppDetector.detect(path -> github.file(request, commit, path));
+        AppDetector.Result found = AppDetector.detect(path -> dockerfile != null && path.equals("Dockerfile")
+                ? dockerfile : github.file(request, commit, path));
 
         int port;
         if (request.targetPort() != null) {
@@ -142,13 +173,15 @@ public class BuildService {
             build.database(database);
         }
 
-        // actuator 가 없으면 lily-cicd 기본 경로(/actuator/health/*)가 404 라 Ready 가 되지 않는다
+        // actuator 가 없으면 lily-cicd 기본 경로(/actuator/health/*)가 404 라 Ready 가 되지 않는다.
+        // / 로 보면 Spring Security 앱(401·403)이나 / 가 없는 API 서버(404)가 떨어지므로 포트가 열렸는지만 본다
         String readiness = request.readinessPath();
         String liveness = request.livenessPath();
         if (!found.actuator() && (isBlank(readiness) || isBlank(liveness))) {
-            readiness = isBlank(readiness) ? "/" : readiness;
-            liveness = isBlank(liveness) ? "/" : liveness;
-            build.log("detect: health " + readiness + " (no spring actuator)");
+            readiness = isBlank(readiness) ? TCP_HEALTH : readiness;
+            liveness = isBlank(liveness) ? TCP_HEALTH : liveness;
+            build.log("detect: health " + (TCP_HEALTH.equals(readiness) ? "tcp port " + port : readiness)
+                    + " (no spring actuator)");
         }
         return request.withDetected(port, database, readiness, liveness);
     }

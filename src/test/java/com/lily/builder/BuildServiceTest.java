@@ -14,7 +14,10 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.mockito.AdditionalMatchers.not;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -55,6 +58,8 @@ class BuildServiceTest {
     void source() {
         when(github.resolveCommit(any())).thenReturn(COMMIT);
         when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of());
+        // 레포에 Dockerfile 이 있는 경우가 기본. 없는 경우는 따로 시험한다
+        when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn("FROM scratch");
     }
 
     private static BuildRequest request(String database) {
@@ -64,7 +69,7 @@ class BuildServiceTest {
 
     @Test
     void 빌드_후_cicd_에_배포를_요청한다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(content().json("""
@@ -86,7 +91,7 @@ class BuildServiceTest {
     @Test
     void 커밋을_고정하고_마이그레이션을_함께_보낸다() {
         when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of("V1__init.sql", "create table a(id int);"));
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("""
                         {"appName":"blog","migrations":{"V1__init.sql":"create table a(id int);"}}"""))
@@ -104,7 +109,7 @@ class BuildServiceTest {
 
     @Test
     void 마이그레이션이_없으면_migrations_를_보내지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(request -> assertThat(((MockClientHttpRequest) request).getBodyAsString()).doesNotContain("migrations"))
                 .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
@@ -128,7 +133,7 @@ class BuildServiceTest {
 
     @Test
     void DB_를_고르지_않으면_database_를_보내지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("{\"database\":null}"))
                 .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
@@ -139,7 +144,7 @@ class BuildServiceTest {
 
     @Test
     void 빌드가_실패하면_배포하지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenThrow(new IllegalStateException("kaniko build failed"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenThrow(new IllegalStateException("kaniko build failed"));
 
         Build build = service.start(request(""));
 
@@ -150,7 +155,7 @@ class BuildServiceTest {
 
     @Test
     void 배포가_실패하면_cicd_응답을_남긴다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
                         .body("{\"status\":\"FAILED\",\"message\":\"ready timeout\"}")
@@ -165,7 +170,7 @@ class BuildServiceTest {
 
     @Test
     void 이력은_저장소에_남고_최신순이다() throws Exception {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenThrow(new IllegalStateException("x"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenThrow(new IllegalStateException("x"));
 
         Build first = service.start(request(""));
         Thread.sleep(5);
@@ -192,11 +197,11 @@ class BuildServiceTest {
     void 포트와_DB_가_비거나_auto_면_레포를_보고_정한다() {
         when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn("FROM node:24\nEXPOSE 3000");
         when(github.file(any(), eq(COMMIT), eq("package.json"))).thenReturn("{\"dependencies\":{\"pg\":\"^8\"}}");
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("""
                         {"appName":"web","targetPort":3000,"database":"postgres",
-                         "readinessPath":"/","livenessPath":"/"}"""))
+                         "readinessPath":"tcp","livenessPath":"tcp"}"""))
                 .andRespond(withSuccess("""
                         {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
 
@@ -207,13 +212,13 @@ class BuildServiceTest {
         assertThat(build.getLogs()).contains(
                 "detect: port 3000 (Dockerfile EXPOSE)",
                 "detect: database postgres (package.json: \"pg\")",
-                "detect: health / (no spring actuator)");
+                "detect: health tcp port 3000 (no spring actuator)");
         cicd.verify();
     }
 
     @Test
     void auto_인데_드라이버가_없으면_DB_없이_EXPOSE_가_없으면_8080() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("""
                         {"targetPort":8080,"database":null}"""))
@@ -232,7 +237,7 @@ class BuildServiceTest {
     void Spring_actuator_가_있으면_헬스_경로는_lily_cicd_기본값() {
         when(github.file(any(), eq(COMMIT), eq("build.gradle")))
                 .thenReturn("implementation 'org.springframework.boot:spring-boot-starter-actuator'");
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/web:t");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("""
                         {"targetPort":8080,"readinessPath":null,"livenessPath":null}"""))
@@ -246,8 +251,53 @@ class BuildServiceTest {
     }
 
     @Test
-    void 값을_모두_주면_레포를_읽지_않는다() {
-        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT))).thenReturn("reg/blog:t");
+    void Dockerfile_이_없으면_빌드_파일로_만들어_빌드하고_포트도_그걸로_정한다() {
+        when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn(null);
+        when(github.file(any(), eq(COMMIT), eq("package.json")))
+                .thenReturn("{\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^8\"}}");
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"targetPort":8080}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("source: no Dockerfile, generated for node static (dist)",
+                "detect: port 8080 (Dockerfile EXPOSE)");
+        verify(kaniko).build(anyString(), any(), anyString(), eq(COMMIT),
+                argThat((String dockerfile) -> dockerfile.contains("COPY --from=build /src/dist")));
+        cicd.verify();
+    }
+
+    @Test
+    void Dockerfile_도_빌드_파일도_없으면_빌드하지_않고_실패한다() {
+        when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn(null);
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs()).anyMatch(line -> line.contains("빌드 방법도 찾지 못했다"));
+        verifyNoInteractions(kaniko);
+    }
+
+    @Test
+    void 레포에_Dockerfile_이_있으면_그대로_쓴다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        service.start(request("postgres"));
+
+        verify(kaniko).build(anyString(), any(), anyString(), eq(COMMIT), isNull());
+    }
+
+    @Test
+    void 값을_모두_주면_Dockerfile_말고는_레포를_읽지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))
                 .andExpect(content().json("""
                         {"targetPort":9000,"database":"mysql","readinessPath":"/ready","livenessPath":"/live"}"""))
@@ -257,7 +307,7 @@ class BuildServiceTest {
         service.start(new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 9000,
                 "mysql", "/ready", "/live", Map.of()));
 
-        verify(github, never()).file(any(), anyString(), anyString());
+        verify(github, never()).file(any(), anyString(), not(eq("Dockerfile")));
         cicd.verify();
     }
 }

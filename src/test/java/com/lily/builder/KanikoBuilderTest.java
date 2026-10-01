@@ -56,6 +56,28 @@ class KanikoBuilderTest {
     }
 
     @Test
+    void 만든_Dockerfile_은_ConfigMap_으로_마운트해_컨텍스트_밖_경로로_빌드한다() {
+        Job job = builder("reg", false).job("build-1", request("backend", null), "img", false, null, true);
+        var pod = job.getSpec().getTemplate().getSpec();
+
+        assertThat(pod.getContainers().get(0).getArgs())
+                .contains("--dockerfile=" + KanikoBuilder.GENERATED_DOCKERFILE, "--context-sub-path=backend");
+        assertThat(pod.getVolumes()).anyMatch(v -> v.getConfigMap() != null && v.getConfigMap().getName().equals("build-1"));
+        assertThat(pod.getContainers().get(0).getVolumeMounts()).anyMatch(m -> m.getMountPath().equals("/lily"));
+    }
+
+    @Test
+    void 공개_환경변수만_빌드_인자로_넘긴다() {
+        BuildRequest request = new BuildRequest("https://github.com/org/repo", null, null, null, "web", 8080,
+                "", null, null, Map.of("VITE_API_URL", "https://api.example.com", "JWT_SECRET", "s"));
+        List<String> args = builder("reg", false).job("build-1", request, "img", false, null)
+                .getSpec().getTemplate().getSpec().getContainers().get(0).getArgs();
+
+        assertThat(args).contains("--build-arg=VITE_API_URL=https://api.example.com")
+                .noneMatch(arg -> arg.contains("JWT_SECRET"));
+    }
+
+    @Test
     void ECR_이면_레지스트리_인증_Secret_을_마운트하고_노드_역할을_쓰지_않는다() {
         Job job = builder("123.dkr.ecr.ap-northeast-2.amazonaws.com", false)
                 .job("build-1", request(null, null), "img", false, null);

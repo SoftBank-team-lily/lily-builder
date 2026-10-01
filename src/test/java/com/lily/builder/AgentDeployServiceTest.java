@@ -45,7 +45,7 @@ class AgentDeployServiceTest {
         when(hub.supportsDatabase(KEY)).thenReturn(true);
         when(github.resolveCommit(any())).thenReturn(COMMIT);
         // 레포 감지 결과: 포트 3000, postgres, actuator 없음
-        when(builds.detect(any(), any(), eq(COMMIT))).thenAnswer(call -> {
+        when(builds.detect(any(), any(), eq(COMMIT), any())).thenAnswer(call -> {
             BuildRequest r = call.getArgument(1);
             return r.withDetected(3000, "postgres", "/", "/");
         });
@@ -67,6 +67,21 @@ class AgentDeployServiceTest {
         assertThat(job.path("database").asText()).isEqualTo("postgres");
         assertThat(job.path("env").path("A").asText()).isEqualTo("1");
         assertThat(build.getLogs()).contains("agent: send to edge-1");
+        // 레포에 Dockerfile 이 있으면 보내지 않는다 (에이전트가 레포 것을 쓴다)
+        assertThat(job.has("dockerfile")).isFalse();
+    }
+
+    @Test
+    void 레포에_Dockerfile_이_없으면_클라우드와_같이_만든_Dockerfile_을_보낸다() throws Exception {
+        when(builds.dockerfile(any(), any(), eq(COMMIT))).thenReturn("FROM node:22-slim");
+
+        service.start(KEY, request("web-1b62c0"));
+
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub).send(eq(KEY), sent.capture());
+        assertThat(new ObjectMapper().readTree(sent.getValue()).path("dockerfile").asText())
+                .isEqualTo("FROM node:22-slim");
+        verify(builds).detect(any(), any(), eq(COMMIT), eq("FROM node:22-slim"));
     }
 
     @Test
@@ -84,7 +99,7 @@ class AgentDeployServiceTest {
     @Test
     void DB_가_필요_없는_앱은_DB_터널이_없어도_보낸다() throws Exception {
         when(hub.supportsDatabase(KEY)).thenReturn(false);
-        when(builds.detect(any(), any(), eq(COMMIT))).thenAnswer(call -> {
+        when(builds.detect(any(), any(), eq(COMMIT), any())).thenAnswer(call -> {
             BuildRequest r = call.getArgument(1);
             return r.withDetected(3000, null, "/", "/");
         });

@@ -78,7 +78,9 @@ public class AgentDeployService {
             }
             String commit = github.resolveCommit(request);
             build.log("source: commit " + commit);
-            BuildRequest resolved = builds.detect(build, request, commit);
+            // 클라우드와 같은 Dockerfile 을 쓴다. 레포에 있으면 null 이라 에이전트가 레포 것을 쓴다
+            String dockerfile = builds.dockerfile(build, request, commit);
+            BuildRequest resolved = builds.detect(build, request, commit, dockerfile);
 
             String database = resolved.database();
             if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {
@@ -90,7 +92,7 @@ public class AgentDeployService {
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));
             store.save(build);
-            hub.send(agentKey, json.writeValueAsString(job(build.getId(), resolved, database)));
+            hub.send(agentKey, json.writeValueAsString(job(build.getId(), resolved, database, dockerfile)));
         } catch (RuntimeException | JsonProcessingException e) {
             fail(build, e.getMessage());
         }
@@ -139,6 +141,13 @@ public class AgentDeployService {
 
     /** lily-on-premise DeployJob */
     static Map<String, Object> job(String id, BuildRequest request, String database) {
+        return job(id, request, database, null);
+    }
+
+    /**
+     * @param dockerfile builder 가 만든 Dockerfile. null 이면 보내지 않는다 (에이전트가 레포의 Dockerfile 을 쓴다)
+     */
+    static Map<String, Object> job(String id, BuildRequest request, String database, String dockerfile) {
         Map<String, Object> job = new LinkedHashMap<>();
         job.put("type", "job");
         job.put("id", id);
@@ -152,6 +161,9 @@ public class AgentDeployService {
         job.put("rootDir", request.rootDir() == null ? "" : request.rootDir());
         job.put("env", request.env() == null ? Map.of() : request.env());
         job.put("database", database);
+        if (dockerfile != null) {
+            job.put("dockerfile", dockerfile);
+        }
         return job;
     }
 
