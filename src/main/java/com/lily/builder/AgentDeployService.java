@@ -266,6 +266,7 @@ public class AgentDeployService {
             }
             case "FAILED" -> {
                 running.remove(buildId);
+                diagnose(build, logLine);
                 update(build, Build.Status.FAILED, logLine);
             }
             case "BUILDING" -> update(build, Build.Status.BUILDING, logLine);
@@ -331,6 +332,26 @@ public class AgentDeployService {
     private void fail(Build build, String reason) {
         log.warn("onprem build failed: id={} app={} reason={}", build.getId(), build.getAppName(), reason);
         running.remove(build.getId());
+        diagnose(build, "failed: " + reason);
         update(build, Build.Status.FAILED, "failed: " + reason);
+    }
+
+    private FailureDiagnoser diagnoser = BuildService.offlineDiagnoser();
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void diagnoser(FailureDiagnoser diagnoser) {
+        this.diagnoser = diagnoser;
+    }
+
+    /** FAILED 로 바꾸기 전에 원인을 정한다 (화면이 FAILED 를 보자마자 가져간다) */
+    private void diagnose(Build build, String lastLine) {
+        try {
+            java.util.List<String> logs = new java.util.ArrayList<>(build.getLogs());
+            logs.add(lastLine);
+            build.diagnosis(diagnoser.diagnose(logs, new FailureDiagnoser.Context(null, build.getDatabase(), null),
+                    java.util.List.of()));
+        } catch (RuntimeException e) {
+            log.warn("onprem diagnosis failed: id={} message={}", build.getId(), e.getMessage());
+        }
     }
 }

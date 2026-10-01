@@ -145,6 +145,10 @@ spec:
             - secretRef:
                 name: lily-agent-platform
                 optional: true
+            # 배포 전 설정 판단·실패 진단용 AI 키 (OPENAI_API_KEY 또는 ANTHROPIC_API_KEY). 없으면 규칙으로만 판단한다
+            - secretRef:
+                name: lily-ai
+                optional: true
           resources:
             requests:
               cpu: 50m

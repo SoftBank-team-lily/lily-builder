@@ -32,6 +32,7 @@ import java.util.Optional;
 public class DynamoBuildStore implements BuildStore, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(DynamoBuildStore.class);
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
     private static final String PREFIX = "BUILD#";
     /** 아이템 400KB 제한 안에 들어오도록 로그는 최근 것만 남긴다 */
     private static final int MAX_LOG_LINES = 200;
@@ -68,6 +69,13 @@ public class DynamoBuildStore implements BuildStore, AutoCloseable {
         putIfPresent(item, "database", b.getDatabase());
         putIfPresent(item, "image", b.getImage());
         putIfPresent(item, "url", b.getUrl());
+        if (b.getDiagnosis() != null) {
+            try {
+                item.put("diagnosis", s(JSON.writeValueAsString(b.getDiagnosis())));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.warn("diagnosis not saved: id={} message={}", b.getId(), e.getMessage());
+            }
+        }
         List<String> logs = b.getLogs();
         List<String> tail = logs.subList(Math.max(0, logs.size() - MAX_LOG_LINES), logs.size());
         item.put("logs", AttributeValue.fromL(tail.stream().map(DynamoBuildStore::s).toList()));
@@ -90,7 +98,7 @@ public class DynamoBuildStore implements BuildStore, AutoCloseable {
     }
 
     private static Build fromItem(Map<String, AttributeValue> item) {
-        return new Build(
+        Build build = new Build(
                 item.get("id").s(),
                 item.get("appName").s(),
                 item.get("repoUrl").s(),
@@ -103,6 +111,15 @@ public class DynamoBuildStore implements BuildStore, AutoCloseable {
                 optional(item, "image"),
                 optional(item, "url"),
                 item.containsKey("logs") ? item.get("logs").l().stream().map(AttributeValue::s).toList() : List.of());
+        String diagnosis = optional(item, "diagnosis");
+        if (diagnosis != null) {
+            try {
+                build.diagnosis(JSON.readValue(diagnosis, FailureDiagnoser.Diagnosis.class));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.warn("diagnosis unreadable: id={} message={}", build.getId(), e.getMessage());
+            }
+        }
+        return build;
     }
 
     private void createTableIfMissing() {
