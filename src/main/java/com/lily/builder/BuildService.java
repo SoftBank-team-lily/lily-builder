@@ -534,7 +534,8 @@ public class BuildService {
         AppDetector.Result found = detectFiles(source.request(), commit, source.dockerfile(), source.detectDir());
         String dir = source.detectDir() != null ? source.detectDir() : source.request().rootDir();
         List<ConfigAdvisor.Advice> keys = configAdvice(source.request(), commit, source.detectDir());
-        return new Detection(found.database(), found.databaseSource(), isBlank(dir) ? null : dir, apps, keys, null);
+        // 배포가 폴더를 정할 수 있으면(앱 하나, 백엔드+프론트 묶음, 데스크톱 앱 제외) 고르게 하지 않는다
+        return new Detection(found.database(), found.databaseSource(), isBlank(dir) ? null : dir, List.of(), keys, null);
     }
 
     /**

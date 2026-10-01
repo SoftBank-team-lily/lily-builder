@@ -127,6 +127,10 @@ public class ConfigAdvisor {
             // 외부 서비스 키는 지어낼 수 없다
             return new Advice(base.env(), base.property(), Kind.INPUT, null, hint, base.required(), base.source());
         }
+        if (kind == Kind.INPUT && base.kind() == Kind.DEFAULT && base.value() != null) {
+            // 규칙이 정한 기본값(예시 파일 값, 모델 이름)은 AI 가 입력으로 봐도 미리 채워 둔다. 화면에서 고칠 수 있다
+            return new Advice(base.env(), base.property(), Kind.DEFAULT, base.value(), hint, base.required(), base.source());
+        }
         String value = kind == Kind.DEFAULT ? blankToNull(ai.value()) : null;
         if (kind == Kind.DEFAULT && value == null) {
             value = base.value();
