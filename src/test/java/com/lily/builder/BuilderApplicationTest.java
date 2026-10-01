@@ -7,7 +7,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 빈 연결이 깨지지 않았는지 (기동만 확인한다. 클러스터에는 붙지 않는다) */
-@SpringBootTest(properties = "lily.builder.registry=reg:5000")
+@SpringBootTest(properties = {"lily.builder.registry=reg:5000", "lily.builder.resume-deploys=false"})
 class BuilderApplicationTest {
 
     @Autowired

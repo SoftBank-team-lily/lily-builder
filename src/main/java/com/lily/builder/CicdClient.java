@@ -96,7 +96,8 @@ public class CicdClient {
     public record AppStatus(String appName, String namespace, String activeColor, int replicas, int readyReplicas) {}
 
     /** lily-cicd 의 DeployProgress.Snapshot. stage 는 ready, canary-traffic, canary-analysis, service 등 */
-    public record Progress(String stage, String detail, java.time.Instant updatedAt) {}
+    /** @param image 이번 배포 이미지. 없으면 옛 cicd 다 */
+    public record Progress(String stage, String detail, java.time.Instant updatedAt, String image) {}
 
     /** lily-cicd 의 DeployController.DeployError. canary 판정 실패면 status 가 ROLLED_BACK */
     public record DeployError(String status, String message, java.util.List<String> logs) {}

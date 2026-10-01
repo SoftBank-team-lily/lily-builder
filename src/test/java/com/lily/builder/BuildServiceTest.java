@@ -11,6 +11,7 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -42,6 +43,8 @@ class BuildServiceTest {
     // 배포 중에는 진행 단계 조회(GET .../progress)가 다른 스레드에서 1초마다 온다. 배포 요청과 순서가 정해지지 않는다
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).ignoreExpectOrder(true).build();
     private final InMemoryBuildStore store = new InMemoryBuildStore();
+    /** null 이면 진행 조회는 404. 응답이 끊긴 배포를 따라갈 때만 본문을 넣는다 */
+    private final AtomicReference<String> progressBody = new AtomicReference<>();
     private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner(),
             // ECR 이 아닌 레지스트리라 저장소 생성은 건너뛴다
             new EcrRepositories(new BuilderProperties("ns", "localhost:5000", true, "http://cicd", "kaniko", 10,
@@ -51,7 +54,13 @@ class BuildServiceTest {
     void progress() {
         // 진행 단계는 로그 보조용이라 없어도 배포는 계속된다. 몇 번 오든(0번 포함) 404 로 답한다
         cicd.expect(ExpectedCount.between(0, 1000), requestTo(matchesPattern(".*/api/deployments/[^/]+/progress")))
-                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+                .andRespond(request -> {
+                    String body = progressBody.get();
+                    if (body == null) {
+                        return withStatus(HttpStatus.NOT_FOUND).createResponse(request);
+                    }
+                    return withSuccess(body, MediaType.APPLICATION_JSON).createResponse(request);
+                });
     }
 
     @BeforeEach
@@ -166,6 +175,45 @@ class BuildServiceTest {
         assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
         assertThat(build.getLogs()).anyMatch(l -> l.contains("ready timeout"));
         assertThat(service.get(build.getId())).containsSame(build);
+    }
+
+    @Test
+    void 배포_응답이_끊기면_POST를_다시_보내지_않고_진행_상태를_따른다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+        progressBody.set("""
+                {"stage":"succeeded","detail":"cutover complete. url=https://blog.example","updatedAt":"2026-10-01T00:00:00Z","image":"reg/blog:t"}""");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(request -> {
+                    throw new java.net.SocketTimeoutException("reset");
+                });
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getUrl()).isEqualTo("https://blog.example");
+        assertThat(build.getLogs()).anyMatch(line -> line.contains("response lost"));
+        cicd.verify();
+    }
+
+    @Test
+    void 재시작_뒤_남은_클라우드_배포만_진행_상태로_닫는다() {
+        progressBody.set("""
+                {"stage":"succeeded","detail":"cutover complete. url=https://blog.example","updatedAt":"2026-10-01T00:00:00Z","image":"reg/blog:t"}""");
+        Build cloud = new Build("cloud123", request(""));
+        cloud.image("reg/blog:t");
+        cloud.status(Build.Status.DEPLOYING, "deploy: lily-cicd");
+        store.save(cloud);
+        Build agent = new Build("agent123", request(""));
+        agent.status(Build.Status.DEPLOYING, "agent: STARTING");
+        store.save(agent);
+
+        service.resumeInterrupted();
+
+        assertThat(cloud.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(cloud.getUrl()).isEqualTo("https://blog.example");
+        assertThat(cloud.getLogs()).anyMatch(line -> line.contains("builder restarted"));
+        assertThat(agent.getStatus()).isEqualTo(Build.Status.DEPLOYING);
     }
 
     @Test

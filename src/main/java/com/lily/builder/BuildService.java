@@ -2,8 +2,10 @@ package com.lily.builder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.Instant;
@@ -35,15 +37,23 @@ public class BuildService {
     private final BuildRunner runner;
     private final EcrRepositories ecr;
     private final GitHubSource github;
+    private final DeployFollow follow;
 
+    @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                         EcrRepositories ecr, GitHubSource github) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd));
+    }
+
+    BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                 EcrRepositories ecr, GitHubSource github, DeployFollow follow) {
         this.store = store;
         this.kaniko = kaniko;
         this.cicd = cicd;
         this.runner = runner;
         this.ecr = ecr;
         this.github = github;
+        this.follow = follow;
     }
 
     public Build start(BuildRequest request) {
@@ -62,6 +72,42 @@ public class BuildService {
     /** 배포 이력. 최신순 */
     public List<Build> history() {
         return store.findAll();
+    }
+
+    /**
+     * 프로세스가 죽어서 DEPLOYING 으로 남은 클라우드 배포를 진행 상태로 닫는다.
+     * 온프레미스 배포와 이미지가 없는 빌드는 건드리지 않는다. POST 는 보내지 않는다.
+     */
+    void resumeInterrupted() {
+        for (Build build : store.findAll()) {
+            if (build.getStatus() != Build.Status.DEPLOYING || build.getImage() == null) {
+                continue;
+            }
+            if (build.getLogs().stream().noneMatch(line -> line.startsWith("deploy: lily-cicd"))) {
+                continue;
+            }
+            runner.run(() -> finishFromProgress(build));
+        }
+    }
+
+    private void finishFromProgress(Build build) {
+        build.log("deploy: builder restarted, following progress");
+        store.save(build);
+        try {
+            DeployFollow.Outcome outcome = follow.await(build, build.getCreatedAt());
+            if (outcome.rolledBackReason() != null) {
+                rolledBack(build, outcome.rolledBackReason());
+                return;
+            }
+            CicdClient.Result result = outcome.success();
+            if (result != null && result.logs() != null) {
+                result.logs().forEach(line -> build.log("cicd: " + line));
+            }
+            build.url(result == null ? null : result.targetHostUrl());
+            update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
+        } catch (RuntimeException e) {
+            fail(build, e.getMessage());
+        }
     }
 
     void execute(Build build, BuildRequest request) {
@@ -86,9 +132,24 @@ public class BuildService {
 
             update(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
+            Instant started = Instant.now();
             CicdClient.Result result;
             try (ProgressWatch ignored = watchProgress(build)) {
-                result = cicd.deploy(request, image, tag, migrations);
+                try {
+                    result = cicd.deploy(request, image, tag, migrations);
+                } catch (RestClientResponseException e) {
+                    throw e;
+                } catch (RestClientException e) {
+                    // 응답이 없다는 것은 실패가 아니다. cicd 가 아직 배포 중일 수 있다. POST 는 다시 보내지 않는다
+                    build.log("deploy: response lost, following progress");
+                    store.save(build);
+                    DeployFollow.Outcome outcome = follow.await(build, started);
+                    if (outcome.rolledBackReason() != null) {
+                        rolledBack(build, outcome.rolledBackReason());
+                        return;
+                    }
+                    result = outcome.success();
+                }
             }
             if (result != null && result.logs() != null) {
                 result.logs().forEach(line -> build.log("cicd: " + line));
