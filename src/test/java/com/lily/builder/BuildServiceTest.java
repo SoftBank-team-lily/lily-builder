@@ -6,12 +6,14 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.client.MockClientHttpRequest;
+import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -32,12 +34,20 @@ class BuildServiceTest {
     private final KanikoBuilder kaniko = mock(KanikoBuilder.class);
     private final GitHubSource github = mock(GitHubSource.class);
     private final RestClient.Builder http = RestClient.builder().baseUrl("http://cicd");
-    private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
+    // 배포 중에는 진행 단계 조회(GET .../progress)가 다른 스레드에서 1초마다 온다. 배포 요청과 순서가 정해지지 않는다
+    private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).ignoreExpectOrder(true).build();
     private final InMemoryBuildStore store = new InMemoryBuildStore();
     private final BuildService service = new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner(),
             // ECR 이 아닌 레지스트리라 저장소 생성은 건너뛴다
             new EcrRepositories(new BuilderProperties("ns", "localhost:5000", true, "http://cicd", "kaniko", 10,
                     new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), "")), github);
+
+    @BeforeEach
+    void progress() {
+        // 진행 단계는 로그 보조용이라 없어도 배포는 계속된다. 몇 번 오든(0번 포함) 404 로 답한다
+        cicd.expect(ExpectedCount.between(0, 1000), requestTo(matchesPattern(".*/api/deployments/[^/]+/progress")))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND));
+    }
 
     @BeforeEach
     void source() {
