@@ -37,7 +37,22 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 }
 ```
 
-- `targetPort` 를 비우면 8080
+- `targetPort` 를 비우면 레포의 Dockerfile `EXPOSE`, 그것도 없으면 8080
+- `database` 를 `"auto"` 로 주면 레포의 DB 드라이버를 보고 `postgres` / `mysql` / 없음 중에 정한다
+- `readinessPath` / `livenessPath` 를 비웠는데 레포에 Spring actuator 가 없으면 `/` 로 확인한다
+
+### 레포로 정하는 값 (`AppDetector`)
+
+레포 주소만 받는 화면(lily-frontend)에서도 포트가 다르거나 DB 가 필요 없는 앱이 배포되게 하려고, 빌드할 커밋의 파일을 보고 정한다.
+요청에 값이 있으면 그 값이 우선하고, 정한 값은 빌드 로그에 `detect: ...` 로 남는다. 파일은 rootDir 기준으로 raw 주소에서 읽는다 (API rate limit 에 안 들어감).
+
+| 값 | 보는 곳 |
+|---|---|
+| 포트 | `Dockerfile` 의 첫 `EXPOSE` |
+| DB | `prisma/schema.prisma` 의 provider → `build.gradle(.kts)` / `pom.xml` / `package.json` / `requirements.txt` / `pyproject.toml` / `go.mod` 의 드라이버 (`org.postgresql`, `pg`, `psycopg`, `pgx`, `mysql-connector`, `mysql2`, `pymysql` 등) |
+| actuator | `build.gradle(.kts)` / `pom.xml` / `gradle/libs.versions.toml` 에 `actuator` 가 있는지 |
+
+드라이버 이름으로만 보므로, 드라이버를 쓰지만 DB 가 필요 없는 앱(테스트용 의존성 등)은 DB 가 붙을 수 있다. 그럴 땐 `database` 를 직접 준다.
 - `canaryPath`: 블루그린 전환 전 canary 판정 때 새 버전과 이전 버전에 보낼 경로. 비우면 readiness 경로 (lily-cicd `docs/canary-analysis.md`)
 - 완료 주소는 `https://{appName}.apps.lilycloud.kr` (lily-cicd `LILY_DEPLOY_DOMAIN`)
 
