@@ -45,6 +45,109 @@ final class DockerfileGenerator {
      * @param stack 로그에 남길 한 줄. 예: {@code spring maven (java 17)}
      */
     record Generated(String stack, int port, String dockerfile) {
+
+        /** 서버 없이 빌드 결과(정적 파일)만 내보내는 프론트 */
+        boolean isStatic() {
+            return stack.startsWith("node static") || stack.startsWith("static html");
+        }
+    }
+
+    private static final Pattern RUN_LINE = Pattern.compile("(?m)^(?:ENTRYPOINT|CMD) (\\[.*])\\s*$");
+    private static final Pattern STATIC_OUTPUT = Pattern.compile("COPY --from=build /src/(\\S+) /usr/share/nginx/html");
+
+    /**
+     * 백엔드와 프론트가 한 레포의 폴더에 따로 있을 때 한 이미지로 묶는다. 레포 주소 하나로 주소 하나에 둘 다 뜬다.
+     *
+     * <p>앞에서 Caddy 가 받는다. /api 와, 프론트 파일도 브라우저 페이지 요청도 아닌 요청(fetch, 헬스 체크)은 백엔드로,
+     * 나머지는 프론트 빌드 결과(없는 경로는 index.html)를 준다.
+     * 프론트 코드에 박힌 {@code http://localhost:{백엔드 포트}} 는 빌드 전에 지워 같은 주소로 부르게 한다.
+     * 같은 출처 요청이라 Origin 은 떼고 넘긴다. 프록시 뒤 백엔드는 자기 주소를 http://127.0.0.1 로 보므로 CORS 로 막는다.
+     * Caddy 는 백엔드 포트가 열린 뒤에 띄운다. 그래서 TCP 헬스 체크도 백엔드가 뜬 뒤에 통과한다.
+     *
+     * @param backend  서버 앱 ({@link Generated#isStatic()} 이 아님). 파일은 레포 루트 컨텍스트에서 backendDir 로 복사한다
+     * @param frontend 정적 프론트
+     */
+    static Generated combine(String backendDir, Generated backend, String frontendDir, Generated frontend) {
+        int port = backend.port() == 8080 ? 3000 : 8080;
+        String rewrite = "RUN grep -rlE --exclude-dir=node_modules 'https?://(localhost|127\\.0\\.0\\.1):" + backend.port()
+                + "' . | xargs -r sed -i -E 's#https?://(localhost|127\\.0\\.0\\.1):" + backend.port() + "##g'\n";
+
+        String front;
+        if (frontend.stack().startsWith("static html")) {
+            front = "FROM debian:bookworm-slim AS frontend-build\nWORKDIR /out\nCOPY " + frontendDir + "/ .\n" + rewrite;
+        } else {
+            Matcher output = STATIC_OUTPUT.matcher(frontend.dockerfile());
+            if (!output.find()) {
+                throw new IllegalStateException("프론트 빌드 결과 폴더를 찾지 못했다: " + frontend.stack());
+            }
+            String stage = frontend.dockerfile().substring(0, frontend.dockerfile().indexOf("\nFROM ") + 1);
+            front = stage.replace("AS build", "AS frontend-build")
+                    .replace("COPY . .\n", "COPY " + frontendDir + "/ .\n" + rewrite)
+                    + "RUN mv /src/" + output.group(1) + " /out\n";
+        }
+
+        String back = backend.dockerfile()
+                .replace("AS build", "AS backend-build")
+                .replace("--from=build", "--from=backend-build")
+                .replace("COPY . .", "COPY " + backendDir + "/ .")
+                // distroless 에는 셸이 없어 두 프로세스를 띄울 수 없다
+                .replace("gcr.io/distroless/static-debian12", "debian:bookworm-slim")
+                .replaceAll("(?m)^EXPOSE .*\\n", "");
+        Matcher run = RUN_LINE.matcher(back);
+        String command = null;
+        int start = -1;
+        while (run.find()) {
+            start = run.start();
+            command = run.group(1);
+        }
+        if (command == null) {
+            throw new IllegalStateException("백엔드 실행 명령을 찾지 못했다: " + backend.stack());
+        }
+        back = back.substring(0, start);
+
+        List<String> caddyfile = List.of(
+                "{", "admin off", "auto_https off", "}",
+                ":" + port + " {",
+                "root * /srv",
+                "@api path /api /api/*",
+                "handle @api {", "reverse_proxy 127.0.0.1:" + backend.port() + " {", "header_up -Origin", "}", "}",
+                // 폴더(/)는 그 안의 index.html 로 본다. 안 그러면 브라우저가 아닌 GET / 이 백엔드로 간다
+                "@file file {path} {path}/index.html",
+                "handle @file {", "file_server", "}",
+                "@page {", "method GET", "header Accept *text/html*", "}",
+                "handle @page {", "rewrite * /index.html", "file_server", "}",
+                "handle {", "reverse_proxy 127.0.0.1:" + backend.port() + " {", "header_up -Origin", "}", "}",
+                "}");
+        // lily-cicd 는 SERVER_PORT 를 앱 포트(= 프록시 포트)로 넣는다. 백엔드는 자기 포트에 그대로 둔다
+        String script = "trap 'kill $b $c 2>/dev/null; exit 0' TERM; "
+                + "SERVER_PORT=" + backend.port() + " PORT=" + backend.port() + " " + shell(command) + " & b=$!; "
+                + "until (echo > /dev/tcp/127.0.0.1/" + backend.port() + ") 2>/dev/null; do kill -0 $b 2>/dev/null || exit 1; sleep 1; done; "
+                + "caddy run --config /etc/Caddyfile --adapter caddyfile & c=$!; wait -n; exit 1";
+        String cmd;
+        try {
+            cmd = JSON.writeValueAsString(List.of("bash", "-c", script));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+
+        return new Generated(backend.stack() + " + " + frontend.stack() + " (" + backendDir + ", " + frontendDir + ")", port,
+                front + "\n" + back
+                        + "COPY --from=frontend-build /out /srv\n"
+                        + "COPY --from=caddy:2-alpine /usr/bin/caddy /usr/bin/caddy\n"
+                        + "RUN printf '%s\\n' " + caddyfile.stream().map(line -> "'" + line + "'").reduce((a, b) -> a + " " + b).orElseThrow()
+                        + " > /etc/Caddyfile\n"
+                        + "EXPOSE " + port + "\n"
+                        + "CMD " + cmd + "\n");
+    }
+
+    /** ["java", "-jar", "/app/app.jar"] → 'java' '-jar' '/app/app.jar' */
+    private static String shell(String jsonArray) {
+        try {
+            List<String> args = JSON.readValue(jsonArray, JSON.getTypeFactory().constructCollectionType(List.class, String.class));
+            return args.stream().map(arg -> "'" + arg.replace("'", "'\\''") + "'").reduce((a, b) -> a + " " + b).orElseThrow();
+        } catch (Exception e) {
+            throw new IllegalStateException("실행 명령을 읽지 못했다: " + jsonArray, e);
+        }
     }
 
     /**

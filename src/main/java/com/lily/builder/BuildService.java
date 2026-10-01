@@ -69,8 +69,9 @@ public class BuildService {
         try {
             String commit = github.resolveCommit(request);
             build.log("source: commit " + commit);
-            String dockerfile = dockerfile(build, request, commit);
-            request = detect(build, request, commit, dockerfile);
+            Source source = source(build, request, commit);
+            String dockerfile = source.dockerfile();
+            request = detect(build, source.request(), commit, dockerfile, source.detectDir());
             Map<String, String> migrations = github.migrations(request, commit);
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
@@ -115,26 +116,99 @@ public class BuildService {
         }
     }
 
+     static final String NOTHING_TO_BUILD = "Dockerfile 이 없고 빌드 방법도 찾지 못했다"
+            + " (pom.xml, build.gradle, package.json, requirements.txt, pyproject.toml, go.mod, index.html 이 없다)";
+
     /**
-     * 레포에 Dockerfile 이 없으면 빌드 파일을 보고 만든다. 레포에 있으면 null (레포 것을 쓴다).
+     * 빌드할 폴더와 Dockerfile.
      *
-     * @throws IllegalStateException Dockerfile 도 없고 빌드 방법도 모를 때
+     * @param request    빌드할 폴더(rootDir)와 마이그레이션 폴더를 정한 요청
+     * @param dockerfile 만든 Dockerfile. null 이면 레포 것
+     * @param detectDir  포트·DB·actuator 를 볼 폴더 (rootDir 기준). null 이면 rootDir
      */
-    String dockerfile(Build build, BuildRequest request, String commit) {
-        if (github.file(request, commit, "Dockerfile") != null) {
-            return null;
-        }
-        DockerfileGenerator.Generated generated = DockerfileGenerator.generate(path -> github.file(request, commit, path),
-                request.env() == null ? java.util.Set.of() : request.env().keySet());
-        if (generated == null) {
-            throw new IllegalStateException("Dockerfile 이 없고 빌드 방법도 찾지 못했다"
-                    + " (pom.xml, build.gradle, package.json, requirements.txt, pyproject.toml, go.mod, index.html 이 없다)."
-                    + " 앱이 하위 폴더에 있다면 폴더를 지정한다");
-        }
-        build.log("source: no Dockerfile, generated for " + generated.stack());
-        return generated.dockerfile();
+    record Source(BuildRequest request, String dockerfile, String detectDir) {
     }
 
+    /**
+     * 레포에 Dockerfile 이 없으면 빌드 파일을 보고 만든다.
+     *
+     * <p>화면은 레포 주소만 받는다. 폴더를 지정하지 않았는데 루트에 빌드 파일이 없으면 최상위 폴더를 본다.
+     * 앱 폴더가 하나면 그 폴더를 빌드하고, 서버 앱과 정적 프론트가 하나씩이면 한 이미지로 묶는다
+     * ({@link DockerfileGenerator#combine}). backend/ 와 frontend/ 가 한 레포에 있는 프로젝트가 주소 하나로 뜬다.
+     *
+     * @throws IllegalStateException 빌드할 앱을 못 찾았거나 하나로 정할 수 없을 때
+     */
+    Source source(Build build, BuildRequest request, String commit) {
+        java.util.Set<String> envKeys = request.env() == null ? java.util.Set.of() : request.env().keySet();
+        Folder root = folder(request, commit, envKeys);
+        if (root.found()) {
+            if (root.generated() != null) {
+                build.log("source: no Dockerfile, generated for " + root.generated().stack());
+            }
+            return new Source(request, root.dockerfile(), null);
+        }
+        if (request.rootDir() != null && !request.rootDir().isBlank()) {
+            throw new IllegalStateException(NOTHING_TO_BUILD + ". 폴더 " + request.rootDir() + " 를 확인한다");
+        }
+
+        List<Folder> apps = new java.util.ArrayList<>();
+        for (String dir : github.folders(request, commit)) {
+            Folder folder = folder(request.withSource(dir, request.migrationsPath(), request.targetPort()), commit, envKeys);
+            if (folder.found()) {
+                apps.add(folder);
+            }
+        }
+        if (apps.isEmpty()) {
+            throw new IllegalStateException(NOTHING_TO_BUILD + ". 루트와 최상위 폴더 모두에 없다");
+        }
+        if (apps.size() == 1) {
+            Folder app = apps.getFirst();
+            build.log("source: app in folder " + app.dir() + (app.generated() == null
+                    ? " (Dockerfile)" : ", no Dockerfile, generated for " + app.generated().stack()));
+            return new Source(app.request(), app.dockerfile(), null);
+        }
+
+        List<Folder> statics = apps.stream().filter(f -> f.generated() != null && f.generated().isStatic()).toList();
+        List<Folder> servers = apps.stream().filter(f -> f.generated() != null && !f.generated().isStatic()).toList();
+        if (apps.size() == 2 && statics.size() == 1 && servers.size() == 1) {
+            Folder backend = servers.getFirst();
+            Folder frontend = statics.getFirst();
+            DockerfileGenerator.Generated combined = DockerfileGenerator.combine(
+                    backend.dir(), backend.generated(), frontend.dir(), frontend.generated());
+            build.log("source: backend " + backend.dir() + " + frontend " + frontend.dir()
+                    + " in one image, generated for " + combined.stack());
+            String migrations = backend.dir() + "/" + (request.migrationsPath() == null || request.migrationsPath().isBlank()
+                    ? GitHubSource.DEFAULT_MIGRATIONS_PATH : request.migrationsPath());
+            // 포트는 앞의 프록시 포트(EXPOSE)로 다시 정한다
+            return new Source(request.withSource(null, migrations, null), combined.dockerfile(), backend.dir());
+        }
+        throw new IllegalStateException("앱 폴더가 여러 개라 하나로 정하지 못했다 ("
+                + apps.stream().map(f -> f.dir() + " " + (f.generated() == null ? "Dockerfile" : f.generated().stack()))
+                        .collect(java.util.stream.Collectors.joining(", "))
+                + "). 배포할 폴더를 지정한다");
+    }
+
+    /** 폴더 하나를 본 결과. Dockerfile 이 있으면 generated 는 null */
+    private record Folder(BuildRequest request, boolean hasDockerfile, DockerfileGenerator.Generated generated) {
+        boolean found() {
+            return hasDockerfile || generated != null;
+        }
+
+        String dir() {
+            return request.rootDir();
+        }
+
+        String dockerfile() {
+            return generated == null ? null : generated.dockerfile();
+        }
+    }
+
+    private Folder folder(BuildRequest request, String commit, java.util.Set<String> envKeys) {
+        if (github.file(request, commit, "Dockerfile") != null) {
+            return new Folder(request, true, null);
+        }
+        return new Folder(request, false, DockerfileGenerator.generate(path -> github.file(request, commit, path), envKeys));
+    }
     /**
      * 비어 있거나 auto 인 포트·DB·헬스 경로를 레포 파일로 정한다. 요청에 값이 있으면 그 값을 쓴다.
      * 레포 주소만 받는 화면에서 포트가 8080 이 아닌 앱, DB 가 필요 없는 앱도 배포되게 하려고 둔다.
@@ -148,11 +222,18 @@ public class BuildService {
      * @param dockerfile 만든 Dockerfile. 레포의 Dockerfile 대신 이걸로 포트를 찾는다. null 이면 레포 것
      */
     BuildRequest detect(Build build, BuildRequest request, String commit, String dockerfile) {
+        return detect(build, request, commit, dockerfile, null);
+    }
+
+    /**
+     * @param detectDir DB·actuator 를 볼 폴더 (rootDir 기준). 백엔드와 프론트를 묶은 이미지면 백엔드 폴더. null 이면 rootDir
+     */
+    BuildRequest detect(Build build, BuildRequest request, String commit, String dockerfile, String detectDir) {
         if (!request.needsDetection()) {
             return request;
         }
         AppDetector.Result found = AppDetector.detect(path -> dockerfile != null && path.equals("Dockerfile")
-                ? dockerfile : github.file(request, commit, path));
+                ? dockerfile : github.file(request, commit, detectDir == null ? path : detectDir + "/" + path));
 
         int port;
         if (request.targetPort() != null) {

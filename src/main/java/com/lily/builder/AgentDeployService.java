@@ -79,8 +79,9 @@ public class AgentDeployService {
             String commit = github.resolveCommit(request);
             build.log("source: commit " + commit);
             // 클라우드와 같은 Dockerfile 을 쓴다. 레포에 있으면 null 이라 에이전트가 레포 것을 쓴다
-            String dockerfile = builds.dockerfile(build, request, commit);
-            BuildRequest resolved = builds.detect(build, request, commit, dockerfile);
+            BuildService.Source source = builds.source(build, request, commit);
+            String dockerfile = source.dockerfile();
+            BuildRequest resolved = builds.detect(build, source.request(), commit, dockerfile, source.detectDir());
 
             String database = resolved.database();
             if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {

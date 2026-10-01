@@ -283,6 +283,70 @@ class BuildServiceTest {
         verifyNoInteractions(kaniko);
     }
 
+    /** 레포 파일 (레포 루트 기준 경로). 요청의 rootDir 를 붙여 찾는다 */
+    private void repo(Map<String, String> files) {
+        when(github.file(any(), eq(COMMIT), anyString())).thenAnswer(call -> {
+            BuildRequest r = call.getArgument(0);
+            String root = r.rootDir() == null || r.rootDir().isBlank() ? "" : r.rootDir() + "/";
+            return files.get(root + call.getArgument(2));
+        });
+    }
+
+    @Test
+    void 루트에_빌드_파일이_없고_백엔드와_프론트_폴더가_있으면_한_이미지로_묶어_주소_하나로_띄운다() {
+        repo(Map.of(
+                "backend/pom.xml", "<project><dependency>org.postgresql</dependency><java.version>17</java.version></project>",
+                "frontend/package.json", "{\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^7\"}}",
+                "frontend/package-lock.json", "{}"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("backend", "docs", "frontend"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("""
+                        {"targetPort":3000}"""))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).anyMatch(line -> line.startsWith("source: backend backend + frontend frontend in one image"))
+                .contains("detect: port 3000 (Dockerfile EXPOSE)",
+                        "detect: database postgres (pom.xml: org.postgresql)");
+        // 레포 루트를 컨텍스트로 빌드하고, 마이그레이션은 백엔드 폴더에서 찾는다
+        verify(kaniko).build(anyString(), argThat((BuildRequest r) -> r.rootDir() == null), anyString(), eq(COMMIT),
+                argThat((String dockerfile) -> dockerfile.contains("COPY backend/ .") && dockerfile.contains("COPY frontend/ .")));
+        verify(github).migrations(argThat(r -> "backend/src/main/resources/db/migration".equals(GitHubSource.folder(r))), eq(COMMIT));
+        cicd.verify();
+    }
+
+    @Test
+    void 루트에_빌드_파일이_없고_앱_폴더가_하나면_그_폴더를_빌드한다() {
+        repo(Map.of("web/package.json", "{\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^7\"}}"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("docs", "web"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/web:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("source: app in folder web, no Dockerfile, generated for node static (dist)");
+        verify(kaniko).build(anyString(), argThat((BuildRequest r) -> "web".equals(r.rootDir())), anyString(), eq(COMMIT), any());
+    }
+
+    @Test
+    void 앱_폴더가_여러_개라_하나로_정할_수_없으면_폴더를_알려주고_실패한다() {
+        repo(Map.of("api/go.mod", "module a\n\ngo 1.23\n", "worker/go.mod", "module b\n\ngo 1.23\n"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("api", "worker"));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs()).anyMatch(line -> line.contains("앱 폴더가 여러 개") && line.contains("api go") && line.contains("worker go"));
+        verifyNoInteractions(kaniko);
+    }
+
     @Test
     void 레포에_Dockerfile_이_있으면_그대로_쓴다() {
         when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");

@@ -13,6 +13,47 @@ class DockerfileGeneratorTest {
     }
 
     @Test
+    void 백엔드와_정적_프론트를_묶으면_프록시가_api_는_백엔드로_나머지는_프론트로_보낸다() {
+        DockerfileGenerator.Generated backend = generate(Map.of("pom.xml", "<java.version>17</java.version>"));
+        DockerfileGenerator.Generated frontend = generate(Map.of(
+                "package.json", "{\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^7\"}}",
+                "package-lock.json", "{}"));
+
+        DockerfileGenerator.Generated result = DockerfileGenerator.combine("backend", backend, "frontend", frontend);
+
+        // 백엔드가 8080 이라 프록시는 3000
+        assertThat(result.port()).isEqualTo(3000);
+        assertThat(result.dockerfile()).contains(
+                "AS frontend-build\nWORKDIR /src\nCOPY frontend/ .\n",
+                // 프론트에 박힌 http://localhost:8080 을 지워 같은 주소로 부른다
+                "sed -i -E 's#https?://(localhost|127\\.0\\.0\\.1):8080##g'",
+                "RUN mv /src/dist /out",
+                "FROM maven:3.9-eclipse-temurin-17 AS backend-build\nWORKDIR /src\nCOPY backend/ .",
+                "COPY --from=backend-build /app.jar /app/app.jar",
+                "COPY --from=frontend-build /out /srv",
+                "'@api path /api /api/*'", "'reverse_proxy 127.0.0.1:8080 {'", "'header_up -Origin'",
+                "'rewrite * /index.html'",
+                "EXPOSE 3000\n",
+                "CMD [\"bash\",\"-c\",\"trap ",
+                // lily-cicd 가 넣는 SERVER_PORT(프록시 포트)를 백엔드 포트로 덮는다
+                "SERVER_PORT=8080 PORT=8080 'java' '-XX:MaxRAMPercentage=75' '-jar' '/app/app.jar' & b=$!;",
+                "/dev/tcp/127.0.0.1/8080")
+                .doesNotContain("EXPOSE 8080", "ENTRYPOINT", "nginx");
+    }
+
+    @Test
+    void 정적_HTML_프론트와_Go_백엔드도_묶는다() {
+        DockerfileGenerator.Generated backend = generate(Map.of("go.mod", "module x\n\ngo 1.23\n"));
+        DockerfileGenerator.Generated frontend = generate(Map.of("index.html", "<html>"));
+
+        DockerfileGenerator.Generated result = DockerfileGenerator.combine("server", backend, "web", frontend);
+
+        assertThat(result.dockerfile()).contains("FROM debian:bookworm-slim AS frontend-build\nWORKDIR /out\nCOPY web/ .\n",
+                        "COPY server/ .", "'/app' & b=$!;")
+                .doesNotContain("distroless");
+    }
+
+    @Test
     void Spring_Maven_은_pom_의_자바_버전으로_빌드하고_jar_를_실행한다() {
         DockerfileGenerator.Generated result = generate(Map.of(
                 "pom.xml", "<properties><java.version>17</java.version></properties>"));

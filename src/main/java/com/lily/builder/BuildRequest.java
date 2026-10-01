@@ -80,6 +80,12 @@ public record BuildRequest(
                 env, host, standby, migrationsPath, migrate, canaryPath);
     }
 
+    /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
+    public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
+        return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath);
+    }
+
     private static boolean blank(String value) {
         return value == null || value.isBlank();
     }

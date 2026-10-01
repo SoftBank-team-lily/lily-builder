@@ -11,7 +11,13 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
   → 접속 URL
 ```
 
-- 사용자 레포에는 **Dockerfile** 만 있으면 된다. 백엔드/프론트가 한 레포에 있으면 폼의 "폴더" 에 Dockerfile 이 있는 폴더를 넣는다
+- 레포 주소만 있으면 된다. Dockerfile 이 없으면 빌드 파일(pom.xml, build.gradle, package.json, requirements.txt, pyproject.toml, go.mod, index.html)을 보고 만든다
+- 폴더를 비웠는데 루트에 빌드 파일이 없으면 최상위 폴더를 본다. 앱 폴더가 하나면 그 폴더를 빌드한다.
+  서버 앱 하나와 정적 프론트 하나(예: `backend/` + `frontend/`)면 한 이미지로 묶어 주소 하나로 띄운다
+  - 앞의 Caddy 가 `/api`·fetch 요청은 백엔드로, 파일·페이지는 프론트 빌드 결과로 보낸다. 같은 출처라 CORS 가 필요 없다
+  - 프론트 코드의 `http://localhost:{백엔드 포트}` 는 빌드 전에 지워 같은 주소로 부르게 한다
+  - DB·actuator 는 백엔드 폴더로, 마이그레이션은 `{백엔드 폴더}/src/main/resources/db/migration` 에서 찾는다
+  - 그 밖의 조합(서버 둘 등)은 폴더 목록과 함께 실패한다. 폼의 "폴더" 로 하나를 고른다
 - 빌드는 Kaniko 가 k3s 안에서 한다. 이 서버는 소스를 받지 않는다
 - private 레포는 토큰을 넣는다. 빌드 동안만 k3s Secret 으로 Kaniko 에 넘기고 끝나면 지운다
 - DB 를 고르면 lily-cicd 가 lily-db-provisioner 로 DB 를 만들고 접속 정보를 앱 환경변수로 넣는다
@@ -121,6 +127,5 @@ BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost
 
 ## 아직 없는 것
 
-- Dockerfile 이 없는 레포 자동 감지 (build.gradle, package.json 보고 Dockerfile 생성)
 - 빌드 기록 저장 (지금은 메모리)
 - 인증 (누구나 배포 가능)

@@ -44,8 +44,9 @@ class AgentDeployServiceTest {
         when(hub.agentId(KEY)).thenReturn("edge-1");
         when(hub.supportsDatabase(KEY)).thenReturn(true);
         when(github.resolveCommit(any())).thenReturn(COMMIT);
+        when(builds.source(any(), any(), eq(COMMIT))).thenAnswer(call -> new BuildService.Source(call.getArgument(1), null, null));
         // 레포 감지 결과: 포트 3000, postgres, actuator 없음
-        when(builds.detect(any(), any(), eq(COMMIT), any())).thenAnswer(call -> {
+        when(builds.detect(any(), any(), eq(COMMIT), any(), any())).thenAnswer(call -> {
             BuildRequest r = call.getArgument(1);
             return r.withDetected(3000, "postgres", "/", "/");
         });
@@ -73,7 +74,8 @@ class AgentDeployServiceTest {
 
     @Test
     void 레포에_Dockerfile_이_없으면_클라우드와_같이_만든_Dockerfile_을_보낸다() throws Exception {
-        when(builds.dockerfile(any(), any(), eq(COMMIT))).thenReturn("FROM node:22-slim");
+        when(builds.source(any(), any(), eq(COMMIT))).thenAnswer(call ->
+                new BuildService.Source(call.getArgument(1), "FROM node:22-slim", null));
 
         service.start(KEY, request("web-1b62c0"));
 
@@ -81,7 +83,7 @@ class AgentDeployServiceTest {
         verify(hub).send(eq(KEY), sent.capture());
         assertThat(new ObjectMapper().readTree(sent.getValue()).path("dockerfile").asText())
                 .isEqualTo("FROM node:22-slim");
-        verify(builds).detect(any(), any(), eq(COMMIT), eq("FROM node:22-slim"));
+        verify(builds).detect(any(), any(), eq(COMMIT), eq("FROM node:22-slim"), any());
     }
 
     @Test
@@ -99,7 +101,7 @@ class AgentDeployServiceTest {
     @Test
     void DB_가_필요_없는_앱은_DB_터널이_없어도_보낸다() throws Exception {
         when(hub.supportsDatabase(KEY)).thenReturn(false);
-        when(builds.detect(any(), any(), eq(COMMIT), any())).thenAnswer(call -> {
+        when(builds.detect(any(), any(), eq(COMMIT), any(), any())).thenAnswer(call -> {
             BuildRequest r = call.getArgument(1);
             return r.withDetected(3000, null, "/", "/");
         });
