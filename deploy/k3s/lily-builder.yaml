@@ -121,6 +121,14 @@ spec:
                   name: lily-burst
                   key: BURST_API_TOKEN
                   optional: true
+            # 온프레미스 에이전트 토큰 서명 키 (/api/agents). Secret 이 없으면 에이전트 기능은 꺼진다
+            #   kubectl -n lily-system create secret generic lily-agents --from-literal=AGENT_TOKEN_SECRET=$(openssl rand -hex 32)
+            - name: AGENT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lily-agents
+                  key: AGENT_TOKEN_SECRET
+                  optional: true
             # 온프레미스 앱 DB (버스팅 DB 공유). lily-db-provisioner 의 토큰을 같이 쓴다
             - name: PROVISIONER_URL
               value: http://db-provisioner.lily-system.svc

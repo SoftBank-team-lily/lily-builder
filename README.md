@@ -74,6 +74,30 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 - `ROLLED_BACK` 이면 stage 는 4 에 멈춘다. 새 버전은 지워졌고 트래픽은 이전 버전 그대로다
 - `canary`: 판정 결과 한 줄. 예 `canary: PASS new 120 req, error 0.0%, p95 10ms / old 120 req, error 0.0%, p95 10ms`
 
+## 온프레미스 배포 (에이전트)
+
+사용자 PC 의 lily-on-premise 에이전트가 이 builder 에 소켓으로 붙고, builder 가 잡을 보낸다 (컨트롤 플레인).
+lily-frontend 에서 "내 PC" 로 등록한 프로젝트가 이 경로로 배포된다.
+
+```
+lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agents/connect?token= ═▶ 에이전트 (사용자 PC)
+              ◀─ GET /api/builds/{id} (클라우드와 같은 Build) ─┘     ◀═ hello / status ═╛
+```
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | `/api/agents` | 토큰 발급 `{key, token}`. token 은 이때만 보인다 |
+| GET | `/api/agents/{key}` | `connected`, `agentId`, `publicUrl`, `database`(DB 터널 여부), 접속·마지막 수신 시각 |
+| POST | `/api/agents/{key}/builds` | 이 에이전트로 배포. 본문은 `POST /api/builds` 와 같다. 앱 이름은 `[a-z][a-z0-9-]{0,30}` |
+| WS | `/api/agents/connect?token=` | 에이전트 접속 (lily-on-premise `CONTROL_PLANE_URL`). 외부에는 이 경로만 연다 |
+
+- 토큰은 `{key}.{HMAC}` 라서 저장하지 않는다. 서명 키는 `AGENT_TOKEN_SECRET` (Secret `lily-agents`). 바꾸면 모든 토큰이 무효
+- 배포 전에 클라우드와 같이 레포로 포트·헬스 경로·DB 를 정한다 (`AppDetector`). DB 터널이 없는 에이전트에는 DB 없이 보낸다
+- 에이전트 단계 → Build 상태: `BUILDING` → BUILDING, `STARTING`·`HEALTH`·`SWITCHING` → DEPLOYING, `SUCCEEDED`(url) / `FAILED`
+- 에이전트가 연결돼 있지 않으면 바로 FAILED, `BUILD_TIMEOUT_SECONDS` 동안 응답이 없어도 FAILED
+- 연결 정보는 메모리에만 있다. builder 가 재시작하면 에이전트가 5초 뒤 다시 붙는다
+- ALB 가 60초 유휴 연결을 끊어서 25초마다 ping 을 보낸다. Ingress 는 lily-loadbalancer `manifests/lily-builder.yaml`
+
 ## 설정
 
 | 환경변수 | 기본값 | 설명 |
