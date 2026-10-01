@@ -27,6 +27,8 @@ import java.util.regex.Pattern;
  * STARTING·HEALTH·SWITCHING    DEPLOYING
  * SUCCEEDED / FAILED           SUCCEEDED (url) / FAILED
  * </pre>
+ *
+ * 실패 이유는 마지막 로그 줄에 남는다 (lily-frontend 가 목록에 보여 준다).
  */
 @Service
 public class AgentDeployService {
@@ -80,10 +82,10 @@ public class AgentDeployService {
 
             String database = resolved.database();
             if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {
-                // 앱이 내장 DB 로도 뜨면 그대로 쓸 수 있게 실패시키지 않는다. 필요한 앱이면 앱 기동에서 실패한다
-                build.log("agent: database " + database + " skipped (이 에이전트는 DB 터널이 없다)");
-                database = null;
-                build.database(null);
+                // DB 없이 보내면 앱이 DB 에 붙으려다 기동하지 못하고, 헬스 체크 제한 시간(2분) 뒤에야 실패한다.
+                // (lily-blog-sample 은 이미지가 prod 프로파일로 고정이라 내장 DB 로 뜨지 않는다) 보내기 전에 이유와 함께 끝낸다
+                throw new IllegalStateException("이 앱은 DB(" + database + ")가 필요한데 내 PC 에이전트에 DB 터널이 없다."
+                        + " 에이전트 PC 의 lily-on-premise/test/burst 에 burst.env 와 keys/ 를 두고 다시 실행한다");
             }
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));

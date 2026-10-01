@@ -92,7 +92,7 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 | WS | `/api/agents/connect?token=` | 에이전트 접속 (lily-on-premise `CONTROL_PLANE_URL`). 외부에는 이 경로만 연다 |
 
 - 토큰은 `{key}.{HMAC}` 라서 저장하지 않는다. 서명 키는 `AGENT_TOKEN_SECRET` (Secret `lily-agents`). 바꾸면 모든 토큰이 무효
-- 배포 전에 클라우드와 같이 레포로 포트·헬스 경로·DB 를 정한다 (`AppDetector`). DB 터널이 없는 에이전트에는 DB 없이 보낸다
+- 배포 전에 클라우드와 같이 레포로 포트·헬스 경로·DB 를 정한다 (`AppDetector`). DB 가 필요한데 에이전트에 DB 터널이 없으면(hello `database=false`) 보내지 않고 이유와 함께 FAILED
 - 에이전트 단계 → Build 상태: `BUILDING` → BUILDING, `STARTING`·`HEALTH`·`SWITCHING` → DEPLOYING, `SUCCEEDED`(url) / `FAILED`
 - 에이전트가 연결돼 있지 않으면 바로 FAILED, `BUILD_TIMEOUT_SECONDS` 동안 응답이 없어도 FAILED
 - 연결 정보는 메모리에만 있다. builder 가 재시작하면 에이전트가 5초 뒤 다시 붙는다

@@ -42,6 +42,7 @@ class AgentDeployServiceTest {
     void setUp() {
         when(hub.connected(KEY)).thenReturn(true);
         when(hub.agentId(KEY)).thenReturn("edge-1");
+        when(hub.supportsDatabase(KEY)).thenReturn(true);
         when(github.resolveCommit(any())).thenReturn(COMMIT);
         // 레포 감지 결과: 포트 3000, postgres, actuator 없음
         when(builds.detect(any(), any(), eq(COMMIT))).thenAnswer(call -> {
@@ -52,8 +53,6 @@ class AgentDeployServiceTest {
 
     @Test
     void 레포를_보고_정한_값으로_잡을_보낸다() throws Exception {
-        when(hub.supportsDatabase(KEY)).thenReturn(true);
-
         Build build = service.start(KEY, request("blog-1b62c0"));
 
         ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
@@ -71,16 +70,31 @@ class AgentDeployServiceTest {
     }
 
     @Test
-    void DB_터널이_없는_에이전트에는_DB_없이_보낸다() throws Exception {
+    void DB_가_필요한데_에이전트에_DB_터널이_없으면_보내지_않고_실패() {
         when(hub.supportsDatabase(KEY)).thenReturn(false);
 
         Build build = service.start(KEY, request("blog"));
 
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs().get(build.getLogs().size() - 1))
+                .contains("DB(postgres)가 필요한데").contains("DB 터널이 없다");
+        verify(hub, never()).send(anyString(), anyString());
+    }
+
+    @Test
+    void DB_가_필요_없는_앱은_DB_터널이_없어도_보낸다() throws Exception {
+        when(hub.supportsDatabase(KEY)).thenReturn(false);
+        when(builds.detect(any(), any(), eq(COMMIT))).thenAnswer(call -> {
+            BuildRequest r = call.getArgument(1);
+            return r.withDetected(3000, null, "/", "/");
+        });
+
+        Build build = service.start(KEY, request("web"));
+
         ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
         verify(hub).send(eq(KEY), sent.capture());
         assertThat(new ObjectMapper().readTree(sent.getValue()).path("database").isNull()).isTrue();
-        assertThat(build.getDatabase()).isNull();
-        assertThat(build.getLogs()).contains("agent: database postgres skipped (이 에이전트는 DB 터널이 없다)");
+        assertThat(build.getStatus()).isNotEqualTo(Build.Status.FAILED);
     }
 
     @Test
