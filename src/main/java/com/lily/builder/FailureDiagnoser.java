@@ -113,9 +113,10 @@ public class FailureDiagnoser {
             for (String part : multi.group(1).split(",\\s*")) {
                 dirs.add(part.strip().split("\\s+")[0]);
             }
-            return new Diagnosis("레포에 앱 폴더가 여러 개라 어느 것을 배포할지 정하지 못했어요.",
-                    List.of(new Fix("rootDir", null, ConfigAdvisor.Kind.INPUT, dirs.isEmpty() ? null : dirs.get(0),
-                            "배포할 앱 폴더를 골라 주세요.", dirs)), "rule");
+            // 묻지 않고 첫 폴더로 다시 배포한다. 안 되면 다음 진단에서 다른 폴더를 고른다
+            return new Diagnosis("레포에 앱 폴더가 여러 개라 " + (dirs.isEmpty() ? "" : dirs.get(0) + " 폴더로 ") + "다시 배포해요.",
+                    List.of(new Fix("rootDir", null, dirs.isEmpty() ? ConfigAdvisor.Kind.INPUT : ConfigAdvisor.Kind.DEFAULT,
+                            dirs.isEmpty() ? null : dirs.get(0), "배포할 앱 폴더예요. 다른 폴더를 고를 수 있어요.", dirs)), "rule");
         }
         if (NOTHING.matcher(text).find()) {
             return new Diagnosis("레포에서 빌드 방법을 찾지 못했어요. Dockerfile 이나 빌드 파일(pom.xml, package.json 등)이 있는 폴더를 지정해 주세요.",
