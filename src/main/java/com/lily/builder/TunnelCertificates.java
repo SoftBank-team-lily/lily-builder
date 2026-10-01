@@ -14,8 +14,14 @@ import java.util.regex.Pattern;
 /**
  * 에이전트의 DB 터널 공개키에 SSH CA 로 인증서를 서명한다. 사용자 PC 에 개인키를 나눠 주지 않기 위해서다.
  *
- * <p>배스천의 lily-tunnel 은 이 CA 를 {@code cert-authority,restrict,port-forwarding,permitopen="RDS:5432"} 로 믿는다.
- * 그래서 인증서로 들어와도 RDS 포트 포워딩만 된다. 인증서에는 포워딩 외의 권한을 넣지 않는다.
+ * <p>배스천의 lily-tunnel 은 이 CA 를 TrustedUserCAKeys 로 믿고, 권한은 AuthorizedPrincipalsCommand 가 인증서 key ID 로 정한다
+ * (lily-db-provisioner deploy/k3s/cluster/lily-tunnel-principals.sh).
+ * <ul>
+ *   <li>{@code agent-{key}}: RDS 포트로의 -L 만</li>
+ *   <li>{@code agent-{key}-p{port}}: 위에 더해 배스천 사설 IP 의 그 포트 하나에만 -R (온프레미스 DB 를 클라우드에 연다)</li>
+ * </ul>
+ * key ID 는 CA 가 서명한 값이라 에이전트가 바꿀 수 없다. 그래서 다른 에이전트의 포트를 가로챌 수 없다.
+ * 인증서에는 포워딩 외의 권한을 넣지 않는다.
  */
 @Component
 public class TunnelCertificates {
@@ -42,6 +48,11 @@ public class TunnelCertificates {
      * @return {@code ssh-ed25519-cert-v01@openssh.com ...} 한 줄
      */
     public String sign(String agentKey, String publicKey) {
+        return sign(agentKey, publicKey, null);
+    }
+
+    /** @param reversePort 이 에이전트가 배스천에서 열 수 있는 역방향 포트. null 이면 -L 만 */
+    public String sign(String agentKey, String publicKey, Integer reversePort) {
         if (!enabled()) {
             throw new IllegalStateException("DB 터널 CA 가 설정되지 않았다");
         }
@@ -57,8 +68,9 @@ public class TunnelCertificates {
             dir = Files.createTempDirectory("lily-cert");
             Path pub = dir.resolve("agent.pub");
             Files.writeString(pub, parts[0] + " " + parts[1] + " agent-" + agentKey + "\n");
+            String keyId = "agent-" + agentKey + (reversePort == null ? "" : "-p" + reversePort);
             run(List.of("ssh-keygen", "-q", "-s", ca().toString(),
-                    "-I", "agent-" + agentKey,
+                    "-I", keyId,
                     "-n", settings.sshUser(),
                     "-V", "-5m:+" + Math.max(1, settings.validityHours()) + "h",
                     "-O", "clear", "-O", "permit-port-forwarding",

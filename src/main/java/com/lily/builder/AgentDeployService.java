@@ -94,7 +94,19 @@ public class AgentDeployService {
             BuildRequest resolved = builds.detect(build, source.request(), commit, dockerfile, source.detectDir());
 
             String database = resolved.database();
-            if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {
+            String mode = request.databaseModeOrDefault();
+            boolean onPremDatabase = database != null && !database.isBlank() && !"cloud".equals(mode);
+            if (onPremDatabase) {
+                // DB 를 내 PC(local) 나 사용자가 준 주소(external) 에 둔다. RDS 를 만들지 않는다
+                if (!hub.supportsDatabaseMode(agentKey, mode)) {
+                    throw new IllegalStateException("내 PC 에이전트가 이 DB 위치(" + mode + ")를 지원하지 않는다."
+                            + " 에이전트를 최신 이미지로 다시 실행한다");
+                }
+                if ("external".equals(mode) && (request.databaseUrl() == null || request.databaseUrl().isBlank())) {
+                    throw new IllegalArgumentException("DB 주소(databaseUrl)가 없다");
+                }
+                build.log("database: " + database + " on " + ("local".equals(mode) ? "agent (my pc)" : "external url"));
+            } else if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {
                 // DB 없이 보내면 앱이 DB 에 붙으려다 기동하지 못하고, 헬스 체크 제한 시간(3분) 뒤에야 실패한다.
                 // (lily-blog-sample 은 이미지가 prod 프로파일로 고정이라 내장 DB 로 뜨지 않는다) 보내기 전에 이유와 함께 끝낸다
                 throw new IllegalStateException("이 앱은 DB(" + database + ")가 필요한데 내 PC 에이전트에 DB 터널이 없다."
@@ -102,7 +114,7 @@ public class AgentDeployService {
             }
             // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
             Map<String, String> databaseEnv = null;
-            if (database != null && !database.isBlank() && hub.platformDatabase(agentKey)) {
+            if (!onPremDatabase && database != null && !database.isBlank() && hub.platformDatabase(agentKey)) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
                 databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
                 build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port());
@@ -114,6 +126,12 @@ public class AgentDeployService {
             Map<String, Object> job = job(build.getId(), resolved, database, dockerfile, migrations, resolved.canaryPath());
             if (databaseEnv != null) {
                 job.put("databaseEnv", databaseEnv);
+            }
+            if (onPremDatabase) {
+                job.put("databaseMode", mode);
+                if ("external".equals(mode)) {
+                    job.put("databaseUrl", request.databaseUrl());
+                }
             }
             hub.send(agentKey, json.writeValueAsString(job));
         } catch (RuntimeException | JsonProcessingException e) {
