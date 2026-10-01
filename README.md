@@ -27,6 +27,7 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/api/builds` | 빌드·배포 시작. 바로 `202` 와 id 를 돌려준다 |
+| POST | `/api/detect` | 배포 전 DB 감지. 본문 `{repoUrl, branch?, token?, rootDir?}` → `{database, databaseSource, dir}` (`database` 는 postgres / mysql / null). 빌드하지 않는다. 브랜치·앱을 못 찾으면 `422` |
 | GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
 
 ```json

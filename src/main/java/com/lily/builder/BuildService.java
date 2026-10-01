@@ -293,8 +293,7 @@ public class BuildService {
         if (!request.needsDetection()) {
             return request;
         }
-        AppDetector.Result found = AppDetector.detect(path -> dockerfile != null && path.equals("Dockerfile")
-                ? dockerfile : github.file(request, commit, detectDir == null ? path : detectDir + "/" + path));
+        AppDetector.Result found = detectFiles(request, commit, dockerfile, detectDir);
 
         int port;
         if (request.targetPort() != null) {
@@ -326,6 +325,36 @@ public class BuildService {
                     + " (no spring actuator)");
         }
         return request.withDetected(port, database, readiness, liveness);
+    }
+
+    private AppDetector.Result detectFiles(BuildRequest request, String commit, String dockerfile, String detectDir) {
+        return AppDetector.detect(path -> dockerfile != null && path.equals("Dockerfile")
+                ? dockerfile : github.file(request, commit, detectDir == null ? path : detectDir + "/" + path));
+    }
+
+    /**
+     * 배포하기 전에 레포가 쓰는 DB 를 본다. 빌드는 하지 않는다.
+     * 화면이 "PostgreSQL 이 맞나요?" 처럼 사용자에게 확인받고, 고른 값을 {@link BuildRequest#database()} 로 보낸다.
+     * 폴더는 실제 배포와 같은 방법({@link #source})으로 찾는다.
+     *
+     * @throws IllegalStateException 브랜치나 빌드할 앱을 찾지 못했을 때
+     */
+    public Detection inspect(DetectRequest detect) {
+        BuildRequest request = new BuildRequest(detect.repoUrl(), detect.branch(), detect.token(), detect.rootDir(),
+                "detect", null, "auto", null, null, Map.of());
+        String commit = github.resolveCommit(request);
+        Source source = source(new Build("detect", request), request, commit);
+        AppDetector.Result found = detectFiles(source.request(), commit, source.dockerfile(), source.detectDir());
+        String dir = source.detectDir() != null ? source.detectDir() : source.request().rootDir();
+        return new Detection(found.database(), found.databaseSource(), isBlank(dir) ? null : dir);
+    }
+
+    /**
+     * @param database       postgres / mysql. 드라이버가 안 보이면 null
+     * @param databaseSource 근거. 예: {@code build.gradle: org.postgresql}
+     * @param dir            본 폴더 (레포 루트 기준). 루트면 null
+     */
+    public record Detection(String database, String databaseSource, String dir) {
     }
 
     private static boolean isBlank(String value) {

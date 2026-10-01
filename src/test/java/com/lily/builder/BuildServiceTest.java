@@ -331,6 +331,28 @@ class BuildServiceTest {
         verifyNoInteractions(kaniko);
     }
 
+    @Test
+    void 배포_전_감지는_빌드하지_않고_DB_와_근거만_돌려준다() {
+        repo(Map.of("backend/build.gradle", "implementation 'org.postgresql:postgresql'"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("backend"));
+
+        BuildService.Detection found = service.inspect(
+                new DetectRequest("https://github.com/org/repo", null, null, null));
+
+        assertThat(found).isEqualTo(new BuildService.Detection("postgres", "build.gradle: org.postgresql", "backend"));
+        verifyNoInteractions(kaniko);
+        assertThat(store.findAll()).isEmpty();
+    }
+
+    @Test
+    void 배포_전_감지에서_드라이버가_없으면_DB_는_null() {
+        BuildService.Detection found = service.inspect(
+                new DetectRequest("https://github.com/org/repo", null, null, null));
+
+        assertThat(found.database()).isNull();
+        assertThat(found.dir()).isNull();
+    }
+
     /** 레포 파일 (레포 루트 기준 경로). 요청의 rootDir 를 붙여 찾는다 */
     private void repo(Map<String, String> files) {
         when(github.file(any(), eq(COMMIT), anyString())).thenAnswer(call -> {
