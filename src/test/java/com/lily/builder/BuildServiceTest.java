@@ -433,6 +433,26 @@ class BuildServiceTest {
     }
 
     @Test
+    void 루트가_모바일_앱이면_하위_서버_폴더를_빌드한다() {
+        repo(Map.of(
+                "package.json", "{\"main\":\"expo-router/entry\",\"scripts\":{\"start\":\"expo start\"},\"dependencies\":{\"expo\":\"~57\",\"react-native\":\"0.86\"}}",
+                "server/requirements.txt", "fastapi==0.116.1\nuvicorn[standard]==0.35.0\n",
+                "server/app/main.py", "from fastapi import FastAPI\napp = FastAPI()\n"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("app", "server"));
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/mole:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("""
+                        {"status":"SUCCESS","activeColor":"blue","logs":[]}""", MediaType.APPLICATION_JSON));
+
+        Build build = service.start(auto(null));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("source: root is expo app, looking at sub folders")
+                .anyMatch(line -> line.startsWith("source: app in folder server") && line.contains("fastapi"));
+        verify(kaniko).build(anyString(), argThat((BuildRequest r) -> "server".equals(r.rootDir())), anyString(), eq(COMMIT), any());
+    }
+
+    @Test
     void 데스크톱_앱_폴더는_빼고_서버_앱_하나를_빌드한다() {
         repo(Map.of(
                 "desktop/package.json", "{\"main\":\"out/main.js\",\"scripts\":{\"start\":\"electron .\"},\"devDependencies\":{\"electron\":\"^44\"}}",

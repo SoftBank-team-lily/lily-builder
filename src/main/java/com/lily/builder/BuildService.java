@@ -320,6 +320,20 @@ public class BuildService {
     Source source(Build build, BuildRequest request, String commit) {
         java.util.Set<String> envKeys = request.env() == null ? java.util.Set.of() : request.env().keySet();
         Folder root = folder(request, commit, envKeys);
+        boolean blankRoot = request.rootDir() == null || request.rootDir().isBlank();
+        // 레포에 Dockerfile 이 있으면 그대로 믿는다
+        if (root.found() && root.generated() != null && blankRoot) {
+            String client = clientApp(request, commit);
+            if (client != null) {
+                // 루트가 모바일·데스크톱 앱(expo, electron)이면 서버로 띄울 수 없다. 하위 폴더의 서버 앱을 본다
+                List<Folder> servers = appFolders(request, commit, envKeys).stream()
+                        .filter(f -> f.client() == null).toList();
+                if (!servers.isEmpty()) {
+                    build.log("source: root is " + client + ", looking at sub folders");
+                    root = new Folder(request, false, null);
+                }
+            }
+        }
         if (root.found()) {
             if (root.generated() != null) {
                 build.log("source: no Dockerfile, generated for " + root.generated().stack());
@@ -385,7 +399,7 @@ public class BuildService {
     private String clientApp(BuildRequest request, String commit) {
         String pkg = github.file(request, commit, "package.json");
         if (pkg != null) {
-            for (String marker : List.of("electron", "react-native", "expo")) {
+            for (String marker : List.of("electron", "expo", "react-native")) {
                 if (pkg.contains("\"" + marker + "\"")) {
                     return marker + " app";
                 }
