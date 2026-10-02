@@ -13,7 +13,7 @@
 /** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 */
 const DOWN_MILLIS = 10_000;
 /** GET/HEAD/OPTIONS 가 PC 응답 헤더를 기다리는 시간. 넘으면 클라우드로 다시 보낸다 */
-const PC_TIMEOUT_MILLIS = 2_500;
+const PC_TIMEOUT_MILLIS = 1_500;
 /** Cache API 키 경로. 실제 요청 경로와 겹치지 않게 둔다 */
 const DOWN_PATH = "/__lily_edge/pc-down";
 /** 다시 보내려고 메모리에 들고 있을 본문 크기 상한. 넘거나 길이를 모르면 다시 보내지 않는다 */
