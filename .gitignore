@@ -1,4 +1,6 @@
 build/
+# Dockerfile 이 이미지 안에 받는 경로. 레포에 복사해 두면 형제 폴더보다 우선한다.
+/lily-jev/
 .gradle/
 *.log
 .idea/

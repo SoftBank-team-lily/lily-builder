@@ -1,6 +1,16 @@
 rootProject.name = 'lily-builder'
 
-includeBuild('../lily-jev') {
+// 이미지 빌드 컨텍스트는 이 레포뿐이라 ../lily-jev 를 볼 수 없다.
+// Dockerfile 이 받아 둔 lily-jev/ 를 먼저 쓰고, 로컬은 형제 폴더를 그대로 쓴다.
+def jev = file('lily-jev')
+if (!jev.isDirectory()) {
+    jev = file('../lily-jev')
+}
+if (!new File(jev, 'settings.gradle').isFile()) {
+    throw new GradleException('lily-jev 가 없습니다. lily-builder/lily-jev 또는 ../lily-jev 가 필요합니다.')
+}
+
+includeBuild(jev) {
     dependencySubstitution {
         substitute module('com.lily:lily-jev') using project(':')
     }

@@ -1,6 +1,13 @@
 FROM gradle:8.12-jdk21 AS build
 WORKDIR /workspace
 COPY settings.gradle build.gradle ./
+# lily-jev 는 다른 레포다. 여기서 커밋을 받아 includeBuild('lily-jev') 가 되게 한다.
+ARG JEV_REF=5e87886d34653dbc82749032d14eb816168d34c4
+ADD https://github.com/SoftBank-team-lily/lily-jev/archive/${JEV_REF}.tar.gz /tmp/lily-jev.tar.gz
+RUN mkdir -p /tmp/jev-src \
+    && tar -xzf /tmp/lily-jev.tar.gz -C /tmp/jev-src --strip-components=1 \
+    && mv /tmp/jev-src /workspace/lily-jev \
+    && rm /tmp/lily-jev.tar.gz
 RUN gradle dependencies --no-daemon || true
 COPY src ./src
 RUN gradle bootJar --no-daemon -x test
