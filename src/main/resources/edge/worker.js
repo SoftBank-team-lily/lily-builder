@@ -4,10 +4,18 @@
 // PC 가 응답하지 못하면 같은 요청을 {app}-cloud.{zone}(ALB → 클라우드 대기 Pod)으로 다시 보낸다.
 //   - 530(터널 커넥터 없음)·연결 실패: PC 가 요청을 받지 못했다. 모든 메서드를 다시 보낸다
 //   - 엣지가 만든 502/503/504/52x 오류 페이지(터널은 붙어 있는데 PC 가 멈춤): PC 가 받았을 수 있어 GET/HEAD/OPTIONS 만 다시 보낸다
+//   - GET/HEAD/OPTIONS 는 PC 가 PC_TIMEOUT_MILLIS 안에 응답 헤더를 주지 않으면 끊고 다시 보낸다.
+//     PC 가 전원이 꺼지면 터널이 끊긴 줄 모르는 엣지가 응답을 기다리다 6초 넘게 걸려서야 502 를 낸다
 // 앱이 돌려준 5xx 는 엣지 오류 페이지가 아니므로 그대로 돌려준다.
+//
+// PC 가 응답하지 못하면 DOWN_MILLIS 동안 PC 를 건너뛴다. isolate 메모리와 Cache API(같은 데이터센터의 모든 isolate 가 본다)에 둔다.
 
-/** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 (isolate 메모리, 엣지 위치마다 따로) */
+/** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 */
 const DOWN_MILLIS = 10_000;
+/** GET/HEAD/OPTIONS 가 PC 응답 헤더를 기다리는 시간. 넘으면 클라우드로 다시 보낸다 */
+const PC_TIMEOUT_MILLIS = 2_500;
+/** Cache API 키 경로. 실제 요청 경로와 겹치지 않게 둔다 */
+const DOWN_PATH = "/__lily_edge/pc-down";
 /** 다시 보내려고 메모리에 들고 있을 본문 크기 상한. 넘거나 길이를 모르면 다시 보내지 않는다 */
 const REPLAY_LIMIT = 1024 * 1024;
 const CLOUD_SUFFIX = "-cloud";
@@ -18,14 +26,14 @@ const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 const down = new Map();
 
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const cloud = cloudUrl(url);
     if (cloud === null) {
       return fetch(request);
     }
     const host = url.hostname;
-    if ((down.get(host) ?? 0) > Date.now()) {
+    if (await isDown(host)) {
       return toCloud(request, null, cloud, host);
     }
 
@@ -36,24 +44,74 @@ export default {
     }
     let response;
     try {
-      response = await fetch(rebuild(request, url, body));
+      response = await fetchPc(request, url, body);
     } catch (e) {
-      // 오리진에 연결하지 못했다
-      down.set(host, Date.now() + DOWN_MILLIS);
+      // 오리진에 연결하지 못했거나 PC 가 제시간에 응답하지 않았다
+      markDown(host, ctx);
       return toCloud(request, body, cloud, host);
     }
     if (!(await edgeFailed(response))) {
       return response;
     }
+    markDown(host, ctx);
     if (response.status !== 530 && !SAFE.has(request.method)) {
       // PC 가 받았을 수 있다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 요청부터는 클라우드로)
-      down.set(host, Date.now() + DOWN_MILLIS);
       return response;
     }
-    down.set(host, Date.now() + DOWN_MILLIS);
     return toCloud(request, body, cloud, host);
   },
 };
+
+/** PC 로 보낸다. 다시 보내도 되는 요청은 응답 헤더가 PC_TIMEOUT_MILLIS 안에 오지 않으면 끊는다 (본문 스트리밍은 끊지 않는다) */
+async function fetchPc(request, url, body) {
+  const forwarded = rebuild(request, url, body);
+  if (!timesOut(request)) {
+    return fetch(forwarded);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PC_TIMEOUT_MILLIS);
+  try {
+    return await fetch(forwarded, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** SSE·WebSocket 은 응답이 늦게 시작해도 정상이라 시간 제한을 걸지 않는다 */
+function timesOut(request) {
+  return SAFE.has(request.method)
+    && request.headers.get("upgrade") === null
+    && !(request.headers.get("accept") ?? "").includes("text/event-stream");
+}
+
+async function isDown(host) {
+  if ((down.get(host) ?? 0) > Date.now()) {
+    return true;
+  }
+  const marked = await caches.default.match(downKey(host));
+  if (marked === undefined) {
+    return false;
+  }
+  const until = Number(await marked.text());
+  if (until > Date.now()) {
+    down.set(host, until);
+    return true;
+  }
+  return false;
+}
+
+function markDown(host, ctx) {
+  const until = Date.now() + DOWN_MILLIS;
+  down.set(host, until);
+  const marker = new Response(String(until), {
+    headers: { "Cache-Control": "max-age=" + Math.ceil(DOWN_MILLIS / 1000) },
+  });
+  ctx.waitUntil(caches.default.put(downKey(host), marker));
+}
+
+function downKey(host) {
+  return "https://" + host + DOWN_PATH;
+}
 
 /** 앱이 아니라 엣지가 만든 응답이다 (530, 또는 Cloudflare 오류 페이지) */
 async function edgeFailed(response) {
