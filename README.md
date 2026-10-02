@@ -105,6 +105,26 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 - 연결 정보는 메모리에만 있다. builder 가 재시작하면 에이전트가 5초 뒤 다시 붙는다
 - ALB 가 60초 유휴 연결을 끊어서 25초마다 ping 을 보낸다. Ingress 는 lily-loadbalancer `manifests/lily-builder.yaml`
 
+### PC 장애 시 클라우드로 (엣지 Worker + CNAME 전환)
+
+PC 가 꺼지면 클라우드 대기 Pod 가 있어도 공개 주소가 PC 터널을 가리켜 끊긴다. 두 겹으로 막는다. 자세한 설계와 측정은 `docs/장애-자동-전환.md`.
+
+```
+평소     {app}.{존} → Worker lily-edge → CNAME 내용물(PC 터널) → 에이전트 프록시
+PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이지·2.5초 무응답 → {app}-cloud.{존} → ALB → 클라우드 대기 Pod
+```
+
+| 단계 | 구현 | 끊김 |
+|---|---|---|
+| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에만 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 4초 |
+| CNAME 전환 (예비) | `AgentFailover`. 에이전트가 `FAILOVER_GRACE_SECONDS` 동안 끊겨 있으면 클라우드 레플리카를 올리고 CNAME 을 ALB 로 | 유예 60초 + DNS 반영 |
+
+- 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·2.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
+- 한 번 실패하면 10초 동안 PC 를 건너뛴다 (isolate 메모리 + Cache API)
+- 대기 배포 때 lily-cicd 에 `aliases: [{app}-cloud.{존}]` 를 보내 같은 Service 로 Ingress 규칙을 둔다
+- `-cloud` 로 끝나는 앱 이름은 받지 않는다
+- 버스팅·비율 슬라이더·거점 전환은 그대로 PC 프록시와 CNAME 이 맡는다
+
 ## 설정
 
 | 환경변수 | 기본값 | 설명 |
@@ -114,6 +134,10 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 | `BUILDER_NAMESPACE` | `lily-builds` | Kaniko Job namespace |
 | `CICD_URL` | `http://localhost:8090` | lily-cicd 주소 |
 | `BUILD_TIMEOUT_SECONDS` | `900` | 빌드 최대 대기 |
+| `PLATFORM_EDGE_ENABLED` | `false` | PC 장애 때 엣지 Worker 가 요청을 클라우드로 다시 보낸다. 플랫폼 Cloudflare 토큰에 Workers Scripts:Edit(계정), Workers Routes:Edit(존) 권한이 있어야 한다 |
+| `PLATFORM_EDGE_SCRIPT_NAME` | `lily-edge` | Cloudflare 의 Worker 이름. builder 가 기동할 때 올린다 |
+| `FAILOVER_GRACE_SECONDS` | `60` | 에이전트가 이만큼 끊겨 있으면 CNAME 을 ALB 로 바꾼다. 0 이면 끈다 |
+| `FAILOVER_REPLICAS` | `2` | 그때 올릴 클라우드 레플리카 |
 
 - ECR 이면 Kaniko 에 내장된 `ecr-login` 으로 인증한다. Kaniko 가 뜨는 노드의 IAM 역할에 ECR push 권한이 필요하다
 - k3s 매니페스트: `deploy/k3s/lily-builder.yaml` (빌더는 `lily-builds` namespace 의 Job/Secret/ConfigMap/로그만 다룬다)
