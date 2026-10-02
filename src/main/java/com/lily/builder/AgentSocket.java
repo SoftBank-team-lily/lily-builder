@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
  *            → 같은 rid 로 {"ok":..,"result":..} (AgentBurst)
  * builder  → burst  {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   화면에서 정한 버스팅 설정
  * 에이전트 → burst-state {"type":"burst-state","app":..,"enabled":..,"phase":..,"home":..}  몇 초마다
+ * 에이전트 → remediate {"type":"remediate","app":..,"signature":..,"log":..,"files":[..]}  로컬 CRITICAL 연속 한 번
  * </pre>
  *
  * 외부에는 이 경로만 연다 (lily-loadbalancer manifests/lily-builder.yaml). 토큰이 틀리면 핸드셰이크에서 401.
@@ -61,6 +62,7 @@ public class AgentSocket implements WebSocketConfigurer {
     private final TunnelCertificates certificates;
     private final AgentDatabasePorts ports;
     private final AgentBurst burst;
+    private final AgentIncidentRelay incidents;
     private final PlatformProperties.Burst burstSettings;
     private final ObjectMapper json = new ObjectMapper();
     /** Cloudflare 중계는 수 초 걸린다. 소켓 수신 스레드를 막지 않게 따로 돌린다 */
@@ -68,8 +70,9 @@ public class AgentSocket implements WebSocketConfigurer {
 
     public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys,
                        AgentCloudflare cloudflare, TunnelCertificates certificates, AgentDatabasePorts ports,
-                       AgentBurst burst, PlatformProperties platform) {
+                       AgentBurst burst, AgentIncidentRelay incidents, PlatformProperties platform) {
         this.burst = burst;
+        this.incidents = incidents;
         this.burstSettings = platform.burst();
         this.tokens = tokens;
         this.hub = hub;
@@ -241,6 +244,13 @@ public class AgentSocket implements WebSocketConfigurer {
                     case "cloudflare" -> relay(key, node);
                     case "burst" -> relayBurst(key, node);
                     case "burst-state" -> hub.burstState(key, node);
+                    case "remediate" -> relay.execute(() -> {
+                        try {
+                            incidents.accept(node);
+                        } catch (RuntimeException e) {
+                            log.warn("on-prem incident failed: key={} message={}", key, e.getMessage());
+                        }
+                    });
                     case "status" -> deploys.agentStatus(key, node.path("id").asText(), node.path("status").asText(),
                             node.path("line").asText(""), node.path("url").asText(""));
                     default -> log.debug("agent message ignored: key={} type={}", key, node.path("type").asText());
