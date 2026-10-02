@@ -6,6 +6,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -33,10 +34,18 @@ public class BuildController {
     private final CicdClient cicd;
     private final AgentDeployService agents;
     private final AppAddress addresses;
+    private final EdgeWorker edge;
     private final ObjectMapper json = new ObjectMapper();
 
+    BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
+                    AppAddress addresses) {
+        this(service, clusterApps, cicd, agents, addresses, EdgeWorker.disabled());
+    }
+
+    @Autowired
     public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
-                           AppAddress addresses) {
+                           AppAddress addresses, EdgeWorker edge) {
+        this.edge = edge;
         this.service = service;
         this.clusterApps = clusterApps;
         this.cicd = cicd;
@@ -134,6 +143,13 @@ public class BuildController {
                 addresses.removeCloud(appName);
             } catch (RuntimeException e) {
                 // 남은 레코드는 ALB 의 404 로 끝난다. 앱 삭제는 성공이다
+            }
+        }
+        if (removed.status() == 200 && edge.enabled()) {
+            try {
+                edge.detach(appName);
+            } catch (RuntimeException e) {
+                // 남은 라우트는 PC 장애 때 없는 클라우드 앱으로 보낼 뿐이다. 앱 삭제는 성공이다
             }
         }
         return passthrough(removed);

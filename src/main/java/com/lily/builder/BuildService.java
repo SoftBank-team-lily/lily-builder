@@ -41,12 +41,13 @@ public class BuildService {
     private final ConfigAdvisor config;
     private final FailureDiagnoser diagnoser;
     private final AppAddress addresses;
+    private final EdgeWorker edge;
 
     @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                         EcrRepositories ecr, GitHubSource github, ConfigAdvisor config, FailureDiagnoser diagnoser,
-                        AppAddress addresses) {
-        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser, addresses);
+                        AppAddress addresses, EdgeWorker edge) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser, addresses, edge);
     }
 
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
@@ -64,7 +65,14 @@ public class BuildService {
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                  EcrRepositories ecr, GitHubSource github, DeployFollow follow,
                  ConfigAdvisor config, FailureDiagnoser diagnoser, AppAddress addresses) {
+        this(store, kaniko, cicd, runner, ecr, github, follow, config, diagnoser, addresses, EdgeWorker.disabled());
+    }
+
+    BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                 EcrRepositories ecr, GitHubSource github, DeployFollow follow,
+                 ConfigAdvisor config, FailureDiagnoser diagnoser, AppAddress addresses, EdgeWorker edge) {
         this.addresses = addresses;
+        this.edge = edge;
         this.config = config;
         this.diagnoser = diagnoser;
         this.store = store;
@@ -171,7 +179,8 @@ public class BuildService {
             CicdClient.Result result;
             try (ProgressWatch ignored = watchProgress(build)) {
                 try {
-                    result = cicd.deploy(request, image, tag, migrations);
+                    result = cicd.deploy(request, image, tag, migrations,
+                            request.isStandby() ? edge.aliases(request.appName()) : List.of());
                 } catch (RestClientResponseException e) {
                     throw e;
                 } catch (RestClientException e) {
@@ -198,6 +207,7 @@ public class BuildService {
                     cicd.scale(request.appName(), 0);
                     build.log("standby: scaled to 0");
                 }
+                edge(build, request.appName());
             } else {
                 address(build, request.appName());
             }
@@ -669,6 +679,19 @@ public class BuildService {
             log.warn("address {} check failed: {}", app, e.getMessage());
             build.log("standby: address check failed (" + e.getMessage() + ")");
             return true;
+        }
+    }
+
+    /** 대기 배포가 끝난 앱에 엣지 Worker 를 건다. 실패해도 배포는 성공이다 (PC 장애 때 CNAME 전환이 남는다) */
+    private void edge(Build build, String app) {
+        if (!edge.enabled()) {
+            return;
+        }
+        try {
+            build.log(edge.attach(app));
+        } catch (RuntimeException e) {
+            log.warn("edge {} failed: {}", app, e.getMessage());
+            build.log("edge: failed " + e.getMessage());
         }
     }
 
