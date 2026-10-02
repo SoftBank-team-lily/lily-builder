@@ -86,9 +86,9 @@ body = {
     'observedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'evidence': [
         {'id': 'pod-1', 'source': 'pods', 'signal': 'oom',
-         'summary': 'Synthetic fixture: lastRestartReason=OOMKilled, restarts=3. Event time unknown.'},
-        {'id': 'log-1', 'source': 'logs', 'signal': 'database_error',
-         'summary': 'Synthetic fixture: PSQLException: connection to database timed out.'},
+         'summary': 'Synthetic fixture: current container terminated with OOMKilled, exitCode=137, because its memory limit was exceeded.'},
+        {'id': 'log-1', 'source': 'logs', 'signal': 'oom',
+         'summary': 'Synthetic fixture from the same termination: java.lang.OutOfMemoryError: Java heap space.'},
     ], 'missingSources': ['metrics', 'status', 'deployment'],
 }
 request = urllib.request.Request(base + '/api/diagnoses', data=json.dumps(body).encode(),
@@ -103,7 +103,7 @@ except (OSError, ValueError) as error:
     sys.exit('Diagnosis request could not complete. Check the local builder and network connection.')
 
 assert result['app'] == body['app'] and result['namespace'] == body['namespace']
-assert result['category'] in {'resources', 'database', 'unknown'}
+assert result['category'] in {'resources', 'unknown'}
 assert set(result['evidenceIds']) <= {'pod-1', 'log-1'}
 expected = 'rules' if mode == 'rules' else 'ai'
 print(json.dumps({k: result[k] for k in ('source', 'category', 'summary', 'evidenceIds', 'limitations')},

@@ -105,7 +105,7 @@ observer와 builder에 같은 `DIAGNOSIS_API_TOKEN`을 설정하고, observer의
 3. 저장소 터미널에서 `bash scripts/test-diagnosis.sh`를 실행해요.
 
 스크립트가 Java 21 Docker 환경에서 builder를 빌드하고, `.env.local`을 읽는 로컬 서버를 잠깐 실행해요.
-합성 OOM·DB 오류 자료 한 건으로 진단 API를 호출하고, 실제 JEV 판정이 사용됐는지 확인한 뒤 서버를 종료해요.
+같은 OOM 종료를 가리키는 합성 파드 상태·메모리 오류 로그로 진단 API를 호출하고, 실제 JEV 판정이 사용됐는지 확인한 뒤 서버를 종료해요.
 기본 실행은 TypeSafe API를 호출하므로 계정 사용량에 반영될 수 있어요. 키나 서버 로그는 출력하지 않아요.
 실제 클러스터 관측 데이터까지 점검하려면 observer 연결 테스트가 추가로 필요해요.
 
