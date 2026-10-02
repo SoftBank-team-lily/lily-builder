@@ -129,3 +129,9 @@ BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost
 ## 아직 없는 것
 
 - 인증 (누구나 배포 가능)
+
+## 운영 원인 진단
+
+observer가 수집한 지표·파드·로그 근거를 `POST /api/diagnoses`로 분석합니다. JEV는 근거가 있는 원인 후보 중 하나를 선택하고, builder는 근거 ID와 검토 조치를 반환합니다. 모델 장애나 키 미설정 시에는 `source: rules`로 관측 규칙을 사용합니다. 실행형 복구 기능과 별도로 동작합니다.
+
+`DIAGNOSIS_API_TOKEN`이 있어야 API를 사용할 수 있고, JEV를 쓰려면 `JEV_API_KEY`를 추가합니다. 입력 제한, 응답 예시와 연동 방식은 [운영 진단 API](docs/diagnosis.md)를 참고하세요.

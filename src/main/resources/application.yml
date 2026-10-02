@@ -72,3 +72,8 @@ lily:
     # 온프레미스 에이전트가 올린 사건을 frontend 로 넘긴다. 비어 있으면 버린다
     frontend-url: ${REMEDIATE_FRONTEND_URL:}
     token: ${REMEDIATE_TOKEN:}
+
+  # 관측 근거 분석용 내부 API. 토큰이 비어 있으면 /api/diagnoses 는 503.
+  diagnosis:
+    api-token: ${DIAGNOSIS_API_TOKEN:}
+    jev-api-key: ${JEV_API_KEY:}
