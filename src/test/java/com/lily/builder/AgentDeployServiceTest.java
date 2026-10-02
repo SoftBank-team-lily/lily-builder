@@ -29,11 +29,12 @@ class AgentDeployServiceTest {
     private final GitHubSource github = mock(GitHubSource.class);
     private final BuildService builds = mock(BuildService.class);
     private final AgentHub hub = mock(AgentHub.class);
+    private final ProvisionerClient provisioner = mock(ProvisionerClient.class);
     private final BuildService.BuildRunner runner = new BuildServiceTest.SyncRunner();
     private final AgentDeployService service = new AgentDeployService(store, github, builds, hub, runner,
             new BuilderProperties("ns", "reg", false, "http://cicd", "kaniko", 900,
                     new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), ""),
-            mock(ProvisionerClient.class));
+            provisioner);
 
     private static BuildRequest request(String appName) {
         return new BuildRequest("https://github.com/org/blog", null, null, null, appName, null, "auto", null, null,
@@ -210,5 +211,41 @@ class AgentDeployServiceTest {
         String response = service.home("blog-1b62c0", "cloud").orElseThrow();
 
         assertThat(response).contains("MOVED").contains("cloud").contains("CLOUD");
+    }
+
+    private static BuildRequest importing(String appName, String database) {
+        return new BuildRequest("https://github.com/org/blog", null, null, null, appName, 8080, database, "/", "/",
+                Map.of(), null, null, null, null, null, "local", null, null, true);
+    }
+
+    @Test
+    void 클라우드_앱을_옮기면_RDS_접속_정보와_import_를_잡에_싣는다() throws Exception {
+        when(hub.supportsDatabaseMode(KEY, "local")).thenReturn(true);
+        when(hub.supportsDatabaseMode(KEY, "import")).thenReturn(true);
+        when(hub.platformDatabase(KEY)).thenReturn(true);
+        when(hub.tunnel(KEY)).thenReturn(new AgentHub.Tunnel("172.17.0.1", 15432));
+        when(provisioner.ensure("blog-1b62c0", "postgres", "172.17.0.1", 15432))
+                .thenReturn(new ProvisionerClient.Connection("db1",
+                        Map.of("DATABASE_URL", "postgresql://u:p@172.17.0.1:15432/blog")));
+
+        service.start(KEY, importing("blog-1b62c0", "postgres"));
+
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub).send(eq(KEY), sent.capture());
+        JsonNode job = new ObjectMapper().readTree(sent.getValue());
+        assertThat(job.path("databaseMode").asText()).isEqualTo("local");
+        assertThat(job.path("importDatabase").asBoolean()).isTrue();
+        assertThat(job.path("databaseEnv").path("DATABASE_URL").asText()).contains("172.17.0.1:15432");
+    }
+
+    @Test
+    void 옮기기를_모르는_에이전트에는_보내지_않는다() {
+        when(hub.supportsDatabaseMode(KEY, "local")).thenReturn(true);
+        when(hub.platformDatabase(KEY)).thenReturn(true);
+
+        Build build = service.start(KEY, importing("blog-1b62c0", "postgres"));
+
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.FAILED);
+        verify(hub, never()).send(eq(KEY), anyString());
     }
 }

@@ -105,6 +105,16 @@ public class AgentDeployService {
                 if ("external".equals(mode) && (request.databaseUrl() == null || request.databaseUrl().isBlank())) {
                     throw new IllegalArgumentException("DB 주소(databaseUrl)가 없다");
                 }
+                if (request.importsDatabase()) {
+                    // 클라우드 앱을 내 PC 로 옮긴다. 같은 appName 의 RDS 를 터널로 읽어 PC DB 에 채운다
+                    if (!"local".equals(mode) || !"postgres".equals(database)) {
+                        throw new IllegalArgumentException("RDS 데이터 옮기기는 DB 위치 local, postgres 만 된다");
+                    }
+                    if (!hub.supportsDatabaseMode(agentKey, "import") || !hub.platformDatabase(agentKey)) {
+                        throw new IllegalStateException("내 PC 에이전트가 RDS 데이터를 옮기지 못하는 판이다."
+                                + " 에이전트를 최신 이미지로 다시 실행한다");
+                    }
+                }
                 build.log("database: " + database + " on " + ("local".equals(mode) ? "agent (my pc)" : "external url"));
             } else if (database != null && !database.isBlank() && !hub.supportsDatabase(agentKey)) {
                 // DB 없이 보내면 앱이 DB 에 붙으려다 기동하지 못하고, 헬스 체크 제한 시간(3분) 뒤에야 실패한다.
@@ -114,10 +124,13 @@ public class AgentDeployService {
             }
             // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
             Map<String, String> databaseEnv = null;
-            if (!onPremDatabase && database != null && !database.isBlank() && hub.platformDatabase(agentKey)) {
+            boolean importing = onPremDatabase && request.importsDatabase();
+            if ((importing || !onPremDatabase) && database != null && !database.isBlank()
+                    && hub.platformDatabase(agentKey)) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
                 databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
-                build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port());
+                build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port()
+                        + (importing ? " (import into my pc)" : ""));
             }
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));
@@ -131,6 +144,9 @@ public class AgentDeployService {
                 job.put("databaseMode", mode);
                 if ("external".equals(mode)) {
                     job.put("databaseUrl", request.databaseUrl());
+                }
+                if (importing) {
+                    job.put("importDatabase", true);
                 }
             }
             hub.send(agentKey, json.writeValueAsString(job));

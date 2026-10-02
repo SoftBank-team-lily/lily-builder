@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -23,6 +24,8 @@ import java.util.regex.Pattern;
 public class BuildController {
 
     private static final Pattern APP_NAME = Pattern.compile("[a-z0-9]([-a-z0-9]*[a-z0-9])?");
+    private static final Pattern UPSTREAM_HOST =
+            Pattern.compile("[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+");
 
     private final BuildService service;
     private final ClusterApps clusterApps;
@@ -122,6 +125,39 @@ public class BuildController {
             return ResponseEntity.badRequest().build();
         }
         return passthrough(cicd.remove(appName, database));
+    }
+
+    /**
+     * 클라우드 앱의 공개 주소({app}.apps...)는 두고, Ingress 가 요청을 온프레미스 공개 호스트로 넘기게 한다.
+     * 클라우드 앱을 내 PC 로 옮길 때 쓴다. 본문 {"host":"{app}.{플랫폼 존}"}
+     */
+    @PutMapping("/api/apps/{appName}/upstream")
+    public ResponseEntity<String> pointUpstream(@PathVariable String appName, @RequestBody UpstreamRequest request) {
+        if (!APP_NAME.matcher(appName).matches() || request == null || request.host() == null
+                || !UPSTREAM_HOST.matcher(request.host()).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.pointUpstream(appName, request.host()));
+    }
+
+    /** 앱 Ingress 를 클러스터 Service 로 되돌린다 (클라우드로 돌아올 때) */
+    @DeleteMapping("/api/apps/{appName}/upstream")
+    public ResponseEntity<String> restoreUpstream(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.restoreUpstream(appName));
+    }
+
+    @GetMapping("/api/apps/{appName}/upstream")
+    public ResponseEntity<String> upstream(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.upstream(appName));
+    }
+
+    public record UpstreamRequest(String host) {
     }
 
     /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409 */

@@ -32,6 +32,8 @@ import java.util.Map;
  * @param databaseUrl   external 일 때 DB 주소. {@code postgresql://user:pass@host:port/db} 또는 {@code mysql://...}. 저장하지 않는다
  * @param databaseEnv   DB 접속 환경변수를 직접 준다 (온프레미스 DB 를 역방향 터널로 쓰는 클라우드 대기 배포).
  *                      있으면 DB 를 만들지 않고 마이그레이션도 보내지 않는다 (스키마는 온프레미스가 맡는다)
+ * @param importDatabase 온프레미스 local DB 를 띄우기 전에 같은 appName 의 클라우드 RDS 데이터를 옮긴다
+ *                      (클라우드 앱을 내 PC 로 옮길 때). postgres 만
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -51,9 +53,20 @@ public record BuildRequest(
         @Pattern(regexp = "(/[!-~]*)?") String canaryPath,
         @Pattern(regexp = "cloud|local|external|") String databaseMode,
         @Size(max = 500) @Pattern(regexp = "((postgres|postgresql|mysql)://[!-~]+)?") String databaseUrl,
-        Map<String, String> databaseEnv) {
+        Map<String, String> databaseEnv,
+        Boolean importDatabase) {
 
     public static final int DEFAULT_TARGET_PORT = 8080;
+
+    /** RDS 데이터를 옮기지 않는다 */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
+                        Map<String, String> databaseEnv) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv, null);
+    }
 
     /** DB 위치는 정하지 않는다 (클라우드 배포, 또는 온프레미스 기본값 cloud) */
     public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
@@ -94,13 +107,20 @@ public record BuildRequest(
     /** 추정한 값으로 채운 요청 */
     public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
-                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv);
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase);
     }
 
     /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
     public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
-                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv);
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase);
+    }
+
+    /** 클라우드 RDS 데이터를 온프레미스 local DB 로 옮긴다 */
+    public boolean importsDatabase() {
+        return Boolean.TRUE.equals(importDatabase);
     }
 
     private static boolean blank(String value) {
