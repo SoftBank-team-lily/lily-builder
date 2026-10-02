@@ -331,7 +331,7 @@ class AgentDeployServiceTest {
         Build build = service.start(KEY, request("blog-1b62c0"));
         service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
         when(hub.supports(KEY, "burst")).thenReturn(true);
-        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of()));
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of(), ""));
 
         assertThat(service.burst("blog-1b62c0", true, 30)).isPresent();
 
@@ -376,7 +376,7 @@ class AgentDeployServiceTest {
         standby.status(Build.Status.BUILDING, "build: kaniko job build-s1");
         store.save(standby);
         JsonNode state = new ObjectMapper().readTree("{\"app\":\"blog-1b62c0\",\"homeBuild\":\"s1\",\"standbyBuild\":\"\"}");
-        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, state, Map.of()));
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, state, Map.of(), "blog-1b62c0"));
 
         AgentHub.Burst burst = service.burstState("blog-1b62c0").orElseThrow();
 
@@ -389,7 +389,7 @@ class AgentDeployServiceTest {
     void 거점_전환_취소를_그_앱의_에이전트에_보낸다() throws Exception {
         Build build = service.start(KEY, request("blog-1b62c0"));
         service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
-        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of()));
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of(), ""));
 
         assertThatThrownBy(() -> service.cancelHome("blog-1b62c0")).hasMessageContaining("최신 이미지");
 

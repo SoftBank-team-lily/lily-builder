@@ -74,12 +74,12 @@ public class AgentHub {
     public Burst burst(String key, String app) {
         Connection connection = connections.get(key);
         if (connection == null || !connection.session.isOpen()) {
-            return new Burst(false, false, null, Map.of());
+            return new Burst(false, false, null, Map.of(), "");
         }
         JsonNode state = connection.burstState;
         String reported = state == null ? "" : state.path("app").asText("");
         boolean mine = state != null && (reported.isBlank() || reported.equals(app));
-        return new Burst(true, connection.features.contains("burst"), mine ? state : null, Map.of());
+        return new Burst(true, connection.features.contains("burst"), mine ? state : null, Map.of(), reported);
     }
 
     /** @param databaseModes 에이전트가 받을 수 있는 DB 위치 (local, external). 이 필드 전의 에이전트는 비어 있다 */
@@ -215,10 +215,14 @@ public class AgentHub {
      * @param supported 에이전트가 버스팅 설정 메시지를 받는 판이다
      * @param state     에이전트가 보낸 burst-state 그대로 (enabled, cloudPercent, phase, home, ...)
      */
-    public record Burst(boolean connected, boolean supported, JsonNode state, Map<String, Progress> builds) {
+    /**
+     * @param agentApp 에이전트가 지금 다루는 앱. 이 앱이 아니면 state 가 비고, 화면이 "다른 앱을 돌리는 중"을 보인다
+     */
+    public record Burst(boolean connected, boolean supported, JsonNode state, Map<String, Progress> builds,
+                        String agentApp) {
 
         public Burst withBuilds(Map<String, Progress> builds) {
-            return new Burst(connected, supported, state, builds);
+            return new Burst(connected, supported, state, builds, agentApp);
         }
     }
 
