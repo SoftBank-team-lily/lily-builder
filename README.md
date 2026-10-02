@@ -2,7 +2,7 @@
 
 GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청하는 모듈 · SoftBank Hackathon 2026 · Team Lily
 
-> 초안. 전체 흐름이 도는지 확인하기 위한 버전이다. 진행 상태는 메모리에만 둔다.
+> 초안. 전체 흐름이 도는지 확인하기 위한 버전이다. 배포 이력은 DynamoDB `lily-builds`에 둔다.
 
 ```
 배포 폼 (/) → POST /api/builds
@@ -73,7 +73,7 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 | 0 | 레포 확인 | `QUEUED`, 커밋 고정 |
 | 1 | 빌드 | Kaniko |
 | 2 | 새 버전 띄우기 | 이미지 푸시, 새 색 Deployment, Ready 대기 |
-| 3 | 트래픽 10%로 새 버전 내보내기 | cicd `canary-traffic` |
+| 3 | 트래픽 10%로 새 버전 내보내기 | cicd `canary-traffic`. 화면 이름이다. 사용자 트래픽은 이전 색에 있고 cicd가 프로브한다 |
 | 4 | 에러율·응답 시간 판정 | cicd `canary-analysis` |
 | 5 | 트래픽 100%로 전환 | cicd `service` 이후, `SUCCEEDED` |
 
@@ -128,5 +128,4 @@ BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost
 
 ## 아직 없는 것
 
-- 빌드 기록 저장 (지금은 메모리)
 - 인증 (누구나 배포 가능)
