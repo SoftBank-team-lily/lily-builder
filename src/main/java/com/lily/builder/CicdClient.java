@@ -94,6 +94,21 @@ public class CicdClient {
                 .queryParam("database", database).build(appName)));
     }
 
+    /** 앱 Ingress 를 온프레미스 공개 호스트로 넘긴다 (200, 400, 404, 409) */
+    public Passthrough pointUpstream(String appName, String host) {
+        return exchange(http.put().uri("/api/apps/{app}/upstream", appName).body(Map.of("host", host)));
+    }
+
+    /** 앱 Ingress 를 클러스터 Service 로 되돌린다 (200, 409) */
+    public Passthrough restoreUpstream(String appName) {
+        return exchange(http.delete().uri("/api/apps/{app}/upstream", appName));
+    }
+
+    /** 앱 Ingress 가 넘기는 온프레미스 호스트 {"appName":..,"upstream":..|null} */
+    public Passthrough upstream(String appName) {
+        return exchange(http.get().uri("/api/apps/{app}/upstream", appName));
+    }
+
     /** 슬롯별 릴리스와 롤백 가능 여부 */
     public Passthrough release(String appName) {
         return exchange(http.get().uri("/api/deployments/{app}", appName));
