@@ -73,9 +73,17 @@ public class BuildService {
     }
 
     public Build start(BuildRequest request) {
+        return start(request, null);
+    }
+
+    /** @param note 큐에 넣을 때 같이 남길 줄 (예: 대기 배포를 요청한 에이전트) */
+    public Build start(BuildRequest request, String note) {
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch()
                 + (build.getRootDir() == null ? "" : " dir=" + build.getRootDir()));
+        if (note != null && !note.isBlank()) {
+            build.log(note);
+        }
         store.save(build);
         runner.run(() -> execute(build, request));
         return build;

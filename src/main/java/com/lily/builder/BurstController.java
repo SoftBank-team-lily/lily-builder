@@ -58,14 +58,18 @@ public class BurstController {
         if (!appName.equals(request.appName())) {
             return ResponseEntity.badRequest().build();
         }
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(builds.start(standbyOf(request)));
+    }
+
+    /** 대기 배포 요청. 플랫폼 연결 에이전트의 중계({@link AgentBurst})도 같은 값으로 만든다 */
+    static BuildRequest standbyOf(BuildRequest request) {
         // databaseEnv: 온프레미스 DB(내 PC·사용자 DB)를 역방향 터널로 쓴다. RDS 를 만들지 않고 스키마는 온프레미스가 맡는다
         boolean given = request.givenDatabase();
-        BuildRequest standby = new BuildRequest(request.repoUrl(), request.branch(), request.token(),
+        return new BuildRequest(request.repoUrl(), request.branch(), request.token(),
                 request.rootDir(), request.appName(), request.targetPort(), given ? "" : request.database(),
                 request.readinessPath(), request.livenessPath(), request.env(), request.host(), true,
                 request.migrationsPath(), given ? Boolean.FALSE : request.migrate(), request.canaryPath(),
                 null, null, given ? request.databaseEnv() : null);
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body(builds.start(standby));
     }
 
     @GetMapping("/builds/{id}")

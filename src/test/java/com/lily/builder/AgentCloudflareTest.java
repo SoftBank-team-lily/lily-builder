@@ -24,7 +24,7 @@ class AgentCloudflareTest {
     private JsonNode record;
 
     private final AgentCloudflare cloudflare = new AgentCloudflare(
-            new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"),
+            new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"), "alb.example.net",
             (key, app) -> KEY.equals(key) && "blog".equals(app),
             (method, path, body) -> {
                 calls.add(method + " " + path + (body == null ? "" : " " + body));
@@ -62,6 +62,27 @@ class AgentCloudflareTest {
                 .hasMessageContaining("이 에이전트로 배포한 앱이 아니다");
         assertThatThrownBy(() -> cloudflare.call(KEY, "PUT", A + "/cfd_tunnel/" + TUNNEL + "/configurations",
                 json(ok.replace("http://127.0.0.1:8099", "http://10.0.0.5:80"))))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void homeCutoverMayPointTheRecordAtTheCloudOriginAndBack() {
+        String toOrigin = "{\"type\":\"CNAME\",\"name\":\"blog.lilycloud.kr\",\"content\":\"alb.example.net\",\"proxied\":true}";
+        String id = "0123456789abcdef0123456789abcdef";
+        record = json("{\"name\":\"blog.lilycloud.kr\",\"type\":\"CNAME\",\"content\":\"" + TUNNEL + ".cfargotunnel.com\"}");
+        cloudflare.call(KEY, "PUT", Z + "/dns_records/" + id, json(toOrigin));
+        assertThat(calls.get(calls.size() - 1)).contains("\"content\":\"alb.example.net\"");
+
+        record = json("{\"name\":\"blog.lilycloud.kr\",\"type\":\"CNAME\",\"content\":\"alb.example.net\"}");
+        cloudflare.call(KEY, "PUT", Z + "/dns_records/" + id,
+                json(toOrigin.replace("alb.example.net", TUNNEL + ".cfargotunnel.com")));
+        assertThat(calls.get(calls.size() - 1)).contains(TUNNEL + ".cfargotunnel.com");
+
+        // 오리진은 PUT 으로만. 새 레코드는 터널로만 만든다
+        assertThatThrownBy(() -> cloudflare.call(KEY, "POST", Z + "/dns_records", json(toOrigin)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> cloudflare.call(KEY, "PUT", Z + "/dns_records/" + id,
+                json(toOrigin.replace("alb.example.net", "evil.example.com"))))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

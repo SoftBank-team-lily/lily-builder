@@ -305,4 +305,46 @@ class AgentDeployServiceTest {
 
         assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.SUCCEEDED);
     }
+
+    @Test
+    void 버스팅_설정을_그_앱의_에이전트에_보낸다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.supports(KEY, "burst")).thenReturn(true);
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null));
+
+        assertThat(service.burst("blog-1b62c0", true, 30)).isPresent();
+
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub, org.mockito.Mockito.atLeastOnce()).send(eq(KEY), sent.capture());
+        JsonNode message = new ObjectMapper().readTree(sent.getValue());
+        assertThat(message.path("type").asText()).isEqualTo("burst");
+        assertThat(message.path("enabled").asBoolean()).isTrue();
+        assertThat(message.path("cloudPercent").asInt()).isEqualTo(30);
+        assertThat(service.burst("other-app", true, 0)).isEmpty();
+    }
+
+    @Test
+    void 버스팅을_모르는_에이전트에는_보내지_않는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+
+        assertThatThrownBy(() -> service.burst("blog-1b62c0", true, 30)).hasMessageContaining("최신 이미지");
+        assertThatThrownBy(() -> service.burst("blog-1b62c0", true, 101)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 에이전트가_요청한_대기_배포가_최신이어도_그_에이전트의_앱이다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        Build standby = new Build("s1", request("blog-1b62c0"));
+        standby.log(AgentBurst.STANDBY_MARK + KEY);
+        standby.status(Build.Status.SUCCEEDED, "done");
+        store.save(standby);
+
+        assertThat(service.ownedBy(KEY, "blog-1b62c0")).isTrue();
+        assertThat(service.latestApp(KEY)).contains("blog-1b62c0");
+        assertThat(service.latestApp("ffffffffffff")).isEmpty();
+        assertThat(service.ownedBy("ffffffffffff", "blog-1b62c0")).isFalse();
+    }
 }
