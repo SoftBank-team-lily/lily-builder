@@ -57,6 +57,10 @@ lily:
         ingress-port: ${PLATFORM_BURST_INGRESS_PORT:80}
         # 거점이 클라우드일 때 앱 CNAME 이 가리키는 호스트 (클러스터 앞 ALB). 비우면 거점 전환을 하지 않는다
         cloud-origin: ${PLATFORM_CUTOVER_ORIGIN:}
+      # PC 장애 때 엣지(Cloudflare Worker)에서 요청을 {app}-cloud.{zone} 으로 다시 보낸다. 클라우드 대기 배포가 끝난 앱에만 건다
+      edge:
+        enabled: ${PLATFORM_EDGE_ENABLED:false}
+        script-name: ${PLATFORM_EDGE_SCRIPT_NAME:lily-edge}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:
       table: ${BUILDS_TABLE:lily-builds}

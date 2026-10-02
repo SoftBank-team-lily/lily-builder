@@ -8,6 +8,7 @@ import org.springframework.web.client.RestClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** lily-cicd 호출. 배포는 스키마 마이그레이션과 블루-그린 Ready 대기까지 끝나야 응답이 온다 */
@@ -31,6 +32,12 @@ public class CicdClient {
 
     /** @param migrations 파일명 → SQL. 비어 있으면 보내지 않는다 (앱의 Flyway 가 스키마를 맡는다) */
     public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations) {
+        return deploy(request, image, version, migrations, List.of());
+    }
+
+    /** @param aliases 같은 Service 로 보내는 추가 Ingress 호스트 (엣지 Worker 의 클라우드 주소). 비어 있으면 보내지 않는다 */
+    public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations,
+                         List<String> aliases) {
         Map<String, Object> body = new HashMap<>();
         body.put("appName", request.appName());
         body.put("imageUrl", image);
@@ -42,6 +49,9 @@ public class CicdClient {
         body.put("extraEnv", request.env() == null ? Map.of() : request.env());
         body.put("host", blankToNull(request.host()));
         body.put("canaryPath", blankToNull(request.canaryPath()));
+        if (aliases != null && !aliases.isEmpty()) {
+            body.put("aliases", aliases);
+        }
         if (request.givenDatabase()) {
             // 온프레미스 DB 를 역방향 터널로 쓴다. lily-cicd 는 DB 를 만들지 않고 이 값을 슬롯 Secret 에 넣는다
             body.put("database", null);

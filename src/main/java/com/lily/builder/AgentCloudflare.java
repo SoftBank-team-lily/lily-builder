@@ -47,7 +47,7 @@ public class AgentCloudflare {
     private static final Pattern TUNNEL_ID = Pattern.compile("[0-9a-f-]{36}");
     private static final Pattern RECORD_ID = Pattern.compile("[0-9a-f]{32}");
     private static final Pattern LOOPBACK = Pattern.compile("http://127\\.0\\.0\\.1:\\d{1,5}");
-    private static final String API = "https://api.cloudflare.com/client/v4";
+    static final String API = "https://api.cloudflare.com/client/v4";
 
     private final PlatformProperties.Cloudflare settings;
     /** 거점이 클라우드일 때의 CNAME 내용물. 비우면 터널로만 가리킨다 */

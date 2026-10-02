@@ -15,7 +15,8 @@ import java.util.Map;
  * @param branch        비우면 main
  * @param token         private 레포일 때만. GitHub Personal Access Token
  * @param rootDir       Dockerfile 이 있는 폴더. 비우면 레포 루트 (백엔드/프론트가 한 레포에 있을 때 지정)
- * @param appName       앱 이름. 도메인과 k3s 리소스 이름에 쓰인다 (lily-cicd appName 규칙)
+ * @param appName       앱 이름. 도메인과 k3s 리소스 이름에 쓰인다 (lily-cicd appName 규칙).
+ *                      {@code -cloud} 로 끝나는 이름은 엣지 Worker 의 클라우드 주소({@code {app}-cloud})와 겹쳐 받지 않는다
  * @param targetPort    컨테이너 포트. 비우면 Dockerfile EXPOSE, 그것도 없으면 8080
  * @param database      DB 가 필요하면 postgres 또는 mysql. auto 면 레포의 드라이버로 정한다 (없으면 DB 없이)
  * @param readinessPath 비우면 lily-cicd 기본값 (/actuator/health/readiness). 레포에 Spring actuator 가 없으면 /
@@ -40,7 +41,7 @@ public record BuildRequest(
         @Pattern(regexp = "[\\w./-]*") String branch,
         String token,
         @Pattern(regexp = "[\\w./-]*") String rootDir,
-        @NotBlank @Size(max = 55) @Pattern(regexp = "[a-z0-9]([-a-z0-9]*[a-z0-9])?") String appName,
+        @NotBlank @Size(max = 55) @Pattern(regexp = "(?!.*-cloud$)[a-z0-9]([-a-z0-9]*[a-z0-9])?") String appName,
         @Min(1) @Max(65535) Integer targetPort,
         @Pattern(regexp = "postgres|mysql|auto|") String database,
         String readinessPath,
