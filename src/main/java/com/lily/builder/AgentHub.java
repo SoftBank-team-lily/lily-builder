@@ -74,12 +74,12 @@ public class AgentHub {
     public Burst burst(String key, String app) {
         Connection connection = connections.get(key);
         if (connection == null || !connection.session.isOpen()) {
-            return new Burst(false, false, null);
+            return new Burst(false, false, null, Map.of());
         }
         JsonNode state = connection.burstState;
         String reported = state == null ? "" : state.path("app").asText("");
         boolean mine = state != null && (reported.isBlank() || reported.equals(app));
-        return new Burst(true, connection.features.contains("burst"), mine ? state : null);
+        return new Burst(true, connection.features.contains("burst"), mine ? state : null, Map.of());
     }
 
     /** @param databaseModes 에이전트가 받을 수 있는 DB 위치 (local, external). 이 필드 전의 에이전트는 비어 있다 */
@@ -215,7 +215,19 @@ public class AgentHub {
      * @param supported 에이전트가 버스팅 설정 메시지를 받는 판이다
      * @param state     에이전트가 보낸 burst-state 그대로 (enabled, cloudPercent, phase, home, ...)
      */
-    public record Burst(boolean connected, boolean supported, JsonNode state) {
+    public record Burst(boolean connected, boolean supported, JsonNode state, Map<String, Progress> builds) {
+
+        public Burst withBuilds(Map<String, Progress> builds) {
+            return new Burst(connected, supported, state, builds);
+        }
+    }
+
+    /**
+     * 에이전트가 기다리는 클라우드 빌드의 진행 (화면 진행 표시용).
+     * @param status QUEUED · BUILDING · DEPLOYING · SUCCEEDED · FAILED · ROLLED_BACK
+     * @param line   빌드 로그 마지막 줄
+     */
+    public record Progress(String id, String status, String line, Instant createdAt, Instant updatedAt) {
     }
 
     /** 에이전트 컨테이너가 DB 터널을 여는 주소 (앱 컨테이너가 이 주소로 DB 에 붙는다) */

@@ -331,7 +331,7 @@ class AgentDeployServiceTest {
         Build build = service.start(KEY, request("blog-1b62c0"));
         service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
         when(hub.supports(KEY, "burst")).thenReturn(true);
-        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null));
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of()));
 
         assertThat(service.burst("blog-1b62c0", true, 30)).isPresent();
 
@@ -366,5 +366,39 @@ class AgentDeployServiceTest {
         assertThat(service.latestApp(KEY)).contains("blog-1b62c0");
         assertThat(service.latestApp("ffffffffffff")).isEmpty();
         assertThat(service.ownedBy("ffffffffffff", "blog-1b62c0")).isFalse();
+    }
+
+    @Test
+    void 버스팅_상태에_에이전트가_기다리는_클라우드_빌드_진행을_붙인다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        Build standby = new Build("s1", request("blog-1b62c0"));
+        standby.status(Build.Status.BUILDING, "build: kaniko job build-s1");
+        store.save(standby);
+        JsonNode state = new ObjectMapper().readTree("{\"app\":\"blog-1b62c0\",\"homeBuild\":\"s1\",\"standbyBuild\":\"\"}");
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, state, Map.of()));
+
+        AgentHub.Burst burst = service.burstState("blog-1b62c0").orElseThrow();
+
+        assertThat(burst.builds()).containsOnlyKeys("homeBuild");
+        assertThat(burst.builds().get("homeBuild").status()).isEqualTo("BUILDING");
+        assertThat(burst.builds().get("homeBuild").line()).contains("kaniko");
+    }
+
+    @Test
+    void 거점_전환_취소를_그_앱의_에이전트에_보낸다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.burst(KEY, "blog-1b62c0")).thenReturn(new AgentHub.Burst(true, true, null, Map.of()));
+
+        assertThatThrownBy(() -> service.cancelHome("blog-1b62c0")).hasMessageContaining("최신 이미지");
+
+        when(hub.supports(KEY, "home-cancel")).thenReturn(true);
+        assertThat(service.cancelHome("blog-1b62c0")).isPresent();
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub, org.mockito.Mockito.atLeastOnce()).send(eq(KEY), sent.capture());
+        JsonNode message = new ObjectMapper().readTree(sent.getValue());
+        assertThat(message.path("type").asText()).isEqualTo("home-cancel");
+        assertThat(message.path("app").asText()).isEqualTo("blog-1b62c0");
     }
 }

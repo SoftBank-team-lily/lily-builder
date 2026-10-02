@@ -318,7 +318,51 @@ public class AgentDeployService {
 
     /** 이 앱의 에이전트가 마지막으로 보낸 버스팅·거점 상태. 에이전트를 찾지 못하면 비어 있다 */
     public Optional<AgentHub.Burst> burstState(String app) {
-        return agentFor(app).map(key -> hub.burst(key, app));
+        return agentFor(app).map(key -> {
+            AgentHub.Burst burst = hub.burst(key, app);
+            return burst.state() == null ? burst : burst.withBuilds(builds(burst.state()));
+        });
+    }
+
+    /** 에이전트가 기다리는 클라우드 빌드 (버스팅 대기 배포 standbyBuild, 거점 전환 homeBuild) 의 지금 상태 */
+    private Map<String, AgentHub.Progress> builds(com.fasterxml.jackson.databind.JsonNode state) {
+        Map<String, AgentHub.Progress> found = new LinkedHashMap<>();
+        for (String field : new String[] {"standbyBuild", "homeBuild"}) {
+            String id = state.path(field).asText("");
+            if (id.isBlank()) {
+                continue;
+            }
+            store.find(id).ifPresent(build -> {
+                java.util.List<String> logs = build.getLogs();
+                found.put(field, new AgentHub.Progress(build.getId(), build.getStatus().name(),
+                        logs.isEmpty() ? "" : logs.get(logs.size() - 1), build.getCreatedAt(), build.getUpdatedAt()));
+            });
+        }
+        return found;
+    }
+
+    /**
+     * 진행 중인 거점 전환을 멈추라고 이 앱의 에이전트에 보낸다. 주소를 바꾸기 전이면 에이전트가 출발 거점으로 되돌린다.
+     * @return 에이전트를 찾지 못하면 비어 있다
+     * @throws IllegalStateException 에이전트가 끊겼거나 취소를 모르는 판이다
+     */
+    public Optional<AgentHub.Burst> cancelHome(String app) {
+        Optional<String> key = agentFor(app);
+        if (key.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!hub.connected(key.get())) {
+            throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
+        }
+        if (!hub.supports(key.get(), "home-cancel")) {
+            throw new IllegalStateException("에이전트가 거점 전환 취소를 받지 못하는 판이다. 최신 이미지로 다시 실행한다");
+        }
+        try {
+            hub.send(key.get(), json.writeValueAsString(Map.of("type", "home-cancel", "app", app)));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("취소 요청을 만들지 못했다");
+        }
+        return burstState(app);
     }
 
     /** 에이전트가 보낸 단계. 이 에이전트로 보낸 빌드만 받는다 */
