@@ -27,20 +27,21 @@ import java.util.regex.Pattern;
 public class BuildController {
 
     private static final Pattern APP_NAME = Pattern.compile("[a-z0-9]([-a-z0-9]*[a-z0-9])?");
-    private static final Pattern UPSTREAM_HOST =
-            Pattern.compile("[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+");
 
     private final BuildService service;
     private final ClusterApps clusterApps;
     private final CicdClient cicd;
     private final AgentDeployService agents;
+    private final AppAddress addresses;
     private final ObjectMapper json = new ObjectMapper();
 
-    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents) {
+    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
+                           AppAddress addresses) {
         this.service = service;
         this.clusterApps = clusterApps;
         this.cicd = cicd;
         this.agents = agents;
+        this.addresses = addresses;
     }
 
     /** 빌드·배포는 몇 분 걸려서 바로 id 만 돌려준다. 진행 상황은 GET 으로 본다 */
@@ -127,40 +128,61 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.remove(appName, database));
+        CicdClient.Passthrough removed = cicd.remove(appName, database);
+        if (removed.status() == 200 && addresses.enabled()) {
+            try {
+                addresses.removeCloud(appName);
+            } catch (RuntimeException e) {
+                // 남은 레코드는 ALB 의 404 로 끝난다. 앱 삭제는 성공이다
+            }
+        }
+        return passthrough(removed);
     }
 
     /**
-     * 클라우드 앱의 공개 주소({app}.apps...)는 두고, Ingress 가 요청을 온프레미스 공개 호스트로 넘기게 한다.
-     * 클라우드 앱을 내 PC 로 옮길 때 쓴다. 본문 {"host":"{app}.{플랫폼 존}"}
+     * 앱 공개 주소 {app}.{플랫폼 존} 의 거점 (CNAME 내용물). home 은 CLOUD(ALB), ONPREM(에이전트 터널), NONE, OTHER.
+     * 클라우드 앱을 내 PC 로 옮긴 뒤 에이전트가 주소를 터널로 바꿨는지 볼 때 쓴다
      */
-    @PutMapping("/api/apps/{appName}/upstream")
-    public ResponseEntity<String> pointUpstream(@PathVariable String appName, @RequestBody UpstreamRequest request) {
-        if (!APP_NAME.matcher(appName).matches() || request == null || request.host() == null
-                || !UPSTREAM_HOST.matcher(request.host()).matches()) {
-            return ResponseEntity.badRequest().build();
-        }
-        return passthrough(cicd.pointUpstream(appName, request.host()));
-    }
-
-    /** 앱 Ingress 를 클러스터 Service 로 되돌린다 (클라우드로 돌아올 때) */
-    @DeleteMapping("/api/apps/{appName}/upstream")
-    public ResponseEntity<String> restoreUpstream(@PathVariable String appName) {
+    @GetMapping("/api/apps/{appName}/address")
+    public ResponseEntity<?> address(@PathVariable String appName) {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.restoreUpstream(appName));
+        if (!addresses.enabled()) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected("플랫폼 존이 설정되지 않았다"));
+        }
+        try {
+            return ResponseEntity.ok(addresses.state(appName));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
     }
 
-    @GetMapping("/api/apps/{appName}/upstream")
-    public ResponseEntity<String> upstream(@PathVariable String appName) {
-        if (!APP_NAME.matcher(appName).matches()) {
+    /** 주소를 ALB 로 되돌린다 (내 PC 로 옮기다 실패했을 때). 본문 {"home":"cloud"}. 앱 레코드가 아니면 409 */
+    @PutMapping("/api/apps/{appName}/address")
+    public ResponseEntity<?> pointAddress(@PathVariable String appName,
+                                          @RequestBody(required = false) AddressRequest request) {
+        if (!APP_NAME.matcher(appName).matches() || request == null || !"cloud".equals(request.home())) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.upstream(appName));
+        if (!addresses.enabled()) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected("플랫폼 존이 설정되지 않았다"));
+        }
+        try {
+            return ResponseEntity.ok(addresses.pointCloud(appName));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
     }
 
-    public record UpstreamRequest(String host) {
+    public record AddressRequest(String home) {
     }
 
     /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409 */

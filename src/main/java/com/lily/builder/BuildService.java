@@ -40,11 +40,13 @@ public class BuildService {
     private final DeployFollow follow;
     private final ConfigAdvisor config;
     private final FailureDiagnoser diagnoser;
+    private final AppAddress addresses;
 
     @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
-                        EcrRepositories ecr, GitHubSource github, ConfigAdvisor config, FailureDiagnoser diagnoser) {
-        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser);
+                        EcrRepositories ecr, GitHubSource github, ConfigAdvisor config, FailureDiagnoser diagnoser,
+                        AppAddress addresses) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser, addresses);
     }
 
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
@@ -55,12 +57,14 @@ public class BuildService {
     /** AI 없이 규칙으로만 판단한다 (테스트) */
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                  EcrRepositories ecr, GitHubSource github, DeployFollow follow) {
-        this(store, kaniko, cicd, runner, ecr, github, follow, offlineConfig(), offlineDiagnoser());
+        this(store, kaniko, cicd, runner, ecr, github, follow, offlineConfig(), offlineDiagnoser(),
+                AppAddress.disabled());
     }
 
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                  EcrRepositories ecr, GitHubSource github, DeployFollow follow,
-                 ConfigAdvisor config, FailureDiagnoser diagnoser) {
+                 ConfigAdvisor config, FailureDiagnoser diagnoser, AppAddress addresses) {
+        this.addresses = addresses;
         this.config = config;
         this.diagnoser = diagnoser;
         this.store = store;
@@ -186,9 +190,11 @@ public class BuildService {
             }
             build.url(result == null ? null : result.targetHostUrl());
             if (request.isStandby()) {
-                // 클라우드 버스팅 대기: 이미지·Ingress·DB 는 준비해 두고 Pod 만 0 으로
+                // 클라우드 버스팅 대기: 이미지·Ingress·DB 는 준비해 두고 Pod 만 0 으로. 공개 주소는 온프레미스 그대로
                 cicd.scale(request.appName(), 0);
                 build.log("standby: scaled to 0");
+            } else {
+                address(build, request.appName());
             }
             update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
         } catch (RestClientResponseException e) {
@@ -641,6 +647,24 @@ public class BuildService {
             update(build, Build.Status.ROLLED_BACK, "rolled back: " + reason);
         } catch (RuntimeException e) {
             log.error("could not record rolled back build: id={} reason={}", build.getId(), e.getMessage());
+        }
+    }
+
+    /** 공개 주소 CNAME 을 ALB 로 둔다. 실패해도 배포는 성공이다 (Ingress 는 이미 바뀌었다) */
+    private void address(Build build, String app) {
+        if (!addresses.enabled()) {
+            return;
+        }
+        try {
+            AppAddress.State state = addresses.ensureCloud(app);
+            build.log(switch (state.home()) {
+                case CLOUD -> "address: " + state.host() + " -> cloud";
+                case ONPREM -> "address: " + state.host() + " points to an on-prem tunnel, left as is";
+                default -> "address: " + state.host() + " has another record, left as is";
+            });
+        } catch (RuntimeException e) {
+            log.warn("address {} failed: {}", app, e.getMessage());
+            build.log("address: failed " + e.getMessage());
         }
     }
 
