@@ -27,7 +27,8 @@ class RollbackProxyTest {
     private final MockRestServiceServer cicd = MockRestServiceServer.bindTo(http).build();
     private final AgentDeployService agents = mock(AgentDeployService.class);
     private final BuildController controller = new BuildController(
-            mock(BuildService.class), mock(ClusterApps.class), new CicdClient(http.build()), cloudOnly(agents));
+            mock(BuildService.class), mock(ClusterApps.class), new CicdClient(http.build()), cloudOnly(agents),
+            AppAddress.disabled());
 
     private static AgentDeployService cloudOnly(AgentDeployService agents) {
         when(agents.rollback(anyString())).thenReturn(Optional.empty());
