@@ -281,13 +281,9 @@ public class AgentDeployService {
             }
             return;
         }
-        if (!agentKey.equals(running.get(buildId))) {
-            log.debug("agent status ignored: key={} id={}", agentKey, buildId);
-            return;
-        }
-        Optional<Build> found = store.find(buildId);
+        Optional<Build> found = runningBuild(agentKey, buildId);
         if (found.isEmpty()) {
-            running.remove(buildId);
+            log.debug("agent status ignored: key={} id={}", agentKey, buildId);
             return;
         }
         Build build = found.get();
@@ -307,6 +303,54 @@ public class AgentDeployService {
             case "STARTING", "HEALTH", "JUDGING", "SWITCHING" -> update(build, Build.Status.DEPLOYING, logLine);
             default -> update(build, build.getStatus(), logLine);
         }
+    }
+
+    /**
+     * 이 에이전트로 보낸, 아직 끝나지 않은 빌드. builder 가 다시 떠서 메모리에 없으면 빌드 기록의 에이전트 key 로 확인하고
+     * 다시 등록한다 (에이전트는 재연결 뒤에도 하던 잡의 단계를 계속 보낸다)
+     */
+    private Optional<Build> runningBuild(String agentKey, String buildId) {
+        String known = running.get(buildId);
+        if (known != null && !known.equals(agentKey)) {
+            return Optional.empty();
+        }
+        Optional<Build> found = store.find(buildId);
+        if (found.isEmpty()) {
+            running.remove(buildId);
+            return Optional.empty();
+        }
+        if (known == null) {
+            Build build = found.get();
+            if (!inFlight(build) || !agentKey.equals(agentKey(build))) {
+                return Optional.empty();
+            }
+            running.put(buildId, agentKey);
+            log.info("agent status resumed after restart: key={} id={}", agentKey, buildId);
+        }
+        return found;
+    }
+
+    /**
+     * builder 가 다시 뜨면 진행 중이던 온프레미스 빌드를 다시 등록한다. 에이전트의 다음 단계를 받고,
+     * 끝내 오지 않으면 {@link #expire} 가 제한 시간 뒤에 닫는다 (등록하지 않으면 BUILDING 에 영원히 남는다).
+     * 기동할 때 {@link DeployResume} 가 부른다
+     */
+    void resumeInFlight() {
+        int resumed = 0;
+        for (Build build : store.findAll()) {
+            String key = agentKey(build);
+            if (key != null && inFlight(build) && running.putIfAbsent(build.getId(), key) == null) {
+                resumed++;
+            }
+        }
+        if (resumed > 0) {
+            log.info("onprem builds resumed after restart: {}", resumed);
+        }
+    }
+
+    private static boolean inFlight(Build build) {
+        return build.getStatus() == Build.Status.QUEUED || build.getStatus() == Build.Status.BUILDING
+                || build.getStatus() == Build.Status.DEPLOYING;
     }
 
     /** 에이전트가 끊기거나 잡을 거절하면 상태가 오지 않는다. 빌드 제한 시간이 지나면 실패로 닫는다 */
