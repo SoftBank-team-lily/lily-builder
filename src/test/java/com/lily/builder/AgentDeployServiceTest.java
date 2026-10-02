@@ -248,4 +248,61 @@ class AgentDeployServiceTest {
         assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.FAILED);
         verify(hub, never()).send(eq(KEY), anyString());
     }
+
+    /** builder 가 다시 뜬 뒤: 메모리는 비고 빌드 기록만 남는다 */
+    private AgentDeployService restarted(int timeoutSeconds) {
+        return new AgentDeployService(store, github, builds, hub, runner,
+                new BuilderProperties("ns", "reg", false, "http://cicd", "kaniko", timeoutSeconds,
+                        new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), ""),
+                provisioner);
+    }
+
+    @Test
+    void 재시작한_뒤에도_에이전트가_보낸_단계와_결과를_받는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        AgentDeployService after = restarted(900);
+
+        after.agentStatus(KEY, build.getId(), "HEALTH", "health: ok", "");
+        after.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+
+        Build saved = store.find(build.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(saved.getUrl()).isEqualTo("https://blog.example");
+    }
+
+    @Test
+    void 재시작한_뒤에도_다른_에이전트의_상태는_받지_않는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        AgentDeployService after = restarted(900);
+
+        after.agentStatus("ffffffffffff", build.getId(), "SUCCEEDED", "done", "https://evil.example");
+
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isNotEqualTo(Build.Status.SUCCEEDED);
+    }
+
+    @Test
+    void 재시작하면_진행_중인_빌드를_다시_등록해서_응답이_없으면_제한_시간_뒤에_닫는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        AgentDeployService after = restarted(0);
+
+        after.expire();
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isNotEqualTo(Build.Status.FAILED);
+
+        after.resumeInFlight();
+        after.expire();
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.FAILED);
+    }
+
+    @Test
+    void 끝난_빌드는_다시_등록하지_않는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        AgentDeployService after = restarted(0);
+
+        after.resumeInFlight();
+        after.agentStatus(KEY, build.getId(), "FAILED", "late", "");
+        after.expire();
+
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+    }
 }
