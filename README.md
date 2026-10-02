@@ -136,15 +136,15 @@ PC 가 꺼지면 클라우드 대기 Pod 가 있어도 공개 주소가 PC 터�
 
 ```
 평소     {app}.{존} → Worker lily-edge → CNAME 내용물(PC 터널) → 에이전트 프록시
-PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이지·2.5초 무응답 → {app}-cloud.{존} → ALB → 클라우드 대기 Pod
+PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이지·1.5초 무응답 → {app}-cloud.{존} → ALB → 클라우드 대기 Pod
 ```
 
 | 단계 | 구현 | 끊김 |
 |---|---|---|
-| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에만 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 4초 |
+| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에만 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 1.6~1.8초 |
 | CNAME 전환 (예비) | `AgentFailover`. 에이전트가 `FAILOVER_GRACE_SECONDS` 동안 끊겨 있으면 클라우드 레플리카를 올리고 CNAME 을 ALB 로 | 유예 60초 + DNS 반영 |
 
-- 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·2.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
+- 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·1.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
 - 한 번 실패하면 10초 동안 PC 를 건너뛴다 (isolate 메모리 + Cache API)
 - 대기 배포 때 lily-cicd 에 `aliases: [{app}-cloud.{존}]` 를 보내 같은 Service 로 Ingress 규칙을 둔다
 - `-cloud` 로 끝나는 앱 이름은 받지 않는다
