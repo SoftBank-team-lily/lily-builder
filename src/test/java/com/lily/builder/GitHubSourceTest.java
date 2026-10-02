@@ -82,6 +82,48 @@ class GitHubSourceTest {
     }
 
     @Test
+    void db_pgroll에_pgroll_파일이_있으면_SQL_대신_그_폴더_바로_아래_파일만_모은다() {
+        String tree = """
+                {"sha":"%s","truncated":false,"tree":[
+                  {"path":"src/main/resources/db/migration/V1__init.sql","type":"blob"},
+                  {"path":"db/pgroll/01_create_posts.yaml","type":"blob"},
+                  {"path":"db/pgroll/02_add_slug.json","type":"blob"},
+                  {"path":"db/pgroll/README.md","type":"blob"},
+                  {"path":"db/pgroll/old/03_skip.yaml","type":"blob"}
+                ]}""".formatted(SHA);
+        server.expect(requestTo("http://api/repos/org/repo/git/trees/" + SHA + "?recursive=1"))
+                .andRespond(withSuccess(tree, MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/db/pgroll/01_create_posts.yaml"))
+                .andRespond(withSuccess("operations: []", MediaType.TEXT_PLAIN));
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/db/pgroll/02_add_slug.json"))
+                .andRespond(withSuccess("{\"operations\":[]}", MediaType.TEXT_PLAIN));
+
+        Map<String, String> files = source.migrations(request(null, null, null, null), SHA);
+
+        assertThat(files).containsExactly(
+                Map.entry("01_create_posts.yaml", "operations: []"),
+                Map.entry("02_add_slug.json", "{\"operations\":[]}"));
+        server.verify();
+    }
+
+    @Test
+    void 온프레미스용_SQL_마이그레이션은_db_pgroll이_있어도_SQL_파일만_모은다() {
+        String tree = """
+                {"sha":"%s","truncated":false,"tree":[
+                  {"path":"src/main/resources/db/migration/V1__init.sql","type":"blob"},
+                  {"path":"db/pgroll/01_create_posts.yaml","type":"blob"}
+                ]}""".formatted(SHA);
+        server.expect(requestTo("http://api/repos/org/repo/git/trees/" + SHA + "?recursive=1"))
+                .andRespond(withSuccess(tree, MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/src/main/resources/db/migration/V1__init.sql"))
+                .andRespond(withSuccess("create table a(id int);", MediaType.TEXT_PLAIN));
+
+        assertThat(source.sqlMigrations(request(null, null, null, null), SHA))
+                .containsExactly(Map.entry("V1__init.sql", "create table a(id int);"));
+        server.verify();
+    }
+
+    @Test
     void rootDir_기준으로_폴더를_찾는다() {
         server.expect(requestTo("http://api/repos/org/repo/git/trees/" + SHA + "?recursive=1"))
                 .andRespond(withSuccess(TREE, MediaType.APPLICATION_JSON));
