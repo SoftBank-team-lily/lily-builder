@@ -31,6 +31,7 @@ dependencies {
     implementation 'software.amazon.awssdk:ecr'
     // 배포 전 설정 판단과 실패 원인 진단 (ANTHROPIC_API_KEY 가 있을 때만 쓴다)
     implementation 'com.anthropic:anthropic-java:2.34.0'
+    implementation 'com.lily:lily-jev:0.1.0'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'io.fabric8:kubernetes-server-mock:6.13.5'

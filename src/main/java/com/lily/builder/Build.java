@@ -33,6 +33,8 @@ public final class Build {
     private volatile Status status;
     private volatile String image;
     private volatile String url;
+    /** 이미지를 만든 커밋. 없으면 null */
+    private volatile String commit;
     /** 실패했을 때 원인과 고칠 방법 ({@link FailureDiagnoser}). 그 외 null */
     private volatile FailureDiagnoser.Diagnosis diagnosis;
 
@@ -72,6 +74,8 @@ public final class Build {
 
     void url(String url) { this.url = url; }
 
+    void commit(String commit) { this.commit = commit; }
+
     void database(String database) { this.database = database; }
 
     void diagnosis(FailureDiagnoser.Diagnosis diagnosis) { this.diagnosis = diagnosis; }
@@ -87,6 +91,7 @@ public final class Build {
     public Status getStatus() { return status; }
     public String getImage() { return image; }
     public String getUrl() { return url; }
+    public String getCommit() { return commit; }
     public FailureDiagnoser.Diagnosis getDiagnosis() { return diagnosis; }
     public List<String> getLogs() { return List.copyOf(logs); }
 

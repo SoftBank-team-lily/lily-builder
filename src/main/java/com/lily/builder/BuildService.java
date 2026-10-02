@@ -145,6 +145,7 @@ public class BuildService {
         try {
             String commit = github.resolveCommit(request);
             attempt.commit = commit;
+            build.commit(commit);
             build.log("source: commit " + commit);
             Source source = source(build, request, commit);
             String dockerfile = source.dockerfile();

@@ -69,6 +69,7 @@ public class DynamoBuildStore implements BuildStore, AutoCloseable {
         putIfPresent(item, "database", b.getDatabase());
         putIfPresent(item, "image", b.getImage());
         putIfPresent(item, "url", b.getUrl());
+        putIfPresent(item, "commit", b.getCommit());
         if (b.getDiagnosis() != null) {
             try {
                 item.put("diagnosis", s(JSON.writeValueAsString(b.getDiagnosis())));
@@ -111,6 +112,7 @@ public class DynamoBuildStore implements BuildStore, AutoCloseable {
                 optional(item, "image"),
                 optional(item, "url"),
                 item.containsKey("logs") ? item.get("logs").l().stream().map(AttributeValue::s).toList() : List.of());
+        build.commit(optional(item, "commit"));
         String diagnosis = optional(item, "diagnosis");
         if (diagnosis != null) {
             try {

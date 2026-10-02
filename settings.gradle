@@ -1,1 +1,7 @@
 rootProject.name = 'lily-builder'
+
+includeBuild('../lily-jev') {
+    dependencySubstitution {
+        substitute module('com.lily:lily-jev') using project(':')
+    }
+}

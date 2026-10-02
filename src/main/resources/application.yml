@@ -63,3 +63,9 @@ lily:
       endpoint: ${DYNAMODB_ENDPOINT:}          # 비우면 AWS. DynamoDB Local 이면 http://localhost:8000
       region: ${AWS_REGION:ap-northeast-2}
       create-table: ${DYNAMODB_CREATE_TABLE:false}   # 로컬 전용
+  # 로그 사고의 diff 초안. false 면 /api/remediate/drafts 는 모델을 부르지 않는다.
+  # GROQ_API_KEY 가 있으면 Groq 의 GROQ_MODEL(기본 openai/gpt-oss-20b)로 diff 를 만든다.
+  # 그 키가 없으면 ANTHROPIC_API_KEY, 그다음 OPENAI_API_KEY. PR 은 이 스위치와 별개로 꺼져 있다.
+  remediate:
+    enabled: ${REMEDIATE_ENABLED:false}
+    jev-api-key: ${JEV_API_KEY:}

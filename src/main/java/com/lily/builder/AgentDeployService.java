@@ -87,6 +87,7 @@ public class AgentDeployService {
                 throw new IllegalStateException("에이전트가 연결돼 있지 않다. 내 PC 에서 에이전트를 실행했는지 확인한다");
             }
             String commit = github.resolveCommit(request);
+            build.commit(commit);
             build.log("source: commit " + commit);
             // 클라우드와 같은 Dockerfile 을 쓴다. 레포에 있으면 null 이라 에이전트가 레포 것을 쓴다
             BuildService.Source source = builds.source(build, request, commit);
