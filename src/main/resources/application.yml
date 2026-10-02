@@ -27,6 +27,10 @@ lily:
     agents:
       token-secret: ${AGENT_TOKEN_SECRET:}
       ping-seconds: ${AGENT_PING_SECONDS:25}
+    # PC 장애 시 자동 전환: 에이전트가 끊긴 채 이만큼 지나면 공개 주소를 클라우드로 돌린다. 0 이면 끈다
+    failover:
+      grace-seconds: ${FAILOVER_GRACE_SECONDS:60}
+      replicas: ${FAILOVER_REPLICAS:2}
     # 플랫폼 연결: 사용자 PC 에이전트에는 토큰만 두고, 공개 주소(Cloudflare)와 DB 터널 자격은 builder 가 쥔다
     platform:
       cloudflare:

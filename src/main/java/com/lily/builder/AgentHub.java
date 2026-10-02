@@ -27,12 +27,17 @@ public class AgentHub {
     private static final Logger log = LoggerFactory.getLogger(AgentHub.class);
 
     private final Map<String, Connection> connections = new ConcurrentHashMap<>();
+    /** 연결이 끊긴 뒤에도 남기는 마지막 burst-state. PC 장애 판단에 쓴다 ({@link AgentFailover}) */
+    private final Map<String, JsonNode> lastStates = new ConcurrentHashMap<>();
+    /** 지금 끊겨 있는 에이전트와 끊긴 시각 */
+    private final Map<String, Instant> disconnected = new ConcurrentHashMap<>();
 
     void opened(String key, WebSocketSession session) {
         // 소켓 쓰기는 한 번에 하나여야 한다. 잡 전송과 ping 이 겹칠 수 있어 감싼다
         Connection connection = new Connection(
                 new ConcurrentWebSocketSessionDecorator(session, 10_000, 2 * 1024 * 1024), Instant.now());
         Connection previous = connections.put(key, connection);
+        disconnected.remove(key);
         if (previous != null) {
             closeQuietly(previous.session);
         }
@@ -40,7 +45,11 @@ public class AgentHub {
     }
 
     void closed(String key, WebSocketSession session) {
-        connections.computeIfPresent(key, (k, c) -> c.session.getId().equals(session.getId()) ? null : c);
+        Connection left = connections.computeIfPresent(key,
+                (k, c) -> c.session.getId().equals(session.getId()) ? null : c);
+        if (left == null) {
+            disconnected.put(key, Instant.now());
+        }
         log.info("agent disconnected: key={}", key);
     }
 
@@ -67,7 +76,18 @@ public class AgentHub {
         Connection connection = connections.get(key);
         if (connection != null) {
             connection.burstState = state;
+            lastStates.put(key, state);
         }
+    }
+
+    /** 끊긴 에이전트 key → 끊긴 시각 */
+    Map<String, Instant> disconnectedSince() {
+        return Map.copyOf(disconnected);
+    }
+
+    /** 에이전트가 마지막으로 보낸 burst-state. 연결이 끊긴 뒤에도 남는다 */
+    JsonNode lastState(String key) {
+        return lastStates.get(key);
     }
 
     /** 화면이 보는 버스팅 상태. 에이전트가 이 앱의 상태를 아직 보내지 않았으면 state 가 비어 있다 */
