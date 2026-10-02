@@ -95,6 +95,29 @@ observer와 builder에 같은 `DIAGNOSIS_API_TOKEN`을 설정하고, observer의
 
 ## 테스트
 
+### Orca에서 로컬 키를 넣고 실행
+
+이미 `/Users/hgsim/orca/lily-builder` 폴더가 있다면 새로 복제하지 말고 Orca의 기존 저장소 추가로 그 폴더를 여세요.
+브랜치는 `feature/ai-diagnosis`예요. 실행에는 Docker와 Python 3, 옆 폴더의 `lily-jev`가 필요해요.
+
+1. `.env.example`을 `.env.local`로 복사해요.
+2. `JEV_API_KEY=` 뒤에 TypeSafe 키를 따옴표 없이 넣고, `DIAGNOSIS_API_TOKEN=`에는 임의의 긴 문자열을 넣어요. `.env.local`은 Git에서 제외돼요.
+3. 저장소 터미널에서 `bash scripts/test-diagnosis.sh`를 실행해요.
+
+스크립트가 Java 21 Docker 환경에서 builder를 빌드하고, `.env.local`을 읽는 로컬 서버를 잠깐 실행해요.
+합성 OOM·DB 오류 자료 한 건으로 진단 API를 호출하고, 실제 JEV 판정이 사용됐는지 확인한 뒤 서버를 종료해요.
+기본 실행은 TypeSafe API를 호출하므로 계정 사용량에 반영될 수 있어요. 키나 서버 로그는 출력하지 않아요.
+실제 클러스터 관측 데이터까지 점검하려면 observer 연결 테스트가 추가로 필요해요.
+
+```sh
+# 키 없이 로컬 서버와 규칙 처리만 점검
+bash scripts/test-diagnosis.sh --rules
+# .env.local에 키를 넣은 뒤 실제 JEV 호출 점검
+bash scripts/test-diagnosis.sh
+```
+
+### 자동 테스트
+
 Java 21과 옆 폴더의 `lily-jev` 체크아웃이 필요합니다.
 
 ```sh
