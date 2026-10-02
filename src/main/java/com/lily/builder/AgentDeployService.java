@@ -203,6 +203,13 @@ public class AgentDeployService {
      * @param target {@code cloud} 또는 {@code onprem}
      */
     public Optional<String> home(String app, String target) {
+        return home(app, target, false);
+    }
+
+    /**
+     * @param migrateDatabase 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC). 에이전트가 거절하면 실패다
+     */
+    public Optional<String> home(String app, String target, boolean migrateDatabase) {
         if (!"cloud".equals(target) && !"onprem".equals(target)) {
             throw new IllegalArgumentException("home 은 cloud 또는 onprem 이다");
         }
@@ -218,7 +225,7 @@ public class AgentDeployService {
         rollbackWaiters.put(id, done);
         try {
             hub.send(key.get(), json.writeValueAsString(Map.of(
-                    "type", "home", "app", app, "home", target, "id", id)));
+                    "type", "home", "app", app, "home", target, "id", id, "migrateDatabase", migrateDatabase)));
             String line = done.get(props.buildTimeoutSeconds(), TimeUnit.SECONDS);
             return Optional.of(json.writeValueAsString(Map.of(
                     "status", "MOVED",

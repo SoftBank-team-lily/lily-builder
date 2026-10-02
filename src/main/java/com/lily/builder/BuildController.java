@@ -171,7 +171,8 @@ public class BuildController {
         }
         String target = request == null ? "" : request.home();
         try {
-            Optional<String> moved = agents.home(appName, target);
+            Optional<String> moved = agents.home(appName, target,
+                    request != null && Boolean.TRUE.equals(request.migrateDatabase()));
             if (moved.isEmpty()) {
                 return ResponseEntity.status(HttpStatus.CONFLICT)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -187,7 +188,8 @@ public class BuildController {
         }
     }
 
-    public record HomeRequest(String home) {
+    /** @param migrateDatabase 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC) */
+    public record HomeRequest(String home, Boolean migrateDatabase) {
     }
 
     /** 온프레미스 앱의 클라우드 버스팅 상태. 에이전트가 몇 초마다 보낸 값이다 */

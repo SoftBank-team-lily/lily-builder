@@ -21,23 +21,29 @@ import java.util.regex.Pattern;
  * GET  /api/burst/builds/{id}          대기 배포 진행
  * GET  /api/burst/apps/{app}           레플리카·Ready 수
  * PUT  /api/burst/apps/{app}/replicas  {"replicas":0~5}
+ * POST /api/burst/apps/{app}/database  {"engine","host","port"} → 같은 RDS DB 를 에이전트 터널 주소 기준 접속 정보로 (거점 전환 DB 이전)
  * </pre>
  */
 @Component
 public class AgentBurst {
 
     static final String STANDBY_MARK = "standby: agent=";
-    private static final Pattern APP = Pattern.compile("/api/burst/apps/([a-z][a-z0-9-]{0,30})(/standby|/replicas)?");
+    private static final Pattern APP =
+            Pattern.compile("/api/burst/apps/([a-z][a-z0-9-]{0,30})(/standby|/replicas|/database)?");
+    private static final Pattern HOST = Pattern.compile("[A-Za-z0-9.-]{1,253}");
     private static final Pattern BUILD = Pattern.compile("/api/burst/builds/([A-Za-z0-9-]{1,40})");
 
     private final BuildService builds;
     private final CicdClient cicd;
     private final AgentDeployService deploys;
     private final Validator validator;
+    private final ProvisionerClient provisioner;
     private final ObjectMapper json = new ObjectMapper().findAndRegisterModules()
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
-    public AgentBurst(BuildService builds, CicdClient cicd, AgentDeployService deploys, Validator validator) {
+    public AgentBurst(BuildService builds, CicdClient cicd, AgentDeployService deploys, Validator validator,
+                      ProvisionerClient provisioner) {
+        this.provisioner = provisioner;
         this.builds = builds;
         this.cicd = cicd;
         this.deploys = deploys;
@@ -63,6 +69,15 @@ public class AgentBurst {
                 int replicas = body == null ? -1 : body.path("replicas").asInt(-1);
                 require(replicas >= 0 && replicas <= 5, "replicas 는 0~5");
                 return json.valueToTree(cicd.scale(name, replicas));
+            }
+            if ("/database".equals(action) && "POST".equals(method)) {
+                String engine = body == null ? "" : body.path("engine").asText("");
+                String host = body == null ? "" : body.path("host").asText("");
+                int port = body == null ? 0 : body.path("port").asInt(0);
+                require(engine.equals("postgres") || engine.equals("mysql"), "engine 은 postgres 또는 mysql");
+                require(HOST.matcher(host).matches(), "host 형식이 아니다");
+                require(port >= 1 && port <= 65535, "port 는 1~65535");
+                return json.valueToTree(provisioner.ensure(name, engine, host, port));
             }
             if ("/standby".equals(action) && "POST".equals(method)) {
                 BuildRequest request = request(body);

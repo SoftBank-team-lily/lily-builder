@@ -213,6 +213,26 @@ class AgentDeployServiceTest {
         assertThat(response).contains("MOVED").contains("cloud").contains("CLOUD");
     }
 
+    @Test
+    void 거점_전환에_DB_이전_옵션을_싣는다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        java.util.List<JsonNode> sent = new java.util.ArrayList<>();
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("home".equals(body.path("type").asText())) {
+                sent.add(body);
+                service.agentStatus(KEY, body.path("id").asText(), "SUCCEEDED", "home: CLOUD", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        service.home("blog-1b62c0", "cloud", true).orElseThrow();
+
+        assertThat(sent).hasSize(1);
+        assertThat(sent.get(0).path("migrateDatabase").asBoolean()).isTrue();
+    }
+
     private static BuildRequest importing(String appName, String database) {
         return new BuildRequest("https://github.com/org/blog", null, null, null, appName, 8080, database, "/", "/",
                 Map.of(), null, null, null, null, null, "local", null, null, true);
