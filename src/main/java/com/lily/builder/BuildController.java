@@ -193,6 +193,22 @@ public class BuildController {
     }
 
     /** 온프레미스 앱의 클라우드 버스팅 상태. 에이전트가 몇 초마다 보낸 값이다 */
+    /** 진행 중인 거점 전환 취소. 주소를 바꾸기 전 단계에서만 에이전트가 받는다 (반영은 다음 상태에서 보인다) */
+    @PostMapping("/api/apps/{appName}/home/cancel")
+    public ResponseEntity<?> cancelHome(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        try {
+            return agents.cancelHome(appName)
+                    .<ResponseEntity<?>>map(state -> ResponseEntity.accepted().body(state))
+                    .orElse(ResponseEntity.notFound().build());
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
+    }
+
     @GetMapping("/api/apps/{appName}/burst")
     public ResponseEntity<AgentHub.Burst> burst(@PathVariable String appName) {
         if (!APP_NAME.matcher(appName).matches()) {
