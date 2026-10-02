@@ -130,12 +130,25 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 | PUT | `/api/burst/apps/{app}/replicas` | 대기 레플리카 0~5 |
 | POST | `/api/burst/apps/{app}/database` | 같은 RDS DB 의 터널용 접속 정보 (lily-db-provisioner `/env?host=&port=`) |
 
-### PC 장애 자동 전환
+### PC 장애 시 클라우드로 (엣지 Worker + CNAME 전환)
 
-버스팅 대기 배포가 끝난 앱은 PC 가 응답하지 못해도 클라우드가 받는다. 자세한 것은 [docs/장애-자동-전환.md](docs/장애-자동-전환.md).
+PC 가 꺼지면 클라우드 대기 Pod 가 있어도 공개 주소가 PC 터널을 가리켜 끊긴다. 두 겹으로 막는다. 자세한 설계와 측정은 `docs/장애-자동-전환.md`.
 
-- 엣지 Worker (`EdgeWorker`, `src/main/resources/edge/worker.js`): `PLATFORM_EDGE_ENABLED` 이면 기동 때 스크립트를 올리고, 대기 배포가 끝난 앱에 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB) 를 만든다. PC 쪽이 530·연결 실패면 모든 메서드를, 엣지 오류 페이지·2.5초 무응답이면 GET/HEAD/OPTIONS 를 `{app}-cloud` 로 다시 보낸다
-- CNAME 전환 (`AgentFailover`): 에이전트가 `FAILOVER_GRACE_SECONDS` 넘게 끊기면 클라우드 레플리카를 `FAILOVER_REPLICAS` 로 올리고 Ready 뒤 CNAME 을 ALB 로 바꾼다. DB 가 PC 에 있는 앱은 대상이 아니다
+```
+평소     {app}.{존} → Worker lily-edge → CNAME 내용물(PC 터널) → 에이전트 프록시
+PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이지·2.5초 무응답 → {app}-cloud.{존} → ALB → 클라우드 대기 Pod
+```
+
+| 단계 | 구현 | 끊김 |
+|---|---|---|
+| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에만 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 4초 |
+| CNAME 전환 (예비) | `AgentFailover`. 에이전트가 `FAILOVER_GRACE_SECONDS` 동안 끊겨 있으면 클라우드 레플리카를 올리고 CNAME 을 ALB 로 | 유예 60초 + DNS 반영 |
+
+- 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·2.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
+- 한 번 실패하면 10초 동안 PC 를 건너뛴다 (isolate 메모리 + Cache API)
+- 대기 배포 때 lily-cicd 에 `aliases: [{app}-cloud.{존}]` 를 보내 같은 Service 로 Ingress 규칙을 둔다
+- `-cloud` 로 끝나는 앱 이름은 받지 않는다
+- 버스팅·비율 슬라이더·거점 전환은 그대로 PC 프록시와 CNAME 이 맡는다
 
 ## 설정
 
@@ -146,18 +159,20 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 | `BUILDER_NAMESPACE` | `lily-builds` | Kaniko Job namespace |
 | `CICD_URL` | `http://localhost:8090` | lily-cicd 주소 |
 | `BUILD_TIMEOUT_SECONDS` | `900` | 빌드 최대 대기 |
+| `PLATFORM_EDGE_ENABLED` | `false` | PC 장애 때 엣지 Worker 가 요청을 클라우드로 다시 보낸다. 플랫폼 Cloudflare 토큰에 Workers Scripts:Edit(계정), Workers Routes:Edit(존) 권한이 있어야 한다 |
+| `PLATFORM_EDGE_SCRIPT_NAME` | `lily-edge` | Cloudflare 의 Worker 이름. builder 가 기동할 때 올린다 |
+| `FAILOVER_GRACE_SECONDS` | `60` | 에이전트가 이만큼 끊겨 있으면 CNAME 을 ALB 로 바꾼다. 0 이면 끈다 |
+| `FAILOVER_REPLICAS` | `2` | 그때 올릴 클라우드 레플리카 |
 | `BURST_API_TOKEN` | (없음) | `/api/burst` 토큰 (Secret `lily-burst`). 비우면 버스팅 API 를 끈다 |
 | `PROVISIONER_URL` / `PROVISIONER_API_TOKEN` | (없음) | 버스팅 DB 접속 정보를 받을 lily-db-provisioner |
 | `AGENT_TOKEN_SECRET` | (없음) | 에이전트 토큰 서명 키 (Secret `lily-agents`). 32자 미만이면 에이전트 API 를 끈다 |
 | `AGENT_PING_SECONDS` | `25` | 소켓 ping 간격 |
-| `FAILOVER_GRACE_SECONDS` / `FAILOVER_REPLICAS` | `60` / `2` | PC 장애 CNAME 전환. 0 이면 끈다 |
 | `PLATFORM_CLOUDFLARE_API_TOKEN` / `_ACCOUNT_ID` / `_ZONE_ID` / `_ZONE_NAME` | (없음) | 앱 주소 존. 에이전트 Cloudflare 호출 중계, 앱 CNAME, 엣지 Worker 에 쓴다 (Secret `lily-agent-platform`) |
 | `PLATFORM_TUNNEL_SSH_HOST` / `_SSH_USER` / `_REMOTE_HOST` / `_REMOTE_PORT` | - / `lily-tunnel` / - / `5432` | 에이전트 DB 터널 (배스천, RDS) |
 | `PLATFORM_TUNNEL_CA_KEY` / `_VALIDITY_HOURS` | (없음) / `24` | 에이전트 터널 인증서를 서명하는 SSH CA 개인키, 인증서 유효 시간 |
 | `PLATFORM_TUNNEL_REVERSE_HOST` / `_REVERSE_PORT_FROM` / `_TO` | (없음) / `20000` / `20999` | 역방향 터널을 열 배스천 사설 IP와 포트 범위. 비우면 끈다 |
 | `PLATFORM_BURST_INGRESS_HOST` / `_PORT` | (없음) / `80` | 에이전트가 넘친 요청을 보낼 클러스터 Ingress |
 | `PLATFORM_CUTOVER_ORIGIN` | (없음) | 거점이 클라우드일 때 앱 CNAME 이 가리킬 ALB. 비우면 거점 전환을 하지 않는다 |
-| `PLATFORM_EDGE_ENABLED` / `PLATFORM_EDGE_SCRIPT_NAME` | `false` / `lily-edge` | PC 장애 엣지 Worker. 토큰에 Workers Scripts·Routes Edit 권한이 필요하다 |
 | `BUILDS_TABLE` / `DYNAMODB_ENDPOINT` / `AWS_REGION` / `DYNAMODB_CREATE_TABLE` | `lily-builds` / (AWS) / `ap-northeast-2` / `false` | 배포 이력 |
 | `REMEDIATE_ENABLED` / `JEV_API_KEY` / `GROQ_API_KEY` / `REMEDIATE_FRONTEND_URL` / `REMEDIATE_TOKEN` | `false` / - | 로그 사고 diff 초안 (`POST /api/remediate/drafts`) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | (없음) | 설정 분류·실패 진단 `AiAdvisor` (Secret `lily-ai`). 없으면 규칙만 쓴다 |
