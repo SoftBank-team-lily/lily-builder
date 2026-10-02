@@ -250,6 +250,14 @@ public class AgentDeployService {
         return key == null ? Optional.empty() : Optional.of(key);
     }
 
+    /** 이 에이전트로 가장 최근에 배포한 앱 (대기 배포 포함) */
+    public Optional<String> latestApp(String agentKey) {
+        return store.findAll().stream()
+                .filter(build -> agentKey.equals(agentKey(build)))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(Build::getAppName);
+    }
+
     /** 이 앱을 가장 최근에 이 에이전트로 배포했다. 플랫폼 존의 {app}.{zone} 을 그 에이전트만 다룬다 */
     public boolean ownedBy(String agentKey, String app) {
         return store.findAll().stream()
@@ -259,15 +267,51 @@ public class AgentDeployService {
                 .orElse(false);
     }
 
+    /** 온프레미스 배포와, 그 에이전트가 요청한 클라우드 대기 배포({@link AgentBurst})에 남긴 에이전트 key */
     private static String agentKey(Build build) {
         String key = null;
         for (String line : build.getLogs()) {
             int at = line.indexOf("target=onprem agent=");
             if (at >= 0) {
                 key = line.substring(at + "target=onprem agent=".length()).trim();
+            } else if (line.startsWith(AgentBurst.STANDBY_MARK)) {
+                key = line.substring(AgentBurst.STANDBY_MARK.length()).trim();
             }
         }
         return key == null || key.isBlank() ? null : key;
+    }
+
+    /**
+     * 화면에서 정한 버스팅 설정을 이 앱의 에이전트에 보낸다.
+     * @return 에이전트를 찾지 못하면 비어 있다
+     * @throws IllegalStateException 에이전트가 끊겼거나 버스팅 설정을 받지 못하는 판이다
+     */
+    public Optional<AgentHub.Burst> burst(String app, boolean enabled, int cloudPercent) {
+        if (cloudPercent < 0 || cloudPercent > 100) {
+            throw new IllegalArgumentException("cloudPercent 는 0~100 이다");
+        }
+        Optional<String> key = agentFor(app);
+        if (key.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!hub.connected(key.get())) {
+            throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
+        }
+        if (!hub.supports(key.get(), "burst")) {
+            throw new IllegalStateException("에이전트가 버스팅 설정을 받지 못하는 판이다. 최신 이미지로 다시 실행한다");
+        }
+        try {
+            hub.send(key.get(), json.writeValueAsString(Map.of(
+                    "type", "burst", "app", app, "enabled", enabled, "cloudPercent", cloudPercent)));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("버스팅 설정을 만들지 못했다");
+        }
+        return Optional.of(hub.burst(key.get(), app));
+    }
+
+    /** 이 앱의 에이전트가 마지막으로 보낸 버스팅·거점 상태. 에이전트를 찾지 못하면 비어 있다 */
+    public Optional<AgentHub.Burst> burstState(String app) {
+        return agentFor(app).map(key -> hub.burst(key, app));
     }
 
     /** 에이전트가 보낸 단계. 이 에이전트로 보낸 빌드만 받는다 */

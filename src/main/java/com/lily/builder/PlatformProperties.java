@@ -8,11 +8,34 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *
  * @param cloudflare 플랫폼 존. 에이전트의 Cloudflare 호출을 여기서 대신 한다 ({@link AgentCloudflare})
  * @param tunnel     DB 터널. 에이전트 공개키에 SSH CA 로 단기 인증서를 서명해 준다 ({@link TunnelCertificates})
+ * @param burst      클라우드 버스팅·거점 전환. 에이전트가 넘길 Ingress 와 거점이 클라우드일 때의 CNAME 내용물
  */
 @ConfigurationProperties("lily.builder.platform")
 public record PlatformProperties(
         @DefaultValue Cloudflare cloudflare,
-        @DefaultValue Tunnel tunnel) {
+        @DefaultValue Tunnel tunnel,
+        @DefaultValue Burst burst) {
+
+    /**
+     * @param ingressHost 에이전트 프록시가 넘긴 요청을 받는 클러스터 Ingress (공개 IP 또는 호스트, http)
+     * @param ingressPort 그 포트
+     * @param cloudOrigin 거점이 클라우드일 때 앱 CNAME 이 가리키는 호스트 (클러스터 앞의 ALB). 비우면 거점 전환을 주지 않는다
+     */
+    public record Burst(
+            @DefaultValue("") String ingressHost,
+            @DefaultValue("80") int ingressPort,
+            @DefaultValue("") String cloudOrigin) {
+
+        public boolean configured() {
+            return !ingressHost.isBlank();
+        }
+
+        /** 끝의 점과 대소문자를 뺀 오리진 */
+        public String origin() {
+            String value = cloudOrigin.trim().toLowerCase();
+            return value.endsWith(".") ? value.substring(0, value.length() - 1) : value;
+        }
+    }
 
     public record Cloudflare(
             @DefaultValue("") String apiToken,

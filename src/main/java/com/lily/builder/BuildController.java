@@ -3,6 +3,9 @@ package com.lily.builder;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -185,6 +188,34 @@ public class BuildController {
     }
 
     public record HomeRequest(String home) {
+    }
+
+    /** 온프레미스 앱의 클라우드 버스팅 상태. 에이전트가 몇 초마다 보낸 값이다 */
+    @GetMapping("/api/apps/{appName}/burst")
+    public ResponseEntity<AgentHub.Burst> burst(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return agents.burstState(appName).map(ResponseEntity::ok).orElse(ResponseEntity.notFound().build());
+    }
+
+    /** 버스팅 켜기·끄기와 클라우드 비율. 에이전트에 보내기만 하고, 반영은 다음 상태에서 보인다 */
+    @PutMapping("/api/apps/{appName}/burst")
+    public ResponseEntity<?> burst(@PathVariable String appName, @Valid @RequestBody BurstRequest request) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        try {
+            return agents.burst(appName, request.enabled(), request.cloudPercent())
+                    .<ResponseEntity<?>>map(state -> ResponseEntity.accepted().body(state))
+                    .orElse(ResponseEntity.notFound().build());
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
+    }
+
+    public record BurstRequest(@NotNull Boolean enabled, @NotNull @Min(0) @Max(100) Integer cloudPercent) {
     }
 
     /** 슬롯별 릴리스(이미지, 스키마 버전, 배포 시각)와 롤백 가능 여부 */

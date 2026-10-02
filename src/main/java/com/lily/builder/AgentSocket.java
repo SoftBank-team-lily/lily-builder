@@ -36,6 +36,11 @@ import java.util.concurrent.Executors;
  * 에이전트 → cloudflare {"type":"cloudflare","rid":"..","method":"GET","path":"/zones/..."}  → 같은 rid 로 {"ok":..,"result":..}
  * builder  → job    {"type":"job","id":"{빌드 id}","repoUrl":...}   (AgentDeployService)
  * 에이전트 → status {"type":"status","id":"{빌드 id}","status":"BUILDING","line":"...","url":"..."}
+ * welcome.burst {"ingressHost":..,"ingressPort":80,"cloudOrigin":..}  플랫폼 연결 에이전트가 버스팅·거점 전환을 켤 수 있다
+ * 에이전트 → burst  {"type":"burst","rid":"..","method":"POST","path":"/api/burst/apps/{app}/standby","body":{..}}
+ *            → 같은 rid 로 {"ok":..,"result":..} (AgentBurst)
+ * builder  → burst  {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   화면에서 정한 버스팅 설정
+ * 에이전트 → burst-state {"type":"burst-state","app":..,"enabled":..,"phase":..,"home":..}  몇 초마다
  * </pre>
  *
  * 외부에는 이 경로만 연다 (lily-loadbalancer manifests/lily-builder.yaml). 토큰이 틀리면 핸드셰이크에서 401.
@@ -55,12 +60,17 @@ public class AgentSocket implements WebSocketConfigurer {
     private final AgentCloudflare cloudflare;
     private final TunnelCertificates certificates;
     private final AgentDatabasePorts ports;
+    private final AgentBurst burst;
+    private final PlatformProperties.Burst burstSettings;
     private final ObjectMapper json = new ObjectMapper();
     /** Cloudflare 중계는 수 초 걸린다. 소켓 수신 스레드를 막지 않게 따로 돌린다 */
     private final ExecutorService relay = Executors.newVirtualThreadPerTaskExecutor();
 
     public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys,
-                       AgentCloudflare cloudflare, TunnelCertificates certificates, AgentDatabasePorts ports) {
+                       AgentCloudflare cloudflare, TunnelCertificates certificates, AgentDatabasePorts ports,
+                       AgentBurst burst, PlatformProperties platform) {
+        this.burst = burst;
+        this.burstSettings = platform.burst();
         this.tokens = tokens;
         this.hub = hub;
         this.deploys = deploys;
@@ -82,6 +92,15 @@ public class AgentSocket implements WebSocketConfigurer {
         welcome.put("tunnelAgentId", AgentCloudflare.tunnelAgentId(key));
         if (hello.path("platform").asBoolean(false) && cloudflare.enabled()) {
             welcome.put("cloudflare", cloudflare.zone());
+            if (burstSettings.configured()) {
+                Map<String, Object> cloud = new LinkedHashMap<>();
+                cloud.put("ingressHost", burstSettings.ingressHost());
+                cloud.put("ingressPort", burstSettings.ingressPort());
+                cloud.put("cloudOrigin", burstSettings.origin());
+                // 에이전트 컨테이너를 새로 만들면 마지막 앱을 잊는다. 이 앱의 CNAME 으로 거점을 복구한다
+                deploys.latestApp(key).ifPresent(app -> cloud.put("app", app));
+                welcome.put("burst", cloud);
+            }
         }
         String publicKey = hello.path("sshPublicKey").asText("");
         if (!publicKey.isBlank() && certificates.enabled()) {
@@ -116,6 +135,31 @@ public class AgentSocket implements WebSocketConfigurer {
         } catch (Exception e) {
             log.warn("agent welcome failed: key={} message={}", key, e.getMessage());
         }
+    }
+
+    /** 플랫폼 연결 에이전트의 /api/burst 호출. 빌드 요청은 수 초 걸려 수신 스레드 밖에서 한다 */
+    void relayBurst(String key, JsonNode request) {
+        String rid = request.path("rid").asText("");
+        relay.execute(() -> {
+            Map<String, Object> reply = new LinkedHashMap<>();
+            reply.put("type", "burst");
+            reply.put("rid", rid);
+            try {
+                reply.put("result", burst.call(key, request.path("method").asText(), request.path("path").asText(),
+                        request.hasNonNull("body") ? request.get("body") : null));
+                reply.put("ok", true);
+            } catch (RuntimeException e) {
+                log.info("agent burst call rejected: key={} {} {} → {}", key, request.path("method").asText(),
+                        request.path("path").asText(), e.getMessage());
+                reply.put("ok", false);
+                reply.put("message", e.getMessage());
+            }
+            try {
+                hub.send(key, json.writeValueAsString(reply));
+            } catch (Exception e) {
+                log.warn("agent burst reply failed: key={} message={}", key, e.getMessage());
+            }
+        });
     }
 
     void relay(String key, JsonNode request) {
@@ -189,9 +233,14 @@ public class AgentSocket implements WebSocketConfigurer {
                         node.path("databaseModes").forEach(mode -> modes.add(mode.asText()));
                         hub.hello(key, node.path("agentId").asText(null), node.path("publicUrl").asText(""),
                                 node.path("database").asBoolean(false), modes);
+                        java.util.Set<String> features = new java.util.HashSet<>();
+                        node.path("features").forEach(feature -> features.add(feature.asText()));
+                        hub.features(key, features);
                         welcome(key, node);
                     }
                     case "cloudflare" -> relay(key, node);
+                    case "burst" -> relayBurst(key, node);
+                    case "burst-state" -> hub.burstState(key, node);
                     case "status" -> deploys.agentStatus(key, node.path("id").asText(), node.path("status").asText(),
                             node.path("line").asText(""), node.path("url").asText(""));
                     default -> log.debug("agent message ignored: key={} type={}", key, node.path("type").asText());

@@ -32,7 +32,8 @@ import java.util.regex.Pattern;
  *        PUT  /accounts/{a}/cfd_tunnel/{id}/configurations   hostname 은 이 에이전트의 앱, service 는 http://127.0.0.1:{port}
  * DNS    GET  /zones/{z}/dns_records?type=CNAME&name={app}.{zone}
  *        POST /zones/{z}/dns_records                         같은 이름의 레코드가 없을 때만, 내용물은 이 에이전트의 터널
- *        PUT  /zones/{z}/dns_records/{rid}                   기존 레코드가 같은 이름이고 터널(cfargotunnel.com)을 가리킬 때만
+ *        PUT  /zones/{z}/dns_records/{rid}                   기존 레코드가 같은 이름이고 터널(cfargotunnel.com)이나 클라우드 오리진을
+ *                                                            가리킬 때만. 내용물은 이 에이전트의 터널 또는 클라우드 오리진 (거점 전환)
  * 인증서 GET  /zones/{z}/ssl/certificate_packs
  *        POST /zones/{z}/ssl/certificate_packs/order         hosts 는 이 에이전트의 앱 호스트 하나
  * </pre>
@@ -49,17 +50,25 @@ public class AgentCloudflare {
     private static final String API = "https://api.cloudflare.com/client/v4";
 
     private final PlatformProperties.Cloudflare settings;
+    /** 거점이 클라우드일 때의 CNAME 내용물. 비우면 터널로만 가리킨다 */
+    private final String cloudOrigin;
     private final BiPredicate<String, String> owns;
     private final Api api;
     private final Map<String, String> tunnelIds = new ConcurrentHashMap<>();
 
     @Autowired
     public AgentCloudflare(PlatformProperties props, AgentDeployService deploys) {
-        this(props.cloudflare(), deploys::ownedBy, new HttpApi(props.cloudflare().apiToken()));
+        this(props.cloudflare(), props.burst().origin(), deploys::ownedBy, new HttpApi(props.cloudflare().apiToken()));
     }
 
     AgentCloudflare(PlatformProperties.Cloudflare settings, BiPredicate<String, String> owns, Api api) {
+        this(settings, "", owns, api);
+    }
+
+    AgentCloudflare(PlatformProperties.Cloudflare settings, String cloudOrigin, BiPredicate<String, String> owns,
+                    Api api) {
         this.settings = settings;
+        this.cloudOrigin = cloudOrigin == null ? "" : cloudOrigin;
         this.owns = owns;
         this.api = api;
     }
@@ -135,7 +144,7 @@ public class AgentCloudflare {
                 String host = ownedHost(key, body == null ? null : body.path("name").asText());
                 JsonNode existing = api.call("GET", zone + "/dns_records?name=" + encode(host), null);
                 require(existing == null || existing.isEmpty(), host + " 은 이미 다른 레코드가 있다");
-                return api.call("POST", zone + "/dns_records", cname(key, host, body));
+                return api.call("POST", zone + "/dns_records", cname(key, host, body, false));
             }
         }
         Matcher record = Pattern.compile(Pattern.quote(zone) + "/dns_records/([^/]+)").matcher(route);
@@ -144,11 +153,12 @@ public class AgentCloudflare {
             require(RECORD_ID.matcher(id).matches(), "레코드 id 가 아니다");
             String host = ownedHost(key, body == null ? null : body.path("name").asText());
             JsonNode current = api.call("GET", zone + "/dns_records/" + id, null);
+            String content = current == null ? "" : current.path("content").asText();
             require(current != null && host.equalsIgnoreCase(current.path("name").asText())
                     && "CNAME".equals(current.path("type").asText())
-                    && current.path("content").asText().endsWith(".cfargotunnel.com"),
+                    && (content.endsWith(".cfargotunnel.com") || isOrigin(content)),
                     host + " 은 에이전트 터널 레코드가 아니다");
-            return api.call("PUT", zone + "/dns_records/" + id, cname(key, host, body));
+            return api.call("PUT", zone + "/dns_records/" + id, cname(key, host, body, true));
         }
         if (route.equals(zone + "/ssl/certificate_packs") && "GET".equals(method)) {
             return api.call("GET", zone + "/ssl/certificate_packs", null);
@@ -226,10 +236,17 @@ public class AgentCloudflare {
         return config;
     }
 
-    private ObjectNode cname(String key, String host, JsonNode body) {
-        String target = tunnelId(key) + ".cfargotunnel.com";
-        require(!tunnelId(key).isBlank(), "이 에이전트의 터널이 아직 없다");
-        require(body != null && target.equals(body.path("content").asText()), "내용물은 이 에이전트의 터널이어야 한다");
+    /** @param origin 거점 전환으로 클라우드 오리진을 가리켜도 된다 */
+    private ObjectNode cname(String key, String host, JsonNode body, boolean origin) {
+        String wanted = body == null ? "" : body.path("content").asText();
+        String target;
+        if (origin && isOrigin(wanted)) {
+            target = cloudOrigin;
+        } else {
+            target = tunnelId(key) + ".cfargotunnel.com";
+            require(!tunnelId(key).isBlank(), "이 에이전트의 터널이 아직 없다");
+            require(target.equals(wanted), "내용물은 이 에이전트의 터널이어야 한다");
+        }
         ObjectNode clean = MAPPER.createObjectNode();
         clean.put("type", "CNAME");
         clean.put("name", host);
@@ -237,6 +254,14 @@ public class AgentCloudflare {
         clean.put("proxied", true);
         clean.put("ttl", 1);
         return clean;
+    }
+
+    private boolean isOrigin(String content) {
+        String value = content == null ? "" : content.trim().toLowerCase();
+        if (value.endsWith(".")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return !cloudOrigin.isBlank() && cloudOrigin.equals(value);
     }
 
     private String zoneName() {

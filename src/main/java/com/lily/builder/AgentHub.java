@@ -1,5 +1,6 @@
 package com.lily.builder;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -46,6 +47,39 @@ public class AgentHub {
     /** 에이전트가 처음 보내는 hello */
     void hello(String key, String agentId, String publicUrl, boolean database) {
         hello(key, agentId, publicUrl, database, Set.of());
+    }
+
+    /** 에이전트가 받는 메시지 종류 (burst, home). 이 필드 전의 에이전트는 비어 있다 */
+    void features(String key, Set<String> features) {
+        Connection connection = connections.get(key);
+        if (connection != null) {
+            connection.features = Set.copyOf(features);
+        }
+    }
+
+    public boolean supports(String key, String feature) {
+        Connection connection = connections.get(key);
+        return connection != null && connection.features.contains(feature);
+    }
+
+    /** 에이전트가 몇 초마다 보내는 버스팅·거점 상태 (lily-on-premise burst-state) */
+    void burstState(String key, JsonNode state) {
+        Connection connection = connections.get(key);
+        if (connection != null) {
+            connection.burstState = state;
+        }
+    }
+
+    /** 화면이 보는 버스팅 상태. 에이전트가 이 앱의 상태를 아직 보내지 않았으면 state 가 비어 있다 */
+    public Burst burst(String key, String app) {
+        Connection connection = connections.get(key);
+        if (connection == null || !connection.session.isOpen()) {
+            return new Burst(false, false, null);
+        }
+        JsonNode state = connection.burstState;
+        String reported = state == null ? "" : state.path("app").asText("");
+        boolean mine = state != null && (reported.isBlank() || reported.equals(app));
+        return new Burst(true, connection.features.contains("burst"), mine ? state : null);
     }
 
     /** @param databaseModes 에이전트가 받을 수 있는 DB 위치 (local, external). 이 필드 전의 에이전트는 비어 있다 */
@@ -166,12 +200,22 @@ public class AgentHub {
         private volatile boolean database;
         private volatile Tunnel tunnel;
         private volatile Set<String> databaseModes = Set.of();
+        private volatile Set<String> features = Set.of();
+        private volatile JsonNode burstState;
 
         Connection(WebSocketSession session, Instant connectedAt) {
             this.session = session;
             this.connectedAt = connectedAt;
             this.lastSeenAt = connectedAt;
         }
+    }
+
+    /**
+     * @param connected 에이전트가 붙어 있다
+     * @param supported 에이전트가 버스팅 설정 메시지를 받는 판이다
+     * @param state     에이전트가 보낸 burst-state 그대로 (enabled, cloudPercent, phase, home, ...)
+     */
+    public record Burst(boolean connected, boolean supported, JsonNode state) {
     }
 
     /** 에이전트 컨테이너가 DB 터널을 여는 주소 (앱 컨테이너가 이 주소로 DB 에 붙는다) */
