@@ -1,14 +1,19 @@
 // lily-edge: 온프레미스 앱 공개 주소 {app}.{zone} 앞에서 돈다 (EdgeWorker 가 앱마다 라우트를 건다).
 //
 // 요청은 원래 오리진(CNAME 내용물: 평소 PC 터널, 거점이 클라우드면 ALB)으로 그대로 보낸다.
-// PC 터널이 받지 못하면(530 = 터널 커넥터 없음, 또는 연결 실패) 같은 요청을 {app}-cloud.{zone}(ALB → 클라우드 대기 Pod)으로 다시 보낸다.
-// 530 은 PC 가 요청을 받지 못한 경우라 POST 도 다시 보내도 된다. 앱이 돌려준 5xx 는 PC 장애와 구분할 수 없어 다시 보내지 않는다.
+// PC 가 응답하지 못하면 같은 요청을 {app}-cloud.{zone}(ALB → 클라우드 대기 Pod)으로 다시 보낸다.
+//   - 530(터널 커넥터 없음)·연결 실패: PC 가 요청을 받지 못했다. 모든 메서드를 다시 보낸다
+//   - 엣지가 만든 502/503/504/52x 오류 페이지(터널은 붙어 있는데 PC 가 멈춤): PC 가 받았을 수 있어 GET/HEAD/OPTIONS 만 다시 보낸다
+// 앱이 돌려준 5xx 는 엣지 오류 페이지가 아니므로 그대로 돌려준다.
 
 /** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 (isolate 메모리, 엣지 위치마다 따로) */
 const DOWN_MILLIS = 10_000;
 /** 다시 보내려고 메모리에 들고 있을 본문 크기 상한. 넘거나 길이를 모르면 다시 보내지 않는다 */
 const REPLAY_LIMIT = 1024 * 1024;
 const CLOUD_SUFFIX = "-cloud";
+/** 엣지가 오리진에 닿지 못했을 때 내는 상태 코드. 본문이 Cloudflare 오류 페이지일 때만 PC 장애로 본다 */
+const EDGE_ERRORS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
+const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
 const down = new Map();
 
@@ -29,18 +34,38 @@ export default {
       // 다시 보낼 수 없는 요청 (큰 본문, 길이 모르는 스트림). 원래 오리진으로만 보낸다
       return fetch(request);
     }
+    let response;
     try {
-      const response = await fetch(rebuild(request, url, body));
-      if (response.status !== 530) {
-        return response;
-      }
+      response = await fetch(rebuild(request, url, body));
     } catch (e) {
       // 오리진에 연결하지 못했다
+      down.set(host, Date.now() + DOWN_MILLIS);
+      return toCloud(request, body, cloud, host);
+    }
+    if (!(await edgeFailed(response))) {
+      return response;
+    }
+    if (response.status !== 530 && !SAFE.has(request.method)) {
+      // PC 가 받았을 수 있다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 요청부터는 클라우드로)
+      down.set(host, Date.now() + DOWN_MILLIS);
+      return response;
     }
     down.set(host, Date.now() + DOWN_MILLIS);
     return toCloud(request, body, cloud, host);
   },
 };
+
+/** 앱이 아니라 엣지가 만든 응답이다 (530, 또는 Cloudflare 오류 페이지) */
+async function edgeFailed(response) {
+  if (response.status === 530) {
+    return true;
+  }
+  if (!EDGE_ERRORS.has(response.status) || !(response.headers.get("content-type") ?? "").includes("text/html")) {
+    return false;
+  }
+  const text = await response.clone().text();
+  return text.includes("/cdn-cgi/");
+}
 
 /** {app}.{zone} → {app}-cloud.{zone}. 이미 클라우드 주소면 null */
 function cloudUrl(url) {
