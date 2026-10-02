@@ -27,8 +27,15 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/api/builds` | 빌드·배포 시작. 바로 `202` 와 id 를 돌려준다 |
-| POST | `/api/detect` | 배포 전 DB 감지. 본문 `{repoUrl, branch?, token?, rootDir?}` → `{database, databaseSource, dir}` (`database` 는 postgres / mysql / null). 빌드하지 않는다. 브랜치·앱을 못 찾으면 `422` |
+| POST | `/api/detect` | 배포 전 DB 감지. 본문 `{repoUrl, branch?, token?, rootDir?}` → `{database, databaseSource, dir, apps, config, problem}` (`database` 는 postgres / mysql / null. `apps` 는 루트에 앱이 없을 때 폴더 후보, `config` 는 앱이 기동할 때 읽는 설정 키와 채울 방법, `problem` 은 폴더를 하나로 못 정한 이유). 빌드하지 않는다. 브랜치·앱을 못 찾으면 `422` |
 | GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
+| GET | `/api/builds` | 배포 이력 (최신순) |
+| GET | `/api/apps` | k3s 에 떠 있는 앱 |
+| GET | `/api/apps/{app}/release` | 슬롯별 릴리스와 롤백 가능 여부 |
+| POST | `/api/apps/{app}/rollback` | 직전 릴리스로. 본문 `{appOnly}` (되돌릴 수 없는 스키마면 앱만). 온프레미스 앱은 에이전트로 보낸다 |
+| POST | `/api/apps/{app}/stop`, `/start` | 중지(모든 슬롯 0)·다시 시작. lily-cicd 로 넘긴다. 배포 중이면 `409` |
+| DELETE | `/api/apps/{app}?database=` | 앱 삭제. `database=true` 면 DB 도 DROP. 앱 주소 CNAME(ALB)과 엣지 라우트도 지운다 |
+| GET, PUT | `/api/apps/{app}/address` | 공개 주소 `{app}.{존}` 의 거점 (`CLOUD` ALB / `ONPREM` 터널 / `NONE` / `OTHER`). PUT `{"home":"cloud"}` 는 ALB 로 되돌린다 |
 
 ```json
 {
@@ -61,7 +68,8 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 
 드라이버 이름으로만 보므로, 드라이버를 쓰지만 DB 가 필요 없는 앱(테스트용 의존성 등)은 DB 가 붙을 수 있다. 그럴 땐 `database` 를 직접 준다.
 - `canaryPath`: 블루그린 전환 전 canary 판정 때 새 버전과 이전 버전에 보낼 경로. 비우면 readiness 경로 (lily-cicd `docs/canary-analysis.md`)
-- 완료 주소는 `https://{appName}.apps.lilycloud.kr` (lily-cicd `LILY_DEPLOY_DOMAIN`)
+- 완료 주소는 lily-cicd 가 돌려준 `targetHostUrl` (`https://{appName}.{LILY_DEPLOY_DOMAIN}`, 지금은 `lilycloud.kr`)
+- 플랫폼 존을 설정하면 클라우드 배포 뒤 `{app}.{존}` CNAME 을 ALB(`PLATFORM_CUTOVER_ORIGIN`)로 둔다. 이미 PC 터널이나 다른 레코드면 그대로 둔다. 실패해도 배포는 성공
 
 ### 진행 단계 (`stage`, `stageName`)
 
@@ -97,6 +105,9 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 | GET | `/api/agents/{key}` | `connected`, `agentId`, `publicUrl`, `database`(DB 터널 여부), 접속·마지막 수신 시각 |
 | POST | `/api/agents/{key}/builds` | 이 에이전트로 배포. 본문은 `POST /api/builds` 와 같다. 앱 이름은 `[a-z][a-z0-9-]{0,30}` |
 | WS | `/api/agents/connect?token=` | 에이전트 접속 (lily-on-premise `CONTROL_PLANE_URL`). 외부에는 이 경로만 연다 |
+| POST | `/api/apps/{app}/home` | 거점 전환 `{home: cloud\|onprem, migrateDatabase}`. `migrateDatabase` 면 앱 DB 도 옮긴다 (PostgreSQL) |
+| POST | `/api/apps/{app}/home/cancel` | 진행 중인 거점 전환 취소 (`202`). 주소를 바꾸기 전 단계에서만 |
+| GET, PUT | `/api/apps/{app}/burst` | 버스팅 상태 / `{enabled, cloudPercent 0~100}`. 에이전트에 보내고 반영은 다음 상태에서 보인다 |
 
 - 토큰은 `{key}.{HMAC}` 라서 저장하지 않는다. 서명 키는 `AGENT_TOKEN_SECRET` (Secret `lily-agents`). 바꾸면 모든 토큰이 무효
 - 배포 전에 클라우드와 같이 레포로 포트·헬스 경로·DB 를 정한다 (`AppDetector`). DB 가 필요한데 에이전트에 DB 터널이 없으면(hello `database=false`) 보내지 않고 이유와 함께 FAILED
@@ -104,6 +115,20 @@ lily-frontend ─ POST /api/agents/{key}/builds ─▶ builder ═ wss /api/agen
 - 에이전트가 연결돼 있지 않으면 바로 FAILED, `BUILD_TIMEOUT_SECONDS` 동안 응답이 없어도 FAILED
 - 연결 정보는 메모리에만 있다. builder 가 재시작하면 에이전트가 5초 뒤 다시 붙는다
 - ALB 가 60초 유휴 연결을 끊어서 25초마다 ping 을 보낸다. Ingress 는 lily-loadbalancer `manifests/lily-builder.yaml`
+- 소켓 메시지: 에이전트 → builder `hello`, `status`, `burst-state`(3초마다 버스팅·거점·CPU·메모리·p95), `burst`(builder 호출 중계), `cloudflare`(DNS·터널 호출 중계), `remediate`. builder → 에이전트 `welcome`(존, DB 터널 인증서, 역방향 포트, 버스팅 설정), `job`, `rollback`, `home`, `home-cancel`, `burst`
+- 에이전트 DB 위치가 내 PC·기존 DB 면 `ssh -R` 로 열 역방향 포트를 에이전트마다 하나 준다 (ConfigMap `lily-agent-db-ports`, `PLATFORM_TUNNEL_REVERSE_PORT_FROM`~`TO`). 대기 배포는 그 주소로 만든 `databaseEnv` 를 lily-cicd 에 보낸다
+
+### 클라우드 버스팅 API (`/api/burst`)
+
+에이전트가 부르는 경로. `Authorization: Bearer {BURST_API_TOKEN}` 이 필요하고 토큰이 비면 끈다. 플랫폼 연결 에이전트는 같은 호출을 소켓 `burst` 로 보낸다. Ingress 는 `deploy/k3s/lily-builder-burst.yaml`.
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | `/api/burst/apps/{app}/standby` | 클라우드 대기 배포. 끝나면 레플리카 0 (공개 주소가 클라우드면 유지) |
+| GET | `/api/burst/builds/{id}` | 대기 배포 상태 |
+| GET | `/api/burst/apps/{app}` | 클라우드 앱 준비 상태 |
+| PUT | `/api/burst/apps/{app}/replicas` | 대기 레플리카 0~5 |
+| POST | `/api/burst/apps/{app}/database` | 같은 RDS DB 의 터널용 접속 정보 (lily-db-provisioner `/env?host=&port=`) |
 
 ### PC 장애 시 클라우드로 (엣지 Worker + CNAME 전환)
 
@@ -138,6 +163,19 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 | `PLATFORM_EDGE_SCRIPT_NAME` | `lily-edge` | Cloudflare 의 Worker 이름. builder 가 기동할 때 올린다 |
 | `FAILOVER_GRACE_SECONDS` | `60` | 에이전트가 이만큼 끊겨 있으면 CNAME 을 ALB 로 바꾼다. 0 이면 끈다 |
 | `FAILOVER_REPLICAS` | `2` | 그때 올릴 클라우드 레플리카 |
+| `BURST_API_TOKEN` | (없음) | `/api/burst` 토큰 (Secret `lily-burst`). 비우면 버스팅 API 를 끈다 |
+| `PROVISIONER_URL` / `PROVISIONER_API_TOKEN` | (없음) | 버스팅 DB 접속 정보를 받을 lily-db-provisioner |
+| `AGENT_TOKEN_SECRET` | (없음) | 에이전트 토큰 서명 키 (Secret `lily-agents`). 32자 미만이면 에이전트 API 를 끈다 |
+| `AGENT_PING_SECONDS` | `25` | 소켓 ping 간격 |
+| `PLATFORM_CLOUDFLARE_API_TOKEN` / `_ACCOUNT_ID` / `_ZONE_ID` / `_ZONE_NAME` | (없음) | 앱 주소 존. 에이전트 Cloudflare 호출 중계, 앱 CNAME, 엣지 Worker 에 쓴다 (Secret `lily-agent-platform`) |
+| `PLATFORM_TUNNEL_SSH_HOST` / `_SSH_USER` / `_REMOTE_HOST` / `_REMOTE_PORT` | - / `lily-tunnel` / - / `5432` | 에이전트 DB 터널 (배스천, RDS) |
+| `PLATFORM_TUNNEL_CA_KEY` / `_VALIDITY_HOURS` | (없음) / `24` | 에이전트 터널 인증서를 서명하는 SSH CA 개인키, 인증서 유효 시간 |
+| `PLATFORM_TUNNEL_REVERSE_HOST` / `_REVERSE_PORT_FROM` / `_TO` | (없음) / `20000` / `20999` | 역방향 터널을 열 배스천 사설 IP와 포트 범위. 비우면 끈다 |
+| `PLATFORM_BURST_INGRESS_HOST` / `_PORT` | (없음) / `80` | 에이전트가 넘친 요청을 보낼 클러스터 Ingress |
+| `PLATFORM_CUTOVER_ORIGIN` | (없음) | 거점이 클라우드일 때 앱 CNAME 이 가리킬 ALB. 비우면 거점 전환을 하지 않는다 |
+| `BUILDS_TABLE` / `DYNAMODB_ENDPOINT` / `AWS_REGION` / `DYNAMODB_CREATE_TABLE` | `lily-builds` / (AWS) / `ap-northeast-2` / `false` | 배포 이력 |
+| `REMEDIATE_ENABLED` / `JEV_API_KEY` / `GROQ_API_KEY` / `REMEDIATE_FRONTEND_URL` / `REMEDIATE_TOKEN` | `false` / - | 로그 사고 diff 초안 (`POST /api/remediate/drafts`) |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | (없음) | 설정 분류·실패 진단 `AiAdvisor` (Secret `lily-ai`). 없으면 규칙만 쓴다 |
 
 - ECR 이면 Kaniko 에 내장된 `ecr-login` 으로 인증한다. Kaniko 가 뜨는 노드의 IAM 역할에 ECR push 권한이 필요하다
 - k3s 매니페스트: `deploy/k3s/lily-builder.yaml` (빌더는 `lily-builds` namespace 의 Job/Secret/ConfigMap/로그만 다룬다)
@@ -145,11 +183,11 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 ## 로컬 실행
 
 ```bash
-# kubeconfig 가 있는 곳에서
-BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost:8090 gradle bootRun
+# kubeconfig 가 있는 곳에서. 형제 폴더에 lily-jev 가 있어야 한다 (이미지는 Dockerfile 이 JEV_REF 커밋을 받는다)
+BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost:8090 \n  DYNAMODB_ENDPOINT=http://localhost:8000 DYNAMODB_CREATE_TABLE=true gradle bootRun
 # http://localhost:8070
 ```
 
 ## 아직 없는 것
 
-- 인증 (누구나 배포 가능)
+- 인증 (누구나 배포 가능). `/api/burst` 와 에이전트 소켓만 토큰을 받는다
