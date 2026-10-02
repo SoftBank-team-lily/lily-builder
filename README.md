@@ -149,6 +149,7 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 - 대기 배포 때 lily-cicd 에 `aliases: [{app}-cloud.{존}]` 를 보내 같은 Service 로 Ingress 규칙을 둔다
 - `-cloud` 로 끝나는 앱 이름은 받지 않는다
 - 버스팅·비율 슬라이더·거점 전환은 그대로 PC 프록시와 CNAME 이 맡는다
+- CNAME 전환은 DB 가 PC 에 있는 앱(`local`·`external`)에는 하지 않는다. PC 가 꺼지면 DB 도 함께 꺼져 클라우드가 이어받을 수 없다
 
 ## 설정
 
