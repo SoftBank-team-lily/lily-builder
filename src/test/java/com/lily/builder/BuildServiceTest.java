@@ -97,6 +97,57 @@ class BuildServiceTest {
         cicd.verify();
     }
 
+    /** 공개 주소 CNAME 내용물이 content 인 존. 대기 배포가 끝날 때 거점을 본다 */
+    private BuildService withAddress(String content) {
+        String records = "[{\"id\":\"r1\",\"type\":\"CNAME\",\"name\":\"blog.lilycloud.kr\",\"content\":\"" + content + "\"}]";
+        AppAddress addresses = new AppAddress(new PlatformProperties.Cloudflare("t", "a", "z", "lilycloud.kr"),
+                "alb.example.net", (method, path, body) -> {
+                    try {
+                        return new com.fasterxml.jackson.databind.ObjectMapper().readTree(records);
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+        return new BuildService(store, kaniko, new CicdClient(http.build()), new SyncRunner(),
+                new EcrRepositories(new BuilderProperties("ns", "localhost:5000", true, "http://cicd", "kaniko", 10,
+                        new BuilderProperties.Dynamodb("t", null, "ap-northeast-2", false), "")), github,
+                new DeployFollow(new CicdClient(http.build())), BuildService.offlineConfig(), BuildService.offlineDiagnoser(),
+                addresses);
+    }
+
+    private static BuildRequest standby() {
+        return new BuildRequest("https://github.com/org/repo", null, null, null, "blog", 8080,
+                "", null, null, Map.of(), "blog.lilycloud.kr", true, null, null, null);
+    }
+
+    @Test
+    void 대기_배포가_끝나면_레플리카를_0_으로_내린다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
+        cicd.expect(requestTo("http://cicd/api/apps/blog/replicas"))
+                .andExpect(method(HttpMethod.PUT))
+                .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
+
+        Build build = withAddress("11111111-2222-3333-4444-555555555555.cfargotunnel.com").start(standby());
+
+        assertThat(build.getLogs()).contains("standby: scaled to 0");
+        cicd.verify();
+    }
+
+    @Test
+    void 공개_주소가_클라우드면_대기_배포가_끝나도_내리지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
+
+        Build build = withAddress("alb.example.net").start(standby());
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("standby: public address points to the cloud, replicas kept");
+        cicd.verify();
+    }
+
     @Test
     void 커밋을_고정하고_마이그레이션을_함께_보낸다() {
         when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of("V1__init.sql", "create table a(id int);"));

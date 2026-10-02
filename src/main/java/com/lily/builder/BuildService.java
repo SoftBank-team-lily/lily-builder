@@ -191,8 +191,12 @@ public class BuildService {
             build.url(result == null ? null : result.targetHostUrl());
             if (request.isStandby()) {
                 // 클라우드 버스팅 대기: 이미지·Ingress·DB 는 준비해 두고 Pod 만 0 으로. 공개 주소는 온프레미스 그대로
-                cicd.scale(request.appName(), 0);
-                build.log("standby: scaled to 0");
+                if (servesCloud(build, request.appName())) {
+                    build.log("standby: public address points to the cloud, replicas kept");
+                } else {
+                    cicd.scale(request.appName(), 0);
+                    build.log("standby: scaled to 0");
+                }
             } else {
                 address(build, request.appName());
             }
@@ -647,6 +651,23 @@ public class BuildService {
             update(build, Build.Status.ROLLED_BACK, "rolled back: " + reason);
         } catch (RuntimeException e) {
             log.error("could not record rolled back build: id={} reason={}", build.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 공개 주소가 지금 클라우드(ALB)를 가리킨다. 그러면 대기 배포가 끝나도 Pod 를 내리지 않는다 (사용자 요청을 받는 Pod 다).
+     * 확인하지 못하면 내리지 않는 쪽을 고른다
+     */
+    private boolean servesCloud(Build build, String app) {
+        if (!addresses.enabled()) {
+            return false;
+        }
+        try {
+            return addresses.state(app).home() == AppAddress.Home.CLOUD;
+        } catch (RuntimeException e) {
+            log.warn("address {} check failed: {}", app, e.getMessage());
+            build.log("standby: address check failed (" + e.getMessage() + ")");
+            return true;
         }
     }
 
