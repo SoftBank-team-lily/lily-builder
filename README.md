@@ -21,6 +21,9 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 - 빌드는 Kaniko 가 k3s 안에서 한다. 이 서버는 소스를 받지 않는다
 - private 레포는 토큰을 넣는다. 빌드 동안만 k3s Secret 으로 Kaniko 에 넘기고 끝나면 지운다
 - DB 를 고르면 lily-cicd 가 lily-db-provisioner 로 DB 를 만들고 접속 정보를 앱 환경변수로 넣는다
+- 마이그레이션은 같은 커밋의 `src/main/resources/db/migration` (Flyway V/U SQL) 에서 읽는다.
+  `{rootDir}/db/pgroll` 바로 아래에 `{번호}_{설명}.yaml|json` 이 있으면 SQL 대신 그 파일들을 보내고, lily-cicd 가 pgroll 로 무중단 적용한다
+  (lily-cicd `docs/schema-migration.md` 7 절). 온프레미스 에이전트에는 지금처럼 SQL 만 보낸다
 
 ## API
 
