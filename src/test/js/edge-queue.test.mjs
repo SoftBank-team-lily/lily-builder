@@ -4,7 +4,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { queued, WriteQueue, STATUS_PATH } from "../../main/resources/edge/queue.js";
+import { queued, snapshotOn, WriteQueue, STATUS_PATH } from "../../main/resources/edge/queue.js";
 
 const HOST = "blog.lilycloud.kr";
 const ADMIN = "lily-edge-queue.lilycloud.kr";
@@ -561,4 +561,60 @@ test("관리_상태에_장애_상태_시작_시각이_보인다", async () => {
   const state = await adminState();
 
   assert.match(state.downSince, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+/** builder 가 관리 주소로 설정 일부를 바꾼다 */
+async function change(body, host = HOST) {
+  const { response } = await submit(new Request("https://" + ADMIN + "/apps/" + host + "/queue/config", {
+    method: "PUT",
+    headers: { authorization: "Bearer " + ADMIN_TOKEN, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+  return response;
+}
+
+test("관리_주소로_snapshot만_false로_바꾸면_등록_경로는_그대로고_snapshotOn은_false", async () => {
+  const response = await change({ snapshot: false });
+
+  assert.equal(response.status, 200);
+  const state = await adminState();
+  assert.deepEqual(state.paths, ["/posts"]);
+  assert.equal(state.snapshot, false);
+  assert.equal(await snapshotOn(env, HOST), false);
+});
+
+test("snapshot을_정한_적_없는_앱은_snapshotOn이_true", async () => {
+  assert.equal((await adminState()).snapshot, true);
+  assert.equal(await snapshotOn(env, "fresh.lilycloud.kr"), true);
+});
+
+test("QUEUE_바인딩이_없는_Worker는_snapshotOn이_true", async () => {
+  assert.equal(await snapshotOn({}, HOST), true);
+});
+
+test("관리_주소_PUT에_paths도_snapshot도_없으면_400", async () => {
+  assert.equal((await change({})).status, 400);
+});
+
+test("관리_주소_PUT의_snapshot이_불리언이_아니면_400", async () => {
+  assert.equal((await change({ snapshot: "no" })).status, 400);
+});
+
+test("큐가_비어_있고_PC가_정상이면_POST_두_개를_줄_세우지_않고_동시에_PC로_보낸다", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  pc = async () => { await gate; return new Response("created", { status: 201 }); };
+
+  const first = submit(post("/posts", "{\"n\":1}"));
+  const second = submit(post("/posts", "{\"n\":2}"));
+  for (let i = 0; i < 20 && sent.length < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const inFlight = sent.length;
+  release();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(inFlight, 2);
+  assert.equal(a.response.status, 201);
+  assert.equal(b.response.status, 201);
 });

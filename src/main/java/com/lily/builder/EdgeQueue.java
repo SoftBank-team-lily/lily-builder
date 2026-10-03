@@ -21,7 +21,6 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 엣지 쓰기 큐 ({@code edge/queue.js}). PC 장애 때 앱 주인이 등록한 경로의 POST 를 앱마다 하나인 Durable Object 에 쌓고,
@@ -140,15 +139,27 @@ public class EdgeQueue {
      * @throws IllegalArgumentException 경로가 맞지 않다 (Worker 가 400)
      */
     public JsonNode configure(String app, List<String> paths) {
-        String body;
-        try {
-            body = MAPPER.writeValueAsString(Map.of("paths", paths));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
+        return configure(app, paths, null);
+    }
+
+    /**
+     * 앱의 엣지 설정에서 준 값만 바꾼다. 배포 화면의 체크박스가 여기로 온다
+     *
+     * @param paths    쓰기 큐 등록 경로 (켜기 = ["/"], 끄기 = []). null 이면 그대로
+     * @param snapshot 읽기 사본(Cache API)을 쓰는가. null 이면 그대로
+     * @throws IllegalArgumentException 값이 맞지 않다 (Worker 가 400)
+     */
+    public JsonNode configure(String app, List<String> paths, Boolean snapshot) {
+        ObjectNode change = MAPPER.createObjectNode();
+        if (paths != null) {
+            change.set("paths", MAPPER.valueToTree(paths));
         }
-        Reply reply = admin.call("PUT", queueUrl(app) + "/config", adminToken(), body);
+        if (snapshot != null) {
+            change.put("snapshot", snapshot);
+        }
+        Reply reply = admin.call("PUT", queueUrl(app) + "/config", adminToken(), change.toString());
         if (reply.status() == 400) {
-            throw new IllegalArgumentException("등록 경로가 맞지 않다: " + reply.body());
+            throw new IllegalArgumentException("엣지 설정이 맞지 않다: " + reply.body());
         }
         return json(reply);
     }

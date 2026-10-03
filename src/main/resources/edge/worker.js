@@ -17,10 +17,11 @@
 //   - 앱이 다른 주소로 응답을 만들게 하는 헤더(X-Forwarded-Host 등)가 붙은 요청은 두지 않는다 (사본 오염)
 //   - PC 를 거친 PUT/PATCH/DELETE 가 2xx 면 그 경로의 사본을 지운다 (이 데이터센터만)
 //   - 사본 저장·조회가 실패해도 원래 응답에는 영향이 없다
+//   - 배포 화면에서 "장애 중 읽기 사본"을 끈 앱(앱 DO 설정 snapshot=false)은 저장도 응답도 하지 않는다
 //
 // 쓰기 큐(queue.js)에 등록된 앱의 POST 는 클라우드로 다시 보내지 않고 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
 
-import { queued, WriteQueue } from "./queue.js";
+import { queued, snapshotOn, WriteQueue } from "./queue.js";
 
 export { WriteQueue };
 
@@ -79,7 +80,7 @@ export default {
       return write;
     }
     if (await isDown(host)) {
-      return fallback(request, null, url, cloud, host, ctx);
+      return fallback(request, null, url, cloud, host, env, ctx);
     }
 
     const body = await replayableBody(request);
@@ -93,10 +94,10 @@ export default {
     } catch (e) {
       // 오리진에 연결하지 못했거나 PC 가 제시간에 응답하지 않았다
       markDown(host, ctx);
-      return fallback(request, body, url, cloud, host, ctx);
+      return fallback(request, body, url, cloud, host, env, ctx);
     }
     if (!(await edgeFailed(response))) {
-      remember(request, url, response, ctx);
+      remember(request, url, response, env, ctx);
       return response;
     }
     markDown(host, ctx);
@@ -104,7 +105,7 @@ export default {
       // PC 가 받았을 수 있다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 요청부터는 클라우드로)
       return response;
     }
-    return fallback(request, body, url, cloud, host, ctx);
+    return fallback(request, body, url, cloud, host, env, ctx);
   },
 };
 
@@ -113,11 +114,12 @@ export default {
  * 이 데이터센터의 읽기 사본으로 답한다. 사본이 없으면 클라우드 응답을 그대로 주되, 엣지가 만든 오류면 503 으로 바꾼다.
  * 사본이 있을 때만 클라우드를 CLOUD_TIMEOUT_MILLIS 까지 기다린다 (없으면 0 에서 올라오는 대기 Pod 도 끝까지 기다린다)
  */
-async function fallback(request, body, url, cloud, host, ctx) {
+async function fallback(request, body, url, cloud, host, env, ctx) {
   if (!READS.has(request.method)) {
     return toCloud(request, body, cloud, host, 0);
   }
-  const copy = await snapshot(request, url);
+  // 배포 화면에서 읽기 사본을 끈 앱은 사본으로 답하지 않는다
+  const copy = (await snapshotOn(env, host)) ? await snapshot(request, url) : null;
   if (copy !== null && await isDown(cloud.hostname)) {
     return copy;
   }
@@ -136,7 +138,7 @@ async function fallback(request, body, url, cloud, host, ctx) {
 }
 
 /** PC 가 정상으로 답했다. 공개 GET 응답은 읽기 사본으로 두고, 성공한 PUT/PATCH/DELETE 는 그 경로의 사본을 지운다 */
-function remember(request, url, response, ctx) {
+function remember(request, url, response, env, ctx) {
   try {
     if (CHANGES.has(request.method)) {
       if (response.status >= 200 && response.status < 300) {
@@ -160,7 +162,10 @@ function remember(request, url, response, ctx) {
     headers.set("Cache-Control", "public, max-age=" + SNAPSHOT_SECONDS);
     headers.set("X-Lily-Snapshot-At", new Date().toUTCString());
     const copy = new Response(response.clone().body, { status: 200, headers });
-    ctx.waitUntil(caches.default.put(key, copy).catch(() => undefined));
+    // 배포 화면에서 읽기 사본을 끈 앱은 두지 않는다 (본문은 응답을 돌려주기 전에 떼어 둔다)
+    ctx.waitUntil(snapshotOn(env, url.hostname)
+      .then((on) => (on ? caches.default.put(key, copy) : copy.body?.cancel()))
+      .catch(() => undefined));
   } catch (e) {
     // 사본은 덤이다. 원래 응답은 그대로 나간다
   }

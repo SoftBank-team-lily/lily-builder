@@ -2,7 +2,10 @@
 // PC 가 돌아오면 받은 순서대로 PC 에 다시 보낸다.
 //
 //   - 등록 경로는 앱의 DO 에 둔다 (builder 가 관리 주소 QUEUE_ADMIN_HOST 로 바꾼다). Worker 는 앱마다 CONFIG_MILLIS 동안 기억한다
-//   - 등록 경로의 POST 는 평소에도 DO 를 거친다. DO 가 요청을 하나씩 처리하므로 재전송 중에 들어온 POST 도 큐 뒤에 붙는다
+//   - 배포 화면의 "장애 중 쓰기 보관"을 켜면 등록 경로가 / (그 앱의 모든 POST) 가 된다. 끄면 빈 목록
+//   - 등록 경로의 POST 는 평소에도 DO 를 거친다. 쌓기와 재전송은 한 줄로 처리하므로 재전송 중에 들어온 POST 도 큐 뒤에 붙는다.
+//     큐가 비어 있고 장애가 아니면 줄을 세우지 않고 동시에 PC 로 보낸다
+//   - 앱 설정에는 읽기 사본(worker.js Cache API) 사용 여부(snapshot)도 둔다. 정한 적 없으면 쓴다
 //   - 큐가 비어 있고 장애 상태가 아니면 DO 가 바로 PC 로 보내고 PC 응답을 그대로 돌려준다
 //   - PC 가 받지 못했으면(530·연결 실패, 또는 이 데이터센터가 PC 를 장애로 표시) 큐에 넣고 202 와 X-Lily-Queued-Id 를 돌려준다
 //   - PC 에 보낸 뒤 엣지 오류(502 등)가 나면 바로 GET / 로 다시 확인한다. 확인도 엣지 오류면 PC 에 닿지 않으니 쌓고,
@@ -135,18 +138,24 @@ export class WriteQueue {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/submit") {
-      return this.serial(() => this.submit(request));
+      return this.submit(request);
     }
     if (url.pathname.startsWith("/status/")) {
       return this.status(decodeURIComponent(url.pathname.slice("/status/".length)));
     }
     if (url.pathname === "/config" && request.method === "GET") {
-      return Response.json({ paths: this.paths() });
+      return Response.json({ paths: this.paths(), snapshot: this.snapshot() });
     }
     if (url.pathname === "/admin/config" && request.method === "PUT") {
-      const { paths } = await request.json();
-      this.sql.exec("INSERT INTO config (name, value) VALUES ('paths', ?) "
-        + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(paths));
+      const { paths, snapshot } = await request.json();
+      if (paths !== undefined) {
+        this.sql.exec("INSERT INTO config (name, value) VALUES ('paths', ?) "
+          + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(paths));
+      }
+      if (snapshot !== undefined) {
+        this.sql.exec("INSERT INTO config (name, value) VALUES ('snapshot', ?) "
+          + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(snapshot));
+      }
       return this.state();
     }
     if (url.pathname === "/admin/state" && request.method === "GET") {
@@ -182,23 +191,29 @@ export class WriteQueue {
     const body = request.body === null ? null : await request.arrayBuffer();
     const headers = kept(request.headers);
     const origin = new URL(target).origin;
-    if (down) {
-      await this.markDown(origin);
-    }
     if (down || this.pending() > 0 || this.downSince() !== null) {
-      return this.enqueue(target, headers, body, false);
+      return this.serial(async () => {
+        if (down) {
+          await this.markDown(origin);
+        }
+        return this.enqueue(target, headers, body, false);
+      });
     }
+    // 큐가 비어 있고 장애도 아니다. 순서를 지킬 쌓인 요청이 없으니 줄을 세우지 않고 PC 로 바로 보낸다 (여러 POST 를 동시에).
+    // 쌓기와 재전송만 serial 로 한 줄에 세운다
+    const stash = (discovered) => this.serial(async () => {
+      await this.markDown(origin);
+      return this.enqueue(target, headers, body, discovered);
+    });
     let response;
     try {
       response = await fetch(await this.toPc(target, headers, body));
     } catch (e) {
       // PC 에 연결하지 못했다. PC 가 받지 않았으니 쌓는다
-      await this.markDown(origin);
-      return this.enqueue(target, headers, body, true);
+      return stash(true);
     }
     if (response.status === 530) {
-      await this.markDown(origin);
-      return this.enqueue(target, headers, body, true);
+      return stash(true);
     }
     if (await edgeFailed(response)) {
       // 엣지의 502 등. 바로 GET / 로 다시 확인해서 PC 가 응답하면 이번 요청만의 오류라 그대로 돌려준다.
@@ -208,8 +223,7 @@ export class WriteQueue {
       if (!check.edge) {
         return response;
       }
-      await this.markDown(origin);
-      return this.enqueue(target, headers, body, true);
+      return stash(true);
     }
     return response;
   }
@@ -369,6 +383,12 @@ export class WriteQueue {
     return row === undefined ? [] : JSON.parse(row.value);
   }
 
+  /** 읽기 사본(worker.js Cache API)을 쓰는가. 정한 적 없으면 쓴다 (이 설정 전과 같다) */
+  snapshot() {
+    const row = this.sql.exec("SELECT value FROM config WHERE name = 'snapshot'").toArray()[0];
+    return row === undefined ? true : JSON.parse(row.value) !== false;
+  }
+
   /** 관리 화면: 등록 경로, 상태별 건수, 최근 요청 (헤더·본문은 보이지 않는다) */
   state() {
     const counts = { queued: 0, sent: 0, failed: 0 };
@@ -389,7 +409,7 @@ export class WriteQueue {
     const check = this.lastCheck();
     const lastCheck = check.at === null ? null : { ...check, at: new Date(check.at).toISOString() };
     const since = this.downSince();
-    return Response.json({ paths: this.paths(), counts, items, lastCheck,
+    return Response.json({ paths: this.paths(), snapshot: this.snapshot(), counts, items, lastCheck,
       downSince: since === null ? null : new Date(since).toISOString() });
   }
 
@@ -415,9 +435,10 @@ export class WriteQueue {
 /**
  * builder 가 부르는 관리 주소. Authorization: Bearer {QUEUE_KEY 에서 만든 관리 토큰}
  *
- *   GET    /apps/{host}/queue          등록 경로, 상태별 건수, 최근 요청
- *   PUT    /apps/{host}/queue/config   {"paths": ["/posts", ...]} 등록 경로를 바꾼다 (빈 목록이면 끈다. 쌓인 요청은 계속 보낸다)
- *   DELETE /apps/{host}/queue          쌓인 요청과 등록 경로를 지운다 (앱 삭제)
+ *   GET    /apps/{host}/queue          등록 경로, 읽기 사본 사용 여부, 상태별 건수, 최근 요청
+ *   PUT    /apps/{host}/queue/config   {"paths": ["/posts", ...], "snapshot": true} 준 값만 바꾼다.
+ *                                      paths 가 빈 목록이면 쓰기 큐를 끈다 (쌓인 요청은 계속 보낸다), snapshot false 면 읽기 사본을 끈다
+ *   DELETE /apps/{host}/queue          쌓인 요청과 설정을 지운다 (앱 삭제)
  */
 async function admin(request, url, env) {
   if (request.headers.get("authorization") !== "Bearer " + (await adminToken(env))) {
@@ -430,14 +451,34 @@ async function admin(request, url, env) {
   const [, host, config] = match;
   const queue = queueOf(env, host);
   if (config && request.method === "PUT") {
-    const paths = validPaths((await request.json().catch(() => null))?.paths);
-    if (paths === null) {
-      return Response.json({ error: "paths must be up to " + PATH_LIMIT + " paths starting with /" }, { status: 400 });
+    const input = await request.json().catch(() => null);
+    const change = {};
+    if (input?.paths !== undefined) {
+      change.paths = validPaths(input.paths);
+      if (change.paths === null) {
+        return Response.json({ error: "paths must be up to " + PATH_LIMIT + " paths starting with /" }, { status: 400 });
+      }
     }
-    configs.set(host, { paths, until: Date.now() + CONFIG_MILLIS });
-    return queue.fetch("https://queue/admin/config", {
-      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ paths }),
+    if (input?.snapshot !== undefined) {
+      if (typeof input.snapshot !== "boolean") {
+        return Response.json({ error: "snapshot must be true or false" }, { status: 400 });
+      }
+      change.snapshot = input.snapshot;
+    }
+    if (Object.keys(change).length === 0) {
+      return Response.json({ error: "give paths or snapshot" }, { status: 400 });
+    }
+    const response = await queue.fetch("https://queue/admin/config", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(change),
     });
+    // 이 isolate 는 바로 새 값을 쓴다. 다른 isolate 는 CONFIG_MILLIS 안에 DO 에서 다시 읽는다
+    const saved = await response.clone().json().catch(() => null);
+    if (saved !== null) {
+      configs.set(host, { paths: saved.paths ?? [], snapshot: saved.snapshot !== false, until: Date.now() + CONFIG_MILLIS });
+    } else {
+      configs.delete(host);
+    }
+    return response;
   }
   if (!config && request.method === "GET") {
     return queue.fetch("https://queue/admin/state");
@@ -471,24 +512,41 @@ function matches(paths, pathname) {
   return paths.some((path) => pathname === path || pathname.startsWith(path.endsWith("/") ? path : path + "/"));
 }
 
-/** host → { paths, until } */
+/** host → { paths, snapshot, until } */
 const configs = new Map();
 
-/** 앱의 등록 경로. DO 에 닿지 못하면 잠깐 빈 목록으로 본다 (큐 없이 지금처럼 PC 로 보낸다) */
-async function pathsOf(env, host) {
+/**
+ * 앱의 엣지 설정 (등록 경로, 읽기 사본 사용 여부). CONFIG_MILLIS 동안 기억한다.
+ * DO 에 닿지 못하면 잠깐 큐는 끄고 읽기 사본은 켠 것으로 본다 (이 설정 전과 같은 동작)
+ */
+async function configOf(env, host) {
   const known = configs.get(host);
   if (known !== undefined && known.until > Date.now()) {
-    return known.paths;
+    return known;
   }
   try {
     const response = await queueOf(env, host).fetch("https://queue/config");
-    const paths = (await response.json()).paths ?? [];
-    configs.set(host, { paths, until: Date.now() + CONFIG_MILLIS });
-    return paths;
+    const value = await response.json();
+    const config = { paths: value.paths ?? [], snapshot: value.snapshot !== false, until: Date.now() + CONFIG_MILLIS };
+    configs.set(host, config);
+    return config;
   } catch (e) {
-    configs.set(host, { paths: [], until: Date.now() + 5_000 });
-    return [];
+    const config = { paths: [], snapshot: true, until: Date.now() + 5_000 };
+    configs.set(host, config);
+    return config;
   }
+}
+
+async function pathsOf(env, host) {
+  return (await configOf(env, host)).paths;
+}
+
+/** worker.js 가 읽기 사본을 저장·응답하기 전에 부른다. 큐가 없는 Worker(QUEUE 바인딩 없음)는 늘 쓴다 */
+export async function snapshotOn(env, host) {
+  if (!env.QUEUE || !env.QUEUE_KEY) {
+    return true;
+  }
+  return (await configOf(env, host)).snapshot;
 }
 
 function queueOf(env, host) {

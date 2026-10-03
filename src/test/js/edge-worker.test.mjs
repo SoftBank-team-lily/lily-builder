@@ -49,10 +49,10 @@ beforeEach(() => {
 });
 
 /** 요청 하나를 Worker 에 보내고 waitUntil 로 미룬 일(사본 저장·삭제)까지 끝낸다 */
-async function send(url, init = {}) {
+async function send(url, init = {}, env = {}) {
   const pending = [];
   const ctx = { waitUntil: (promise) => pending.push(promise) };
-  const response = await worker.fetch(new Request(url, init), {}, ctx);
+  const response = await worker.fetch(new Request(url, init), env, ctx);
   const body = init.method === "HEAD" ? "" : await response.text();
   await Promise.all(pending);
   return { status: response.status, headers: response.headers, body };
@@ -308,4 +308,39 @@ test("사본에는 Content-Encoding과 Content-Length를 남기지 않고 7일 �
   assert.equal(stored.headers.get("content-encoding"), null);
   assert.equal(stored.headers.get("content-length"), null);
   assert.equal(stored.headers.get("cache-control"), "public, max-age=604800");
+});
+
+/** 쓰기 큐 바인딩. 앱 DO 설정 /config 가 {paths: [], snapshot} 을 준다 (배포 화면의 읽기 사본 체크박스) */
+function edgeOptions(snapshot) {
+  return {
+    QUEUE_KEY: Buffer.alloc(32, 1).toString("base64"),
+    QUEUE: { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json({ paths: [], snapshot }) }) },
+  };
+}
+
+test("읽기_사본을_끈_앱은_PC가_준_공개_GET_200을_저장하지_않고_PC가_죽으면_사본_대신_503을_준다", async () => {
+  const env = edgeOptions(false);
+  pcServes("blog-off", () => html("<h1>posts</h1>"));
+  const first = await send(`https://blog-off.${ZONE}/posts/3`, {}, env);
+  assert.equal(first.status, 200);
+  assert.deepEqual(cache.snapshots(), []);
+
+  pcDies("blog-off");
+  const down = await send(`https://blog-off.${ZONE}/posts/3`, {}, env);
+
+  assert.equal(down.status, 503);
+  assert.notEqual(down.headers.get("x-lily-edge"), "snapshot");
+});
+
+test("읽기_사본을_켠_앱은_쓰기_큐_바인딩이_있어도_지금처럼_사본을_저장하고_PC가_죽으면_200_snapshot을_준다", async () => {
+  const env = edgeOptions(true);
+  pcServes("blog-on", () => html("<h1>posts</h1>"));
+  await send(`https://blog-on.${ZONE}/posts/3`, {}, env);
+  assert.equal(cache.snapshots().length, 1);
+
+  pcDies("blog-on");
+  const down = await send(`https://blog-on.${ZONE}/posts/3`, {}, env);
+
+  assert.equal(down.status, 200);
+  assert.equal(down.headers.get("x-lily-edge"), "snapshot");
 });
