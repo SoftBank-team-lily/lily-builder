@@ -33,7 +33,7 @@ public class CloudService {
     public CloudPolicy.Decision recheck(CloudPolicy.Request request, CloudPolicy.Decision decision) {
         if (!decision.status().equals("selected")) return decision;
         var pinned = new CloudPolicy.Request(decision.provider(), request.priority(), request.profile(),
-            request.maxMonthlyCostUsd(), request.maxP95Ms(), Set.of(decision.region()), request.capabilities());
+            request.maxMonthlyCostUsd(), request.maxP95Ms(), Set.of(decision.region()), request.capabilities(), request.context());
         var checked = new CloudPolicy(Jev.disabled()).decide(pinned, catalog.read(), props.regions(), clock.instant(), props.maxAgeSeconds());
         return checked.status().equals("selected")
             ? new CloudPolicy.Decision("selected", decision.provider(), decision.region(), decision.source(), decision.confidence(),

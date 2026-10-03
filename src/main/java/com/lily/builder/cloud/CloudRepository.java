@@ -22,13 +22,39 @@ public class CloudRepository {
         Map.entry("bigquery", List.of("google-cloud-bigquery", "@google-cloud/bigquery", "cloud.google.com/go/bigquery")),
         Map.entry("vertex-ai", List.of("google-cloud-aiplatform", "@google-cloud/vertexai")),
         Map.entry("sagemaker", List.of("sagemaker")),
+        Map.entry("s3", List.of("@aws-sdk/client-s3", "aws-sdk-s3")),
+        Map.entry("bedrock", List.of("@aws-sdk/client-bedrock", "@aws-sdk/client-bedrock-runtime", "aws-sdk-bedrockruntime")),
+        Map.entry("aws-messaging", List.of("@aws-sdk/client-sqs", "@aws-sdk/client-sns", "aws-sdk-sqs", "aws-sdk-sns")),
+        Map.entry("gcs", List.of("google-cloud-storage", "@google-cloud/storage", "cloud.google.com/go/storage")),
+        Map.entry("pubsub", List.of("google-cloud-pubsub", "@google-cloud/pubsub", "cloud.google.com/go/pubsub")),
+        Map.entry("azure-sdk", List.of("azure-storage-blob", "azure-ai-ml", "@azure/storage-blob", "azure-search-documents")),
+        Map.entry("enterprise-identity", List.of("azure-identity", "@azure/identity", "msal", "@azure/msal-node", "@azure/msal-browser")),
         Map.entry("postgres", List.of("postgresql", "psycopg", "psycopg2", "pg", "pgx")),
         Map.entry("mysql", List.of("mysql", "mysql2", "pymysql", "mysql-connector")));
     public record Evidence(String commit, List<String> files, Map<String,List<String>> signals,
                            String affinity, String source, Double confidence, List<String> limitations) {
+        /** 발견한 SDK의 서비스 후보. 사용 여부/권한/네트워크가 확인되기 전에는 필수 기능으로 승격하지 않는다. */
+        @com.fasterxml.jackson.annotation.JsonProperty("serviceHints")
+        public Set<String> serviceHints() {
+            Map<String,String> names = Map.of("bigquery","gcp-bigquery", "vertex-ai","gcp-vertex-ai",
+                "gcs","gcp-storage", "pubsub","gcp-pubsub", "s3","aws-s3", "bedrock","aws-bedrock",
+                "sagemaker","aws-sagemaker", "enterprise-identity","entra-integration");
+            Set<String> hints = new TreeSet<>();
+            names.forEach((signal, capability) -> { if (signals.containsKey(signal)) hints.add(capability); });
+            return Collections.unmodifiableSet(hints);
+        }
+        @com.fasterxml.jackson.annotation.JsonProperty("reviewItems")
+        public List<String> reviewItems() {
+            List<String> items = new ArrayList<>(List.of("confirm_data_location", "confirm_existing_cloud_and_operations",
+                "include_network_cost_in_estimate"));
+            if (!serviceHints().isEmpty()) items.add("confirm_managed_service_usage_and_access");
+            if (signals.containsKey("ml")) items.add("confirm_ml_runtime_and_accelerator");
+            if (signals.containsKey("azure-sdk") || signals.containsKey("enterprise-identity")) items.add("review_azure_identity_and_service_integration");
+            return List.copyOf(items);
+        }
         public Map<String,Object> facts() {
             return Map.of("commit", commit, "files", files, "signals", signals, "affinity", affinity,
-                "source", source, "limitations", limitations);
+                "source", source, "limitations", limitations, "serviceHints", serviceHints(), "reviewItems", reviewItems());
         }
     }
     private final GitHubSource github;
@@ -69,6 +95,9 @@ public class CloudRepository {
                         Both AWS and GCP support generic web, ML and data workloads.
                         ML libraries alone never justify GCP. Generic web libraries never justify AWS.
                         Provider-specific managed-service libraries can suggest affinity but not deployment readiness.
+                        Evaluate actual service composition (for example S3/Bedrock/messaging or BigQuery/Vertex/storage).
+                        Azure SDK or enterprise identity libraries signal an integration review, not a reason to claim AWS/GCP affinity.
+                        Do not assume where data lives, how accounts are governed or what the team knows from library names.
                         If both ecosystems appear or evidence is insufficient, choose unknown. Generic portable apps are portable.
                         """, Map.of("aws", "AWS service dependency suggests AWS affinity",
                             "gcp", "GCP service dependency suggests GCP affinity", "portable", "No provider-specific affinity",
@@ -78,6 +107,10 @@ public class CloudRepository {
                     if (a.noul() == null && Double.isFinite(a.confidence()) && a.confidence() >= .8 && a.confidence() <= 1
                         && Set.of("aws", "gcp", "portable", "unknown").contains(Objects.toString(a.choice(), ""))) {
                         affinity = a.choice(); source = "jev"; confidence = a.confidence();
+                        if (signals.containsKey("azure-sdk") || signals.containsKey("enterprise-identity")) {
+                            // Azure/기업 계정 연동의 이식성을 아직 확인하지 않았으므로 portable로 단정하지 않는다.
+                            if (affinity.equals("portable")) { affinity = "unknown"; source = "rules"; confidence = null; }
+                        }
                     }
                 }
             }

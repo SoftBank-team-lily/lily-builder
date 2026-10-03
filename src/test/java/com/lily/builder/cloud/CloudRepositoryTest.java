@@ -47,6 +47,15 @@ class CloudRepositoryTest {
         assertThatThrownBy(() -> new CloudRepository(github,Jev.disabled()).inspect(request()))
             .hasMessage("repository_analysis_unavailable");
     }
+    @Test void enterpriseIdentityCannotBeDeclaredPortableWithoutReview() {
+        var github = mock(GitHubSource.class);
+        when(github.resolveCommit(any())).thenReturn(SHA);
+        when(github.paths(any(),any())).thenReturn(List.of("backend/package.json"));
+        when(github.analysisFile(any(),any(),any())).thenReturn("{\"dependencies\":{\"@azure/msal-node\":\"1\"}}");
+        var result = new CloudRepository(github,(s,q) -> Optional.of(new Answer("portable",null,.99))).inspect(request());
+        assertThat(result.affinity()).isEqualTo("unknown");
+        assertThat(result.reviewItems()).contains("review_azure_identity_and_service_integration");
+    }
     @Test void noManifestReportsMissingRootAndPinnedCommitSurvivesDetection() {
         var github = mock(GitHubSource.class);
         when(github.resolveCommit(any())).thenReturn(SHA);

@@ -38,7 +38,7 @@ public class CloudController {
         else if (build.database() != null && !build.database().isBlank()) capabilities.add(build.database());
         if (build.givenDatabase() || "external".equals(build.databaseMode())) capabilities.add("external-db");
         var p = request.policy();
-        return new CloudPolicy.Request(p.provider(), p.priority(), p.profile(), p.maxMonthlyCostUsd(), p.maxP95Ms(), p.regions(), capabilities);
+        return new CloudPolicy.Request(p.provider(), p.priority(), p.profile(), p.maxMonthlyCostUsd(), p.maxP95Ms(), p.regions(), capabilities, p.context());
     }
     @PostMapping("/builds")
     public ResponseEntity<?> start(@Valid @RequestBody Deployment request) {

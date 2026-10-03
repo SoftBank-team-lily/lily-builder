@@ -64,6 +64,23 @@ class CloudApiTest {
             .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("repository_analysis_unavailable"));
         verifyNoInteractions(service,workers);
     }
+    @Test void controllerPreservesContextAndValidatesItsFields() throws Exception {
+        var service = mock(CloudService.class);
+        var workers = mock(CloudWorkers.class);
+        when(service.plan(any(),anyMap())).thenReturn(CloudPolicy.held("no_eligible_cloud",List.of(),List.of(),CloudPolicyTest.NOW));
+        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository())).build();
+        var body = JSON.createObjectNode();
+        var policy = JSON.valueToTree(CloudPolicyTest.request("balanced"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode)policy).set("context",JSON.readTree("{\"dataProvider\":\"gcp\",\"keepDataLocal\":true}"));
+        body.set("policy",policy);
+        body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
+        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isConflict());
+        verify(service).plan(argThat(r -> r.context() != null && "gcp".equals(r.context().dataProvider())
+            && Boolean.TRUE.equals(r.context().keepDataLocal())),anyMap());
+        ((com.fasterxml.jackson.databind.node.ObjectNode)policy.path("context")).put("dataProvider","unrecognized");
+        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isBadRequest());
+        verifyNoInteractions(workers);
+    }
     @Test void readsCatalogAndRoutesSelectedGcpBuildThenPollsSameProvider() throws Exception {
         try (MockWebServer catalog = new MockWebServer(); MockWebServer worker = new MockWebServer()) {
             catalog.start(); worker.start();
