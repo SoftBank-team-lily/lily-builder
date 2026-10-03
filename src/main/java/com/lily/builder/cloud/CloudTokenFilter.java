@@ -20,7 +20,9 @@ public class CloudTokenFilter extends OncePerRequestFilter {
     }
     @Override protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getServletPath() + (request.getPathInfo() == null ? "" : request.getPathInfo());
-        return !(path.equals("/api/cloud") || path.startsWith("/api/cloud/"));
+        if (!(path.equals("/api/cloud") || path.startsWith("/api/cloud/"))) return true;
+        // 등록 때 자동 선택은 배포와 같은 빌더로 온다. 토큰을 아직 안 넣었으면 그 경로만 막지 않는다.
+        return expected == null && (path.equals("/api/cloud/selection") || path.startsWith("/api/cloud/selection/"));
     }
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
         if (expected == null) { reject(response, 503, "cloud_disabled"); return; }

@@ -1,6 +1,8 @@
 package com.lily.builder.cloud;
 
 import com.lily.builder.BuildRequest;
+import com.lily.builder.BuilderProperties;
+import com.lily.builder.CloudProfiles;
 import com.lily.jev.Jev;
 import com.lily.jev.Question;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -13,13 +15,20 @@ public class CloudSelection {
     private final CloudRepository repository;
     private final CloudProperties properties;
     private final Jev jev;
-    public CloudSelection(CloudRepository repository, CloudProperties properties, @Qualifier("cloudJev") Jev jev) {
-        this.repository=repository; this.properties=properties; this.jev=jev;
+    private final BuilderProperties builder;
+    private final CloudProfiles gcp;
+    public CloudSelection(CloudRepository repository, CloudProperties properties, @Qualifier("cloudJev") Jev jev,
+                          BuilderProperties builder, CloudProfiles gcp) {
+        this.repository=repository; this.properties=properties; this.jev=jev; this.builder=builder; this.gcp=gcp;
     }
     public record Result(String status, String provider, String reason, Double confidence, CloudRepository.Evidence repository) {}
     public Result choose(BuildRequest build) {
         var evidence=repository.inspect(build);
-        return decide(evidence, properties.regions().keySet(), jev, properties.jevMinConfidence());
+        Set<String> available = new LinkedHashSet<>(properties.regions().keySet());
+        // CLOUD_*_URL 이 없어도, 이미 배포에 쓰는 cicd 주소가 있으면 그 클라우드를 후보로 둔다.
+        if (builder.cicdUrl() != null && !builder.cicdUrl().isBlank()) available.add("aws");
+        if (gcp.deployConfigured()) available.add("gcp");
+        return decide(evidence, available, jev, properties.jevMinConfidence());
     }
     static Result decide(CloudRepository.Evidence evidence, Set<String> available, Jev jev, double threshold) {
         if (evidence.files().isEmpty()) return held("repository_evidence_missing", evidence);
