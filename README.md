@@ -32,7 +32,8 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 |---|---|---|
 | POST | `/api/builds` | 빌드·배포 시작. 바로 `202` 와 id 를 돌려준다 |
 | POST | `/api/detect` | 배포 전 DB 감지. 본문 `{repoUrl, branch?, token?, rootDir?}` → `{database, databaseSource, dir, apps, config, problem}` (`database` 는 postgres / mysql / null. `apps` 는 루트에 앱이 없을 때 폴더 후보, `config` 는 앱이 기동할 때 읽는 설정 키와 채울 방법, `problem` 은 폴더를 하나로 못 정한 이유). 빌드하지 않는다. 브랜치·앱을 못 찾으면 `422` |
-| GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
+| GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK` / `CANCELLED`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
+| POST | `/api/builds/{id}/cancel` | 진행 중인 배포 취소 → `202` 와 `CANCELLED` 빌드. 클라우드는 lily-cicd 로 넘기기 전(`QUEUED`·`BUILDING`, 빌드 중이면 Kaniko Job 삭제), 온프레미스는 에이전트에 `cancel` 을 보내고 바로 닫는다 (에이전트는 트래픽을 바꾸기 전이면 후보를 지운다. 끊겨 있으면 기록만 닫는다). 끝났거나 `DEPLOYING` 인 클라우드 빌드는 `409`, 없으면 `404` |
 | GET | `/api/builds` | 배포 이력 (최신순) |
 | GET | `/api/apps` | k3s 에 떠 있는 앱 |
 | GET | `/api/apps/{app}/release` | 슬롯별 릴리스와 롤백 가능 여부 |
