@@ -131,6 +131,18 @@ public class AppAddress {
         return true;
     }
 
+    /** 온프레미스 앱을 지운 뒤. 앱 레코드면 ALB 든 내 PC 터널이든 지운다. 앱 레코드가 아니면 그대로 두고 false */
+    public boolean remove(String app) {
+        String host = host(app);
+        JsonNode record = record(host);
+        Home home = stateOf(host, record).home();
+        if (home != Home.CLOUD && home != Home.ONPREM) {
+            return false;
+        }
+        api.call("DELETE", "/zones/" + settings.zoneId() + "/dns_records/" + record.path("id").asText(), null);
+        return true;
+    }
+
     public String host(String app) {
         String label = app == null ? "" : app.trim().toLowerCase();
         if (!LABEL.matcher(label).matches()) {
