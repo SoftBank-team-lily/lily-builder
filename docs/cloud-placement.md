@@ -360,3 +360,7 @@ GCP 실제 배포·실제 비용 절감·실사용 성능은 GCP 환경과 관�
 ## 영속 계획·동시 요청 병합 통합 검증
 
 builder 232개 통과·4개 제외, lily-jev 12개 통과. DynamoDB Local에서 계획 직렬화·다른 인스턴스 읽기, 동시 선점, 상태 비교 갱신을 확인했다. 실제 카탈로그·GCP 환경을 사용한 운영 배포 검증은 포함하지 않았다.
+
+## 저장소 적합성에 따른 제공자 자동 선택
+
+`POST /api/cloud/selection`은 BuildRequest를 받아 저장소 근거와 준비된 worker 후보를 공유 JEV에 전달한다. selected 응답에는 AWS/GCP, 신뢰도, 분석 근거가 있고 held 응답에는 사유가 있다. 내부 CLOUD_API_TOKEN 인증을 사용하며 소스를 실행하거나 배포하지 않는다. 프론트가 최초 등록 시 제공자를 고정하는 용도다. 가격·P95 카탈로그·planId 실행은 기존 /repository 및 /builds API와 별도다. GCP 환경이 없는 경우 GCP 후보를 생성하지 않는다.
