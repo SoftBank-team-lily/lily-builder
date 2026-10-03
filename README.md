@@ -171,7 +171,7 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 - `-cloud` 로 끝나는 앱 이름은 받지 않는다
 - 버스팅·비율 슬라이더·거점 전환은 그대로 PC 프록시와 CNAME 이 맡는다
 - CNAME 전환은 DB 가 PC 에 있는 앱(`local`·`external`)에는 하지 않는다. PC 가 꺼지면 DB 도 함께 꺼져 클라우드가 이어받을 수 없다
-- 읽기 사본: PC 가 공개 GET 에 200 을 주면 Worker 가 그 응답을 Cache API 에 7일 둔다. PC 가 받지 못한 GET/HEAD 를 클라우드도 처리하지 못하면(대기 Pod 없음, DB 가 PC 에 있어 5xx) 사본으로 200(`X-Lily-Edge: snapshot`, `X-Lily-Snapshot-At`), 사본이 없으면 503 `Retry-After: 30`
+- 읽기 사본: PC 가 공개 GET 에 200 을 주면 Worker 가 그 응답을 Cache API 에 7일 둔다. PC 가 받지 못한 GET/HEAD 를 클라우드도 처리하지 못하면(대기 Pod 없음, DB 가 PC 에 있어 5xx) 사본으로 200(`X-Lily-Edge: snapshot`, `X-Lily-Snapshot-At`), 사본이 없으면 503 `Retry-After: 30`. 사본이 있으면 클라우드를 3초까지만 기다린다 (DB 가 PC 에 있는 대기 Pod 는 PC 가 꺼지면 무응답)
   - 쿠키·인증 없는 요청, Set-Cookie·`private`·`no-store` 없는 응답, `Vary` 는 `Accept-Encoding` 만, 허용한 query(`page`·`sort` 등)만 둔다. 쓰기는 사본으로 답하지 않는다
   - 사본은 데이터센터마다 따로이고 밀려날 수 있다. prewarm 은 builder 가 있는 서울 리전에서 연다
 - Worker 테스트: `./gradlew edgeTest` (Node 22 이상, `node --test src/test/js/*.test.mjs`)
