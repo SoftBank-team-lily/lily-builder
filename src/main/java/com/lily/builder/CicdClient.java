@@ -109,6 +109,16 @@ public class CicdClient {
         return exchange(http.get().uri("/api/deployments/{app}", appName));
     }
 
+    /** 스키마 이력과 pgroll 롤백 창 (200, 앱이 없으면 404) */
+    public Passthrough schema(String appName) {
+        return exchange(http.get().uri("/api/deployments/{app}/schema", appName));
+    }
+
+    /** pgroll 롤백 창을 바로 닫는다 (200 COMPLETED, 열린 창이 없거나 진행 중이면 409) */
+    public Passthrough completeSchema(String appName) {
+        return exchange(http.post().uri("/api/deployments/{app}/schema/complete", appName));
+    }
+
     private static Passthrough exchange(RestClient.RequestHeadersSpec<?> spec) {
         return spec.exchange((req, res) -> new Passthrough(res.getStatusCode().value(),
                 new String(res.getBody().readAllBytes(), StandardCharsets.UTF_8)));

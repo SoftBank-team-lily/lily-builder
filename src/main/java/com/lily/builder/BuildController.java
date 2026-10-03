@@ -283,6 +283,24 @@ public class BuildController {
         return passthrough(cicd.release(appName));
     }
 
+    /** 스키마 이력(pgroll·Flyway)과 열린 pgroll 롤백 창. 프로젝트 상세의 스키마 이력 패널이 쓴다 */
+    @GetMapping("/api/apps/{appName}/schema")
+    public ResponseEntity<String> schema(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.schema(appName));
+    }
+
+    /** pgroll 롤백 창을 바로 닫는다 (complete). 이후에는 스키마를 되돌릴 수 없다. 열린 창이 없으면 409 */
+    @PostMapping("/api/apps/{appName}/schema/complete")
+    public ResponseEntity<String> completeSchema(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return passthrough(cicd.completeSchema(appName));
+    }
+
     private String rejected(String message) {
         try {
             return json.writeValueAsString(Map.of("status", "REJECTED", "message", message == null ? "" : message));
