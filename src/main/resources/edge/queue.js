@@ -21,6 +21,8 @@ const RETRY_MIN_MILLIS = 10_000;
 const RETRY_MAX_MILLIS = 60_000;
 /** 재전송 전에 PC 에 닿는지 보는 GET 의 응답 헤더 대기 시간 */
 const PROBE_TIMEOUT_MILLIS = 1_500;
+/** PC 확인이 앱의 5xx 로 이만큼 이어지면 재전송을 해 본다 (앱의 / 가 늘 5xx 여도 큐가 멈추지 않게) */
+const PROBE_APP_ERRORS = 10;
 /** 재전송 하나의 응답 헤더 대기 시간. 넘으면 PC 가 받았는지 모르므로 같은 Idempotency-Key 로 다음 alarm 에 다시 보낸다 */
 const SEND_TIMEOUT_MILLIS = 10_000;
 /** 끝난(sent·failed) 행을 남겨 두는 기간 */
@@ -229,7 +231,7 @@ export class WriteQueue {
       this.retry = RETRY_MIN_MILLIS;
       return;
     }
-    if (!(await this.reachable(rows[0].origin))) {
+    if (!(await this.ready(rows[0].origin))) {
       return this.later();
     }
     for (const row of rows) {
@@ -265,19 +267,40 @@ export class WriteQueue {
     this.retry = Math.min(this.retry * 2, RETRY_MAX_MILLIS);
   }
 
-  /** PC 가 엣지 오류 없이 응답하는지 공개 주소의 / 로 본다 */
-  async reachable(origin) {
+  /**
+   * 다시 보내도 되는지 공개 주소의 / 로 본다. 5xx 면 엣지 오류(PC 에 닿지 않음)든 앱 오류(DB 가 아직 없음)든 기다린다.
+   * 앱의 / 가 늘 5xx 인 앱이 영영 멈추지 않게, 엣지 오류가 아닌 5xx 가 PROBE_APP_ERRORS 번 이어지면 보내 본다.
+   * 결과는 관리 상태의 lastCheck 로 보인다
+   */
+  async ready(origin) {
+    const check = await this.probe(origin);
+    const appErrors = check.status !== null && check.status >= 500 && !check.edge ? this.lastCheck().appErrors + 1 : 0;
+    this.sql.exec("INSERT INTO config (name, value) VALUES ('check', ?) "
+      + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify({ at: Date.now(), ...check, appErrors }));
+    if (check.status !== null && check.status < 500) {
+      return true;
+    }
+    return appErrors >= PROBE_APP_ERRORS;
+  }
+
+  /** @return {status: 응답 코드 (연결 실패·시간 초과면 null), edge: Cloudflare 가 만든 오류인가} */
+  async probe(origin) {
     const headers = new Headers({ [BYPASS_HEADER]: await bypassToken(this.env) });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MILLIS);
     try {
       const response = await fetch(origin + "/", { headers, signal: controller.signal, redirect: "manual" });
-      return !(await edgeFailed(response));
+      return { status: response.status, edge: await edgeFailed(response) };
     } catch (e) {
-      return false;
+      return { status: null, edge: true };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  lastCheck() {
+    const row = this.sql.exec("SELECT value FROM config WHERE name = 'check'").toArray()[0];
+    return row === undefined ? { at: null, status: null, edge: false, appErrors: 0 } : JSON.parse(row.value);
   }
 
   async send(saved) {
@@ -326,7 +349,9 @@ export class WriteQueue {
       receivedAt: new Date(row.received_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),
     }));
-    return Response.json({ paths: this.paths(), counts, items });
+    const check = this.lastCheck();
+    const lastCheck = check.at === null ? null : { ...check, at: new Date(check.at).toISOString() };
+    return Response.json({ paths: this.paths(), counts, items, lastCheck });
   }
 
   status(id) {
@@ -442,16 +467,20 @@ function kept(headers) {
   return out;
 }
 
-/** 앱이 아니라 엣지가 만든 응답이다 (worker.js 와 같은 판정) */
+/**
+ * 앱이 아니라 엣지가 만든 응답이다. 브라우저에는 /cdn-cgi/ 가 든 HTML 오류 페이지가 가고,
+ * Worker·DO 의 하위 요청에는 "error code: 1033" 같은 짧은 텍스트가 온다
+ */
 async function edgeFailed(response) {
   if (response.status === 530) {
     return true;
   }
-  if (!EDGE_ERRORS.has(response.status) || !(response.headers.get("content-type") ?? "").includes("text/html")) {
+  const type = response.headers.get("content-type") ?? "";
+  if (!EDGE_ERRORS.has(response.status) || !(type === "" || type.includes("text/html") || type.includes("text/plain"))) {
     return false;
   }
   const text = await response.clone().text();
-  return text.includes("/cdn-cgi/");
+  return text.includes("/cdn-cgi/") || /^error code: \d+/i.test(text.trim());
 }
 
 const tokens = new Map();
