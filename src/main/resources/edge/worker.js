@@ -52,6 +52,11 @@ const REWRITING_HEADERS = ["x-forwarded-host", "x-forwarded-server", "x-host", "
 const SNAPSHOT_DROPPED = ["content-encoding", "content-length", "set-cookie", "vary", "age"];
 /** 사본도 클라우드도 없을 때 다시 시도하라고 알리는 초 */
 const RETRY_SECONDS = 30;
+/**
+ * 사본이 있는 GET/HEAD 가 클라우드 응답 헤더를 기다리는 시간. 넘으면 사본으로 답하고 DOWN_MILLIS 동안 클라우드를 건너뛴다.
+ * DB 가 PC 에 있는 대기 Pod 는 PC 가 꺼지면 역방향 터널 너머 DB 를 하염없이 기다린다 (5xx 가 아니라 무응답)
+ */
+const CLOUD_TIMEOUT_MILLIS = 3_000;
 
 const down = new Map();
 
@@ -64,7 +69,7 @@ export default {
     }
     const host = url.hostname;
     if (await isDown(host)) {
-      return fallback(request, null, url, cloud, host);
+      return fallback(request, null, url, cloud, host, ctx);
     }
 
     const body = await replayableBody(request);
@@ -78,7 +83,7 @@ export default {
     } catch (e) {
       // 오리진에 연결하지 못했거나 PC 가 제시간에 응답하지 않았다
       markDown(host, ctx);
-      return fallback(request, body, url, cloud, host);
+      return fallback(request, body, url, cloud, host, ctx);
     }
     if (!(await edgeFailed(response))) {
       remember(request, url, response, ctx);
@@ -89,21 +94,32 @@ export default {
       // PC 가 받았을 수 있다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 요청부터는 클라우드로)
       return response;
     }
-    return fallback(request, body, url, cloud, host);
+    return fallback(request, body, url, cloud, host, ctx);
   },
 };
 
 /**
  * PC 가 받지 못한 요청. 클라우드 대기 Pod 로 보내고, GET/HEAD 를 클라우드도 처리하지 못하면(5xx, 연결 실패)
- * 이 데이터센터의 읽기 사본으로 답한다. 사본이 없으면 클라우드 응답을 그대로 주되, 엣지가 만든 오류면 503 으로 바꾼다
+ * 이 데이터센터의 읽기 사본으로 답한다. 사본이 없으면 클라우드 응답을 그대로 주되, 엣지가 만든 오류면 503 으로 바꾼다.
+ * 사본이 있을 때만 클라우드를 CLOUD_TIMEOUT_MILLIS 까지 기다린다 (없으면 0 에서 올라오는 대기 Pod 도 끝까지 기다린다)
  */
-async function fallback(request, body, url, cloud, host) {
-  const response = await toCloud(request, body, cloud, host);
-  if (!READS.has(request.method) || response.status < 500) {
-    return response;
+async function fallback(request, body, url, cloud, host, ctx) {
+  if (!READS.has(request.method)) {
+    return toCloud(request, body, cloud, host, 0);
   }
   const copy = await snapshot(request, url);
+  if (copy !== null && await isDown(cloud.hostname)) {
+    return copy;
+  }
+  const response = await toCloud(request, body, cloud, host, copy === null ? 0 : CLOUD_TIMEOUT_MILLIS);
+  if (response.status < 500) {
+    return response;
+  }
   if (copy !== null) {
+    if (response.headers.get("X-Lily-Edge") === "unavailable") {
+      // 클라우드가 제시간에 답하지 않았거나 닿지 않았다. 다음 요청부터는 기다리지 않는다
+      markDown(cloud.hostname, ctx);
+    }
     return copy;
   }
   return (await edgeFailed(response)) ? unavailable() : response;
@@ -296,7 +312,8 @@ function cloudUrl(url) {
   return cloud;
 }
 
-async function toCloud(request, body, cloud, host) {
+/** limitMillis 가 0 보다 크면 응답 헤더를 그만큼만 기다린다 (본문 스트리밍은 끊지 않는다) */
+async function toCloud(request, body, cloud, host, limitMillis) {
   if (body === null && hasBody(request)) {
     body = await replayableBody(request);
     if (body === undefined) {
@@ -305,14 +322,20 @@ async function toCloud(request, body, cloud, host) {
   }
   const forwarded = rebuild(request, cloud, body);
   forwarded.headers.set("X-Lily-Original-Host", host);
+  const controller = limitMillis > 0 ? new AbortController() : null;
+  const timer = controller === null ? null : setTimeout(() => controller.abort(), limitMillis);
   try {
-    const response = await fetch(forwarded);
+    const response = await fetch(forwarded, controller === null ? undefined : { signal: controller.signal });
     const headers = new Headers(response.headers);
     headers.set("X-Lily-Edge", "cloud");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers, webSocket: response.webSocket });
   } catch (e) {
-    // 클라우드 주소가 없거나(대기 배포 없는 앱) 닿지 않는다
+    // 클라우드 주소가 없거나 닿지 않거나 제시간에 답하지 않았다
     return unavailable();
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
   }
 }
 

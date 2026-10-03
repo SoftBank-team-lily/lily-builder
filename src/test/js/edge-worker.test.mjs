@@ -39,12 +39,12 @@ beforeEach(() => {
   cache = new FakeCache();
   globalThis.caches = { default: cache };
   origins = new Map();
-  globalThis.fetch = async (request) => {
+  globalThis.fetch = async (request, init) => {
     const handler = origins.get(new URL(request.url).hostname);
     if (!handler) {
       throw new TypeError("fetch failed: no origin for " + request.url);
     }
-    return handler(request);
+    return handler(init?.signal ? new Request(request, { signal: init.signal }) : request);
   };
 });
 
@@ -103,6 +103,48 @@ test("PC가 죽고 클라우드 대기 Pod가 DB 연결 실패로 500을 주면 
   assert.equal(down.status, 200);
   assert.equal(down.body, "<h1>list</h1>");
   assert.equal(down.headers.get("x-lily-edge"), "snapshot");
+});
+
+/** signal 이 끊길 때까지 응답 헤더를 주지 않는 오리진 (역방향 터널로 죽은 PC DB 를 기다리는 대기 Pod) */
+function hangs(request) {
+  return new Promise((resolve, reject) => {
+    request.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  });
+}
+
+test("PC가 죽고 대기 Pod가 응답 헤더를 3초 안에 주지 않으면 사본을 주고, 이후 10초 동안은 대기 Pod를 기다리지 않는다", async () => {
+  pcServes("blog-s", () => html("<p>list</p>"));
+  await send(`https://blog-s.${ZONE}/api/posts`);
+
+  pcDies("blog-s");
+  let cloudCalls = 0;
+  cloudServes("blog-s", (request) => {
+    cloudCalls++;
+    return hangs(request);
+  });
+  const started = Date.now();
+  const first = await send(`https://blog-s.${ZONE}/api/posts`);
+  const firstMillis = Date.now() - started;
+  const again = Date.now();
+  const second = await send(`https://blog-s.${ZONE}/api/posts`);
+
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get("x-lily-edge"), "snapshot");
+  assert.ok(firstMillis >= 3000 && firstMillis < 4500, `first ${firstMillis}ms`);
+  assert.equal(second.status, 200);
+  assert.ok(Date.now() - again < 500, "second waited for cloud");
+  assert.equal(cloudCalls, 1);
+});
+
+test("PC가 죽었는데 사본이 없으면 대기 Pod 응답을 3초가 넘어도 기다린다", async () => {
+  pcDies("blog-t");
+  cloudServes("blog-t", () => new Promise((resolve) => setTimeout(() => resolve(html("<p>cold start</p>")), 3300)));
+
+  const down = await send(`https://blog-t.${ZONE}/`);
+
+  assert.equal(down.status, 200);
+  assert.equal(down.body, "<p>cold start</p>");
+  assert.equal(down.headers.get("x-lily-edge"), "cloud");
 });
 
 test("PC가 죽고 클라우드 대기 Pod가 200을 주면 사본 대신 클라우드 응답을 준다", async () => {
