@@ -161,7 +161,8 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 
 | 단계 | 구현 | 끊김 |
 |---|---|---|
-| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에만 라우트 `{app}.{존}/*` 와 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 1.6~1.8초 |
+| 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 1.6~1.8초 |
+| 엣지 읽기 사본 | 같은 Worker. 온프레미스 배포가 끝난 모든 앱에 라우트 `{app}.{존}/*` 를 걸고(`EdgeWorker.attachRoute`) 주요 페이지를 열어 둔다(`EdgePrewarm`) | 클라우드도 못 받는 GET/HEAD 를 그 데이터센터의 마지막 공개 응답으로 200 |
 | CNAME 전환 (예비) | `AgentFailover`. 에이전트가 `FAILOVER_GRACE_SECONDS` 동안 끊겨 있으면 클라우드 레플리카를 올리고 CNAME 을 ALB 로 | 유예 60초 + DNS 반영 |
 
 - 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·1.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
@@ -170,6 +171,10 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 - `-cloud` 로 끝나는 앱 이름은 받지 않는다
 - 버스팅·비율 슬라이더·거점 전환은 그대로 PC 프록시와 CNAME 이 맡는다
 - CNAME 전환은 DB 가 PC 에 있는 앱(`local`·`external`)에는 하지 않는다. PC 가 꺼지면 DB 도 함께 꺼져 클라우드가 이어받을 수 없다
+- 읽기 사본: PC 가 공개 GET 에 200 을 주면 Worker 가 그 응답을 Cache API 에 7일 둔다. PC 가 받지 못한 GET/HEAD 를 클라우드도 처리하지 못하면(대기 Pod 없음, DB 가 PC 에 있어 5xx) 사본으로 200(`X-Lily-Edge: snapshot`, `X-Lily-Snapshot-At`), 사본이 없으면 503 `Retry-After: 30`
+  - 쿠키·인증 없는 요청, Set-Cookie·`private`·`no-store` 없는 응답, `Vary` 는 `Accept-Encoding` 만, 허용한 query(`page`·`sort` 등)만 둔다. 쓰기는 사본으로 답하지 않는다
+  - 사본은 데이터센터마다 따로이고 밀려날 수 있다. prewarm 은 builder 가 있는 서울 리전에서 연다
+- Worker 테스트: `./gradlew edgeTest` (Node 22 이상, `node --test src/test/js/*.test.mjs`)
 
 ## 설정
 

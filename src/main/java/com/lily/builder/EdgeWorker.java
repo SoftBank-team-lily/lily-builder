@@ -32,7 +32,9 @@ import java.util.UUID;
  * PC 장애  {app}.{zone} → Worker → 530 → {app}-cloud.{zone} → ALB → ingress-nginx → 클라우드 대기 Pod
  * </pre>
  *
- * 클라우드 대기 배포가 끝난 앱에만 라우트 {@code {app}.{zone}/*} 와 클라우드 주소 {@code {app}-cloud.{zone}}(ALB 프록시 CNAME)를 둔다.
+ * 온프레미스 배포가 끝난 앱에는 라우트 {@code {app}.{zone}/*} 를 건다 ({@link #attachRoute}). PC 장애 때 대기 Pod 가 없으면
+ * Worker 가 그 데이터센터의 읽기 사본(Cache API)으로 GET 에 답한다.
+ * 클라우드 대기 배포가 끝난 앱에는 클라우드 주소 {@code {app}-cloud.{zone}}(ALB 프록시 CNAME)도 둔다 ({@link #attach}).
  * 거점 전환·CNAME 장애 전환({@link AgentFailover})은 그대로다. 라우트를 지우면 Worker 없이 지금과 같다.
  * 쓰기 큐({@link EdgeQueue})가 켜져 있으면 DO 바인딩을 넣어 올리고, 관리 주소 라우트를 둔다.
  */
@@ -241,6 +243,26 @@ public class EdgeWorker {
                 api.call("PUT", zone() + "/dns_records/" + record.path("id").asText(), body);
             }
         }
+        String pattern = ensureRoute(app);
+        return "edge: " + pattern + " -> " + edge.scriptName() + ", fallback " + cloud;
+    }
+
+    /**
+     * 온프레미스 배포가 끝난 앱. 공개 주소에 Worker 라우트만 건다 (클라우드 주소는 대기 배포 때 {@link #attach}).
+     * 대기 Pod 가 없어도 PC 장애 때 Worker 가 그 데이터센터의 읽기 사본으로 GET 에 답한다. 이미 있으면 그대로 둔다
+     *
+     * @return 화면 로그에 남길 한 줄
+     */
+    public String attachRoute(String app) {
+        return "edge: " + ensureRoute(app) + " -> " + edge.scriptName();
+    }
+
+    /** 공개 주소 https://{app}.{zone}/ (prewarm 이 Worker 를 지나도록 이 주소로 연다) */
+    public String publicUrl(String app) {
+        return "https://" + label(app) + "." + normalize(settings.zoneName()) + "/";
+    }
+
+    private String ensureRoute(String app) {
         String pattern = pattern(app);
         if (route(pattern) == null) {
             ObjectNode body = MAPPER.createObjectNode();
@@ -248,7 +270,7 @@ public class EdgeWorker {
             body.put("script", edge.scriptName());
             api.call("POST", zone() + "/workers/routes", body);
         }
-        return "edge: " + pattern + " -> " + edge.scriptName() + ", fallback " + cloud;
+        return pattern;
     }
 
     /** 앱을 지운 뒤. 라우트와 ALB 를 가리키는 클라우드 주소만 지운다 */

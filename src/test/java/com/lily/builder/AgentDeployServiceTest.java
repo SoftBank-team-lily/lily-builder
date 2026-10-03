@@ -152,6 +152,57 @@ class AgentDeployServiceTest {
     }
 
     @Test
+    void 에이전트가_SUCCEEDED를_보내면_공개_주소에_엣지_라우트를_걸고_prewarm_결과를_로그에_남긴다() {
+        EdgeWorker edge = mock(EdgeWorker.class);
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        when(edge.enabled()).thenReturn(true);
+        when(edge.attachRoute("blog")).thenReturn("edge: blog.lilycloud.kr/* -> lily-edge");
+        when(edge.publicUrl("blog")).thenReturn("https://blog.lilycloud.kr/");
+        when(prewarm.warm("https://blog.lilycloud.kr/")).thenReturn("prewarm: 3/3 pages 200 from https://blog.lilycloud.kr/");
+        service.edgeWorker(edge, prewarm);
+        Build build = service.start(KEY, request("blog"));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(store.find(build.getId()).orElseThrow().getLogs()).containsSubsequence(
+                "agent: SUCCEEDED done",
+                "edge: blog.lilycloud.kr/* -> lily-edge",
+                "prewarm: 3/3 pages 200 from https://blog.lilycloud.kr/");
+    }
+
+    @Test
+    void 엣지_라우트를_걸지_못하면_prewarm하지_않고_빌드는_SUCCEEDED로_둔다() {
+        EdgeWorker edge = mock(EdgeWorker.class);
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        when(edge.enabled()).thenReturn(true);
+        when(edge.attachRoute("blog")).thenThrow(new IllegalStateException("cloudflare api 403"));
+        service.edgeWorker(edge, prewarm);
+        Build build = service.start(KEY, request("blog"));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getLogs()).contains("edge: failed cloudflare api 403");
+        verify(prewarm, never()).warm(anyString());
+    }
+
+    @Test
+    void 엣지가_꺼져_있으면_SUCCEEDED_뒤에_라우트를_걸지_않고_prewarm도_하지_않는다() {
+        EdgeWorker edge = mock(EdgeWorker.class);
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        when(edge.enabled()).thenReturn(false);
+        service.edgeWorker(edge, prewarm);
+        Build build = service.start(KEY, request("blog"));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        verify(edge, never()).attachRoute(anyString());
+        verify(prewarm, never()).warm(anyString());
+        assertThat(build.getLogs()).noneMatch(line -> line.startsWith("edge:") || line.startsWith("prewarm:"));
+    }
+
+    @Test
     void 에이전트가_실패를_보내면_FAILED() {
         Build build = service.start(KEY, request("blog"));
 

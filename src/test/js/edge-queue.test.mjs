@@ -1,4 +1,4 @@
-// edge/queue.js 테스트. Node 24 이상: node --test src/test/edge
+// edge/queue.js 테스트. Node 24 이상 (node:sqlite): gradle edgeTest 또는 node --test src/test/js/edge-queue.test.mjs
 // Durable Object 의 SQLite 저장소와 alarm 은 node:sqlite 와 메모리 값으로 흉내 낸다. 바깥 fetch 는 테스트가 정한다.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
