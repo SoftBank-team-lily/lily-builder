@@ -50,30 +50,47 @@ class CloudPolicyTest {
         assertThat(result.excluded()).extracting(CloudPolicy.Exclusion::reason).containsExactly("over_budget", "latency_exceeded");
     }
     @Test void unknownLowConfidenceAndNonFiniteAnswersUseRules() {
-        for (Answer answer : List.of(new Answer("azure",null,1), new Answer("aws",null,.7),
-                new Answer("aws",null,Double.NaN), new Answer("aws",null,1.1), new Answer("aws",.9,.9))) {
-            var result = decide((s,q) -> Optional.of(answer), "cost", candidates());
-            assertThat(result.provider()).isEqualTo("gcp");
+        for (Answer answer : List.of(new Answer("azure",null,1), new Answer("gcp",null,.7),
+                new Answer("gcp",null,Double.NaN), new Answer("gcp",null,1.1), new Answer("gcp",.9,.9))) {
+            // balanced 계산: aws 40/30+80/80=2.33, gcp 30/30+120/80=2.5
+            var result = decide((s,q) -> Optional.of(answer), "balanced", candidates());
+            assertThat(result.provider()).isEqualTo("aws");
             assertThat(result.source()).isEqualTo("rules");
         }
     }
-    @Test void priorityCannotBeOverriddenByModel() {
-        var result = decide((s,q) -> Optional.of(new Answer("aws",null,.99)), "cost", candidates());
-        assertThat(result.provider()).isEqualTo("gcp");
-        assertThat(result.reason()).isEqualTo("priority_enforced");
+    @Test void numericPrioritiesAreDecidedWithoutAskingModel() {
+        AtomicInteger calls = new AtomicInteger();
+        Jev jev = (s,q) -> { calls.incrementAndGet(); return Optional.of(new Answer("aws",null,.99)); };
+        var cost = decide(jev, "cost", candidates());
+        assertThat(cost.provider()).isEqualTo("gcp");
+        assertThat(cost.reason()).isEqualTo("priority_rules");
+        assertThat(decide(jev, "latency", candidates()).provider()).isEqualTo("aws");
+        assertThat(calls.get()).isZero();
     }
     @Test void holdDoesNotDeploy() {
         assertThat(decide((s,q) -> Optional.of(new Answer("hold",null,.9)), "balanced", candidates()).status()).isEqualTo("held");
     }
     @Test void modelFailureUsesRules() {
-        assertThat(decide((s,q) -> { throw new IllegalStateException("secret"); }, "cost", candidates()).provider()).isEqualTo("gcp");
+        var result = decide((s,q) -> { throw new IllegalStateException("secret"); }, "balanced", candidates());
+        assertThat(result.provider()).isEqualTo("aws");
+        assertThat(result.reason()).isEqualTo("jev_fallback");
     }
-    @Test void balancedIsDefaultAndModelCannotChooseStrictlyWorseCandidate() {
+    @Test void balancedIsDefaultAndDominantCandidateNeedsNoModel() {
         assertThat(request(null).priorityOrDefault()).isEqualTo("balanced");
-        var result = decide((s,q) -> Optional.of(new Answer("gcp",null,.99)), "balanced",
+        AtomicInteger calls = new AtomicInteger();
+        var result = decide((s,q) -> { calls.incrementAndGet(); return Optional.of(new Answer("hold",null,.99)); }, "balanced",
             List.of(candidate("aws","20",50,NOW),candidate("gcp","40",100,NOW)));
         assertThat(result.provider()).isEqualTo("aws");
-        assertThat(result.reason()).isEqualTo("dominated_choice");
+        assertThat(result.reason()).isEqualTo("dominant_candidate");
+        assertThat(calls.get()).isZero();
+    }
+    @Test void onlyTradeOffCandidatesAreOffered() {
+        var dominated = List.of(candidate("aws","20",50,NOW), candidate("gcp","40",100,NOW));
+        assertThat(CloudPolicy.paretoFront(dominated)).extracting(CloudPolicy.Candidate::provider).containsExactly("aws");
+        // 비용·P95가 같으면 어느 쪽도 지지 않는다
+        var tied = List.of(candidate("aws","30",80,NOW), candidate("gcp","30",80,NOW));
+        assertThat(CloudPolicy.paretoFront(tied)).hasSize(2);
+        assertThat(CloudPolicy.paretoFront(candidates())).hasSize(2);
     }
     @Test void modelStateWorksWithTheJevClientsPlainJsonMapper() {
         Jev jev = (state,question) -> {

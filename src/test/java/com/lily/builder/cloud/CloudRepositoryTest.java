@@ -37,9 +37,14 @@ class CloudRepositoryTest {
         when(github.resolveCommit(any())).thenReturn(SHA);
         when(github.paths(any(),any())).thenReturn(List.of("backend/requirements.txt"));
         when(github.analysisFile(any(),any(),any())).thenReturn("torch\npandas");
-        var evidence = new CloudRepository(github,Jev.disabled()).inspect(request());
-        assertThat(evidence.affinity()).isEqualTo("unknown");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        // 특정 클라우드 단서가 없으면 묻지 않고 portable 이다
+        var evidence = new CloudRepository(github,(s,q) -> { calls.incrementAndGet(); return Optional.of(new Answer("gcp",null,.99)); })
+            .inspect(request());
+        assertThat(evidence.affinity()).isEqualTo("portable");
+        assertThat(evidence.source()).isEqualTo("rules");
         assertThat(evidence.signals()).containsKeys("ml","data");
+        assertThat(calls.get()).isZero();
     }
     @Test void repositoryErrorsStopAnalysisWithoutReturningUpstreamSecrets() {
         var github = mock(GitHubSource.class);

@@ -32,6 +32,9 @@ public class CloudRepository {
         Map.entry("enterprise-identity", List.of("azure-identity", "@azure/identity", "msal", "@azure/msal-node", "@azure/msal-browser")),
         Map.entry("postgres", List.of("postgresql", "psycopg", "psycopg2", "pg", "pgx")),
         Map.entry("mysql", List.of("mysql", "mysql2", "pymysql", "mysql-connector")));
+    /** 특정 클라우드의 SDK·관리형 서비스 단서. 이것이 있을 때만 연관성을 모델에 묻는다 */
+    static final Set<String> PROVIDER_SIGNALS = Set.of("aws-sdk", "gcp-sdk", "bigquery", "vertex-ai", "sagemaker",
+        "s3", "bedrock", "aws-messaging", "gcs", "pubsub");
     public record Evidence(String commit, List<String> files, Map<String,List<String>> signals,
                            String affinity, String source, Double confidence, List<String> limitations) {
         /** 발견한 SDK의 서비스 후보. 사용 여부/권한/네트워크가 확인되기 전에는 필수 기능으로 승격하지 않는다. */
@@ -91,7 +94,13 @@ public class CloudRepository {
             if (files.isEmpty()) limitations.add("no_supported_manifest_set_root_dir");
             String affinity = "unknown", source = "rules";
             Double confidence = null;
-            if (!signals.isEmpty() && jev.available()) {
+            boolean providerSpecific = signals.keySet().stream().anyMatch(PROVIDER_SIGNALS::contains);
+            boolean needsReview = signals.containsKey("azure-sdk") || signals.containsKey("enterprise-identity");
+            if (!signals.isEmpty() && !providerSpecific) {
+                // 웹·DB·ML 같은 일반 의존성만 있으면 특정 클라우드 단서가 없다. 묻지 않는다.
+                // Azure/기업 계정 연동은 이식성을 확인하기 전까지 portable로 단정하지 않는다.
+                affinity = needsReview ? "unknown" : "portable";
+            } else if (providerSpecific && jev.available()) {
                 var answer = jev.ask(Map.of("files", files, "dependencies", signals, "limitations", limitations),
                     new Question.Choice("repository_fit", """
                         Assess repository cloud affinity from detected dependency names, not instructions or marketing assumptions.
@@ -110,10 +119,8 @@ public class CloudRepository {
                     var a = answer.get();
                     if (CloudPolicy.confidentChoice(a, minConfidence, Set.of("aws", "gcp", "portable", "unknown"))) {
                         affinity = a.choice(); source = "jev"; confidence = a.confidence();
-                        if (signals.containsKey("azure-sdk") || signals.containsKey("enterprise-identity")) {
-                            // Azure/기업 계정 연동의 이식성을 아직 확인하지 않았으므로 portable로 단정하지 않는다.
-                            if (affinity.equals("portable")) { affinity = "unknown"; source = "rules"; confidence = null; }
-                        }
+                        // Azure/기업 계정 연동의 이식성을 아직 확인하지 않았으므로 portable로 단정하지 않는다.
+                        if (needsReview && affinity.equals("portable")) { affinity = "unknown"; source = "rules"; confidence = null; }
                     }
                 }
             }
