@@ -93,6 +93,7 @@ public class BuildService {
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch()
                 + (build.getRootDir() == null ? "" : " dir=" + build.getRootDir()));
+        build.log("deploymentMode=" + request.deploymentModeOrDefault());
         if (note != null && !note.isBlank()) {
             build.log(note);
         }

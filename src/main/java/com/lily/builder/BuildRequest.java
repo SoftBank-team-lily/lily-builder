@@ -35,6 +35,8 @@ import java.util.Map;
  *                      있으면 DB 를 만들지 않고 마이그레이션도 보내지 않는다 (스키마는 온프레미스가 맡는다)
  * @param importDatabase 온프레미스 local DB 를 띄우기 전에 같은 appName 의 클라우드 RDS 데이터를 옮긴다
  *                      (클라우드 앱을 내 PC 로 옮길 때). postgres 만
+ * @param deploymentMode 배포 모드. HYBRID(기본): DB 는 RDS 이고 거점만 바뀐다.
+ *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·RDS 프로비저닝을 하지 않는다
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -55,7 +57,8 @@ public record BuildRequest(
         @Pattern(regexp = "cloud|local|external|") String databaseMode,
         @Size(max = 500) @Pattern(regexp = "((postgres|postgresql|mysql)://[!-~]+)?") String databaseUrl,
         Map<String, String> databaseEnv,
-        Boolean importDatabase) {
+        Boolean importDatabase,
+        @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode) {
 
     public static final int DEFAULT_TARGET_PORT = 8080;
 
@@ -66,7 +69,19 @@ public record BuildRequest(
                         Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
                         Map<String, String> databaseEnv) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
-                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv, null);
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv, null,
+                null);
+    }
+
+    /** 배포 모드를 정하지 않는다 (HYBRID) */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
+                        Map<String, String> databaseEnv, Boolean importDatabase) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase, null);
     }
 
     /** DB 위치는 정하지 않는다 (클라우드 배포, 또는 온프레미스 기본값 cloud) */
@@ -109,14 +124,14 @@ public record BuildRequest(
     public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase);
+                importDatabase, deploymentMode);
     }
 
     /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
     public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase);
+                importDatabase, deploymentMode);
     }
 
     /** 클라우드 RDS 데이터를 온프레미스 local DB 로 옮긴다 */
@@ -135,6 +150,15 @@ public record BuildRequest(
     /** 온프레미스 DB 위치. 비우면 cloud (이 필드 전의 동작) */
     public String databaseModeOrDefault() {
         return blank(databaseMode) ? "cloud" : databaseMode;
+    }
+
+    /** 배포 모드. 비우거나 알 수 없는 값이면 HYBRID (이 필드 전의 프로젝트) */
+    public String deploymentModeOrDefault() {
+        return "ONPREM_ONLY".equals(deploymentMode) ? "ONPREM_ONLY" : "HYBRID";
+    }
+
+    public boolean onPremOnly() {
+        return "ONPREM_ONLY".equals(deploymentModeOrDefault());
     }
 
     /** 호출자가 DB 접속 정보를 정해 보냈다 */

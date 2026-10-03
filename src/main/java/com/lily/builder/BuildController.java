@@ -219,7 +219,29 @@ public class BuildController {
     public record AddressRequest(String home) {
     }
 
-    /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409 */
+    /**
+     * 거점과 배포 모드. ONPREM_ONLY 는 거점이 onprem 으로 고정이다.
+     * HYBRID 는 에이전트가 보고한 home 이 있으면 그 값, 없으면 cloud.
+     */
+    @GetMapping("/api/apps/{appName}/home")
+    public ResponseEntity<?> homeState(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        String mode = agents.deploymentMode(appName);
+        String home = "ONPREM_ONLY".equals(mode) ? "onprem" : reportedHome(appName);
+        return ResponseEntity.ok(Map.of("home", home, "deploymentMode", mode));
+    }
+
+    private String reportedHome(String appName) {
+        return agents.burstState(appName)
+                .map(burst -> burst.state() == null ? "" : burst.state().path("home").asText(""))
+                .filter(value -> !value.isBlank())
+                .map(value -> value.toLowerCase().startsWith("onprem") ? "onprem" : "cloud")
+                .orElse("cloud");
+    }
+
+    /** 온프레미스 에이전트에 거점 전환을 보낸다. 최근 성공이 온프레미스가 아니면 409. 온프레미스 전용은 400 */
     @PostMapping("/api/apps/{appName}/home")
     public ResponseEntity<String> home(@PathVariable String appName, @RequestBody(required = false) HomeRequest request) {
         if (!APP_NAME.matcher(appName).matches()) {

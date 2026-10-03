@@ -75,6 +75,7 @@ public class AgentDeployService {
         }
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch() + " target=onprem agent=" + agentKey);
+        build.log("deploymentMode=" + request.deploymentModeOrDefault());
         store.save(build);
         running.put(build.getId(), agentKey);
         runner.run(() -> send(build, request, agentKey));
@@ -95,8 +96,12 @@ public class AgentDeployService {
             BuildRequest resolved = builds.detect(build, source.request(), commit, dockerfile, source.detectDir());
 
             String database = resolved.database();
-            String mode = request.databaseModeOrDefault();
-            boolean onPremDatabase = database != null && !database.isBlank() && !"cloud".equals(mode);
+            boolean only = request.onPremOnly();
+            if (only && request.importsDatabase()) {
+                throw new IllegalArgumentException("온프레미스 전용은 RDS 데이터를 옮기지 않는다");
+            }
+            String mode = only ? "local" : request.databaseModeOrDefault();
+            boolean onPremDatabase = database != null && !database.isBlank() && (!"cloud".equals(mode) || only);
             if (onPremDatabase) {
                 // DB 를 내 PC(local) 나 사용자가 준 주소(external) 에 둔다. RDS 를 만들지 않는다
                 if (!hub.supportsDatabaseMode(agentKey, mode)) {
@@ -125,8 +130,8 @@ public class AgentDeployService {
             }
             // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
             Map<String, String> databaseEnv = null;
-            boolean importing = onPremDatabase && request.importsDatabase();
-            if ((importing || !onPremDatabase) && database != null && !database.isBlank()
+            boolean importing = onPremDatabase && request.importsDatabase() && !only;
+            if (!only && (importing || !onPremDatabase) && database != null && !database.isBlank()
                     && hub.platformDatabase(agentKey)) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
                 databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
@@ -141,6 +146,7 @@ public class AgentDeployService {
             if (databaseEnv != null) {
                 job.put("databaseEnv", databaseEnv);
             }
+            job.put("deploymentMode", request.deploymentModeOrDefault());
             if (onPremDatabase) {
                 job.put("databaseMode", mode);
                 if ("external".equals(mode)) {
@@ -220,6 +226,9 @@ public class AgentDeployService {
         }
         if (!hub.connected(key.get())) {
             throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
+        }
+        if (onPremOnly(app)) {
+            throw new IllegalArgumentException("온프레미스 전용은 거점을 바꾸지 않는다");
         }
         String id = "h" + UUID.randomUUID().toString().replace("-", "").substring(0, 7);
         CompletableFuture<String> done = new CompletableFuture<>();
@@ -317,6 +326,20 @@ public class AgentDeployService {
                 .map(Build::getAppName);
     }
 
+    /** 이 앱의 가장 최근 빌드에 기록된 배포 모드. 기록이 없으면 HYBRID */
+    public String deploymentMode(String app) {
+        return onPremOnly(app) ? "ONPREM_ONLY" : "HYBRID";
+    }
+
+    /** 최근 빌드가 온프레미스 전용이다. 대기 배포·스케일·RDS 호출 전에 본다 */
+    public boolean onPremOnly(String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(build -> build.getLogs().stream().anyMatch(line -> line.startsWith("deploymentMode=ONPREM_ONLY")))
+                .orElse(false);
+    }
+
     /** 이 앱을 가장 최근에 이 에이전트로 배포했다. 플랫폼 존의 {app}.{zone} 을 그 에이전트만 다룬다 */
     public boolean ownedBy(String agentKey, String app) {
         return store.findAll().stream()
@@ -358,6 +381,9 @@ public class AgentDeployService {
         }
         if (!hub.supports(key.get(), "burst")) {
             throw new IllegalStateException("에이전트가 버스팅 설정을 받지 못하는 판이다. 최신 이미지로 다시 실행한다");
+        }
+        if (enabled && onPremOnly(app)) {
+            throw new IllegalArgumentException("온프레미스 전용은 버스팅을 쓰지 않는다");
         }
         try {
             hub.send(key.get(), json.writeValueAsString(Map.of(

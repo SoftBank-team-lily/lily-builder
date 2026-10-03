@@ -60,6 +60,9 @@ public class AgentBurst {
             String name = app.group(1);
             require(deploys.ownedBy(key, name), name + " 은 이 에이전트로 배포한 앱이 아니다");
             String action = app.group(2) == null ? "" : app.group(2);
+            if (deploys.onPremOnly(name) && !action.isEmpty()) {
+                throw new IllegalArgumentException("온프레미스 전용은 클라우드 대기 배포, 스케일, DB 프로비저닝을 하지 않는다");
+            }
             if (action.isEmpty() && "GET".equals(method)) {
                 CicdClient.AppStatus status = cicd.status(name);
                 require(status != null, name + " 의 클라우드 배포가 없다");

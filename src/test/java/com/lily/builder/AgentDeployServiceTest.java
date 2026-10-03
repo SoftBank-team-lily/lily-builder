@@ -299,6 +299,31 @@ class AgentDeployServiceTest {
     }
 
     @Test
+    void 온프레미스_전용은_RDS_프로비저닝과_거점_전환을_호출하지_않는다() throws Exception {
+        when(hub.supportsDatabaseMode(KEY, "local")).thenReturn(true);
+        when(hub.platformDatabase(KEY)).thenReturn(true);
+        when(hub.tunnel(KEY)).thenReturn(new AgentHub.Tunnel("172.17.0.1", 15432));
+
+        Build build = service.start(KEY, new BuildRequest(
+                "https://github.com/org/blog", null, null, null, "blog-1b62c0", 8080, "postgres", "/", "/",
+                Map.of(), null, null, null, null, null, "cloud", null, null, null, "ONPREM_ONLY"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+
+        verify(provisioner, never()).ensure(anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.anyInt());
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub).send(eq(KEY), sent.capture());
+        JsonNode job = new ObjectMapper().readTree(sent.getValue());
+        assertThat(job.path("deploymentMode").asText()).isEqualTo("ONPREM_ONLY");
+        assertThat(job.path("databaseMode").asText()).isEqualTo("local");
+        assertThat(job.path("databaseEnv").isMissingNode()).isTrue();
+
+        assertThatThrownBy(() -> service.home("blog-1b62c0", "cloud"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("온프레미스 전용");
+        verify(hub).send(eq(KEY), anyString());
+    }
+
+    @Test
     void 클라우드_앱을_옮기면_RDS_접속_정보와_import_를_잡에_싣는다() throws Exception {
         when(hub.supportsDatabaseMode(KEY, "local")).thenReturn(true);
         when(hub.supportsDatabaseMode(KEY, "import")).thenReturn(true);

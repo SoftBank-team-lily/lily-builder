@@ -69,7 +69,7 @@ public class BurstController {
                 request.rootDir(), request.appName(), request.targetPort(), given ? "" : request.database(),
                 request.readinessPath(), request.livenessPath(), request.env(), request.host(), true,
                 request.migrationsPath(), given ? Boolean.FALSE : request.migrate(), request.canaryPath(),
-                null, null, given ? request.databaseEnv() : null);
+                null, null, given ? request.databaseEnv() : null, null, request.deploymentMode());
     }
 
     @GetMapping("/builds/{id}")
