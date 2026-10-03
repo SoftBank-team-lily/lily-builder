@@ -7,3 +7,6 @@ build/
 *.iml
 .DS_Store
 bin/
+
+# 로컬 API 키
+.env.local

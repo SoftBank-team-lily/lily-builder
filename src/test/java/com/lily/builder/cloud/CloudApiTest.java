@@ -1,0 +1,130 @@
+package com.lily.builder.cloud;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lily.jev.Jev;
+import okhttp3.mockwebserver.*;
+import org.junit.jupiter.api.Test;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.util.List;
+import static org.mockito.Mockito.*;
+import static org.assertj.core.api.Assertions.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+class CloudApiTest {
+    static final String TOKEN = "test-only-token-012345678901234567890123";
+    static final ObjectMapper JSON = new ObjectMapper().findAndRegisterModules();
+    static CloudRepository repository() {
+        var repository = mock(CloudRepository.class);
+        when(repository.inspect(any())).thenReturn(new CloudRepository.Evidence("a".repeat(40),List.of("package.json"),
+            java.util.Map.of("web",List.of("next")),"portable","rules",null,List.of()));
+        return repository;
+    }
+    static CloudProperties props(String catalog, String worker) {
+        return new CloudProperties(TOKEN,catalog,"",300,"",new CloudProperties.Worker(worker,"","ap-northeast-2"),
+            new CloudProperties.Worker(worker,"","asia-northeast3"));
+    }
+    @Test void authenticatesAndValidatesBeforeCallingModel() throws Exception {
+        var service = mock(CloudService.class);
+        var workers = mock(CloudWorkers.class);
+        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository()))
+            .addFilters(new CloudTokenFilter(props("", ""))).build();
+        mvc.perform(post("/api/cloud/plans").servletPath("/api/cloud/plans").contentType("application/json").content("{}"))
+            .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/cloud/plans").servletPath("/api/cloud/plans").header("Authorization","Bearer " + TOKEN)
+            .contentType("application/json").content("{}"))
+            .andExpect(status().isBadRequest());
+        mvc.perform(post("/api/cloud/plans").servletPath("/api/cloud/plans").header("Authorization","Bearer " + TOKEN)
+            .contentType("application/json").content("x".repeat(262145)))
+            .andExpect(status().isPayloadTooLarge());
+        verifyNoInteractions(service,workers);
+    }
+    @Test void latestEvidenceCanCancelDispatch() {
+        var catalog = mock(CloudCatalog.class);
+        when(catalog.read()).thenReturn(CloudPolicyTest.candidates(), List.of());
+        var service = new CloudService(catalog, props("", "http://worker"), new CloudPolicy(Jev.disabled()),
+            Clock.fixed(CloudPolicyTest.NOW, ZoneOffset.UTC));
+        var r = CloudPolicyTest.request("cost");
+        var selected = service.plan(r);
+        assertThat(selected.provider()).isEqualTo("gcp");
+        assertThat(service.recheck(r,selected).reason()).isEqualTo("changed_before_dispatch");
+    }
+    @Test void repositoryFailureNeverStartsAWorker() throws Exception {
+        var service = mock(CloudService.class);
+        var workers = mock(CloudWorkers.class);
+        var repository = mock(CloudRepository.class);
+        when(repository.inspect(any())).thenThrow(new CloudRepository.Unavailable());
+        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository)).build();
+        var body = JSON.createObjectNode();
+        body.set("policy",JSON.valueToTree(CloudPolicyTest.request("balanced")));
+        body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
+        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
+            .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("repository_analysis_unavailable"));
+        verifyNoInteractions(service,workers);
+    }
+    @Test void readsCatalogAndRoutesSelectedGcpBuildThenPollsSameProvider() throws Exception {
+        try (MockWebServer catalog = new MockWebServer(); MockWebServer worker = new MockWebServer()) {
+            catalog.start(); worker.start();
+            var snapshot = JSON.writeValueAsString(java.util.Map.of("candidates",CloudPolicyTest.candidates()));
+            catalog.enqueue(new MockResponse().setBody(snapshot));
+            catalog.enqueue(new MockResponse().setBody(snapshot));
+            worker.enqueue(new MockResponse().setResponseCode(202).setBody("{\"id\":\"abc123\",\"status\":\"QUEUED\",\"token\":\"hidden\"}"));
+            worker.enqueue(new MockResponse().setBody("{\"id\":\"abc123\",\"status\":\"SUCCEEDED\"}"));
+            var p = props(catalog.url("/snapshot").toString(),worker.url("/").toString());
+            var service = new CloudService(new CloudCatalog(p,JSON),p,new CloudPolicy(Jev.disabled()),Clock.fixed(CloudPolicyTest.NOW,ZoneOffset.UTC));
+            var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,new CloudWorkers(p,JSON),repository())).build();
+            var body = JSON.createObjectNode();
+            body.set("policy",JSON.valueToTree(CloudPolicyTest.request("cost")));
+            body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\",\"database\":\"postgres\"}"));
+            mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
+                .andExpect(status().isAccepted()).andExpect(jsonPath("$.decision.provider").value("gcp"))
+                .andExpect(jsonPath("$.statusPath").value("/api/cloud/builds/gcp/abc123"))
+                .andExpect(jsonPath("$.build.token").doesNotExist());
+            var posted = worker.takeRequest();
+            assertThat(posted.getPath()).isEqualTo("/api/builds");
+            assertThat(JSON.readTree(posted.getBody().readUtf8()).path("sourceCommit").asText()).isEqualTo("a".repeat(40));
+            mvc.perform(get("/api/cloud/builds/gcp/abc123")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("SUCCEEDED"));
+            assertThat(worker.takeRequest().getPath()).isEqualTo("/api/builds/abc123");
+        }
+    }
+    @Test void rejectsFailedWorkerWithoutRetryOrOtherCloud() throws Exception {
+        try (MockWebServer worker = new MockWebServer()) {
+            worker.start(); worker.enqueue(new MockResponse().setResponseCode(500).setBody("secret detail"));
+            var workers = new CloudWorkers(props("",worker.url("/").toString()),JSON);
+            var request = JSON.readValue("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}",com.lily.builder.BuildRequest.class);
+            assertThatThrownBy(() -> workers.start("gcp",request)).hasMessage("dispatch_unconfirmed");
+            assertThat(worker.getRequestCount()).isEqualTo(1);
+        }
+    }
+    @Test void heldPlanNeverStartsAWorker() throws Exception {
+        var service = mock(CloudService.class);
+        var workers = mock(CloudWorkers.class);
+        when(service.plan(any(),anyMap())).thenReturn(CloudPolicy.held("no_eligible_cloud",List.of(),List.of(),CloudPolicyTest.NOW));
+        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository())).build();
+        var body = JSON.createObjectNode();
+        body.set("policy",JSON.valueToTree(CloudPolicyTest.request("cost")));
+        body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
+        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isConflict());
+        verifyNoInteractions(workers);
+    }
+    @Test void redirectsNeverForwardWorkerTokens() throws Exception {
+        try (MockWebServer worker = new MockWebServer(); MockWebServer destination = new MockWebServer()) {
+            worker.start(); destination.start();
+            worker.enqueue(new MockResponse().setResponseCode(302).setHeader("Location",destination.url("/other")));
+            var workers = new CloudWorkers(props("",worker.url("/").toString()),JSON);
+            assertThatThrownBy(() -> workers.get("gcp","abc123")).hasMessage("worker_unavailable");
+            assertThat(destination.getRequestCount()).isZero();
+        }
+    }
+    @Test void unavailableCatalogAndMalformedBodyAreEmpty() throws Exception {
+        try (MockWebServer catalog = new MockWebServer()) {
+            catalog.start(); catalog.enqueue(new MockResponse().setResponseCode(503));
+            catalog.enqueue(new MockResponse().setBody("{broken"));
+            var source = new CloudCatalog(props(catalog.url("/").toString(),""),JSON);
+            assertThat(source.read()).isEmpty();
+            assertThat(source.read()).isEmpty();
+        }
+    }
+}

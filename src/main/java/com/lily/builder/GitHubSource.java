@@ -54,6 +54,7 @@ public class GitHubSource {
 
     /** 브랜치 끝 커밋 SHA */
     public String resolveCommit(BuildRequest request) {
+        if (request.sourceCommit() != null && request.sourceCommit().matches("[0-9a-f]{40}")) return request.sourceCommit();
         try {
             String sha = get(request, URI.create(apiBase + "/repos/" + repo(request) + "/commits/" + request.branchOrDefault()))
                     .header(HttpHeaders.ACCEPT, "application/vnd.github.sha")
@@ -143,6 +144,20 @@ public class GitHubSource {
         } catch (HttpClientErrorException.NotFound e) {
             return null;
         }
+    }
+
+    /** AI 분석용 manifest: 응답을 메모리에 전부 읽기 전에 크기를 제한한다. */
+    public String analysisFile(BuildRequest request, String commit, String path) {
+        String root = request.rootDir() == null ? "" : request.rootDir();
+        String joined = (root + "/" + path).replaceAll("/+", "/").replaceAll("^/", "");
+        return get(request, URI.create(rawBase + "/" + repo(request) + "/" + commit + "/" + joined))
+            .exchange((req, response) -> {
+                if (response.getStatusCode().value() == 404) return null;
+                if (!response.getStatusCode().is2xxSuccessful()) throw new IllegalStateException("repository_unavailable");
+                byte[] bytes = response.getBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalStateException("manifest_too_large");
+                return new String(bytes, StandardCharsets.UTF_8);
+            });
     }
 
     /** 커밋의 최상위 폴더 이름. 점으로 시작하는 폴더(.github 등)는 뺀다 */

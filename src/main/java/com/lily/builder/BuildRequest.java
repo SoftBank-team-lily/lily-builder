@@ -37,6 +37,7 @@ import java.util.Map;
  *                      (클라우드 앱을 내 PC 로 옮길 때). postgres 만
  * @param deploymentMode 배포 모드. HYBRID(기본): DB 는 RDS 이고 거점만 바뀐다.
  *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·RDS 프로비저닝을 하지 않는다
+ * @param sourceCommit 저장소 분석 후 고정한 40자리 SHA. 비우면 branch의 최신 커밋을 사용한다
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -58,7 +59,25 @@ public record BuildRequest(
         @Size(max = 500) @Pattern(regexp = "((postgres|postgresql|mysql)://[!-~]+)?") String databaseUrl,
         Map<String, String> databaseEnv,
         Boolean importDatabase,
-        @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode) {
+        @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode,
+        @Pattern(regexp = "[0-9a-f]{40}") String sourceCommit) {
+
+    /** 분석과 빌드가 동일한 커밋을 사용하도록 고정한다. */
+    public BuildRequest withCommit(String commit) {
+        return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath,
+            livenessPath, env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl,
+            databaseEnv, importDatabase, deploymentMode, commit);
+    }
+
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String,String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
+                        Map<String,String> databaseEnv, Boolean importDatabase, String deploymentMode) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+            env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+            importDatabase, deploymentMode, null);
+    }
 
     public static final int DEFAULT_TARGET_PORT = 8080;
 
@@ -124,14 +143,14 @@ public record BuildRequest(
     public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase, deploymentMode);
+                importDatabase, deploymentMode, sourceCommit);
     }
 
     /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
     public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase, deploymentMode);
+                importDatabase, deploymentMode, sourceCommit);
     }
 
     /** 클라우드 RDS 데이터를 온프레미스 local DB 로 옮긴다 */

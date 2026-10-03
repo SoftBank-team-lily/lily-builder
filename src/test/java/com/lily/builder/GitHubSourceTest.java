@@ -40,6 +40,15 @@ class GitHubSourceTest {
     }
 
     @Test
+    void 분석파일은_크기를_제한하고_같은_커밋에서_읽는다() {
+        server.expect(requestTo("http://raw/org/repo/" + SHA + "/backend/package.json"))
+            .andRespond(withSuccess("x".repeat(65537), MediaType.TEXT_PLAIN));
+        assertThatThrownBy(() -> source.analysisFile(request("backend",null,null,null),SHA,"package.json"))
+            .hasMessage("manifest_too_large");
+        server.verify();
+    }
+
+    @Test
     void 브랜치_끝_커밋을_읽는다() {
         server.expect(requestTo("http://api/repos/org/repo/commits/feature/x"))
                 .andExpect(header("Accept", "application/vnd.github.sha"))

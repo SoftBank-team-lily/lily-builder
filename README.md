@@ -28,6 +28,15 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 
 ## API
 
+### 저장소 분석 기반 AWS/GCP 선택
+
+`POST /api/cloud/repository`로 의존성에서 JEV가 클라우드 연관성을 판단하고,
+`POST /api/cloud/builds`로 예산·P95·실행기 준비 여부를 검사한 뒤 배포 대상을 선택할 수 있다.
+기본 정책은 비용·속도 균형이다. 실제 가격/관측 catalog와 클라우드별 worker 연결이 필요하며,
+GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변수·연결 순서](docs/cloud-placement.md).
+
+### 기존 빌드 API
+
 | Method | Path | 설명 |
 |---|---|---|
 | POST | `/api/builds` | 빌드·배포 시작. 바로 `202` 와 id 를 돌려준다 |
