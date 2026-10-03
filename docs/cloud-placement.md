@@ -4,12 +4,16 @@
 
 `feature/cloud-placement`는 builder에 선택 API를 추가한다. 기본 정책은 **비용·속도 균형**이다.
 
-1. GitHub의 커밋을 고정하고 `rootDir`의 의존성 파일을 읽는다.
-2. 알려진 ML·데이터·웹·클라우드 SDK 의존성을 추출해 JEV가 클라우드 연관성을 판단한다.
+1. GitHub의 커밋을 고정하고, 실제 배포가 빌드할 앱 폴더의 의존성 파일을 읽는다.
+2. 알려진 ML·데이터·웹·클라우드 SDK 의존성을 추출한다. AWS·GCP SDK나 관리형 서비스 단서가 있을 때만 JEV가 클라우드 연관성을 판단한다.
 3. 서버가 수집한 같은 작업 규모의 비용·P95와 배포 가능 여부로 후보를 제한한다.
-4. 남은 후보를 JEV가 선택한다. 불확실하거나 호출에 실패하면 수치 기반 규칙을 사용한다.
+4. 규칙으로 정할 수 없는 경우(`balanced`이고 비용·P95가 엇갈리는 후보가 둘 이상)에만 JEV가 선택한다. 불확실하거나 호출에 실패하면 수치 기반 규칙을 사용한다.
 5. 실행 직전에 관측값을 다시 확인하고 선택한 worker의 기존 `/api/builds`로 전달한다.
 6. 같은 provider의 worker에서 상태를 조회한다.
+
+같은 질문·같은 상태의 JEV 답은 lily-jev `CachedJev`로 정해 둔 시간(기본 900초) 동안 다시 쓴다.
+그래서 미리보기(`/repository`)와 실제 배포(`/builds`)가 같은 근거에서 같은 결론을 낸다.
+모델 입력에는 관측 시각을 넣지 않는다(신선도는 규칙이 확인한다). 같은 근거를 다시 수집해도 같은 답을 쓴다.
 
 현재 GCP 환경은 없다. **GCP worker·실제 가격/관측 데이터 수집기·프론트 호출은 별도 연결이 필요하다.**
 이 브랜치는 GKE 리소스를 생성하지 않으며 기존 `/api/builds` 요청을 자동으로 이 경로로 바꾸지 않는다.
@@ -20,10 +24,14 @@ Groq의 코드 수정 기능도 이 API와 별개다. JEV는 저장소 특성과
 지원 파일: `package.json`, `requirements.txt`, `pyproject.toml`, `pom.xml`,
 `build.gradle`, `build.gradle.kts`, `go.mod`, `Cargo.toml`, `Gemfile`.
 
-- `rootDir` 바로 아래의 파일만 분석한다. 모노레포에서는 실제 배포할 앱의 폴더를 지정한다.
+- 실제 배포가 빌드할 앱 폴더 바로 아래의 파일만 분석한다. `rootDir`를 비우면 배포(`BuildService.source`)·`/api/detect`와
+  같은 방법으로 폴더를 찾는다. 하위 폴더 하나에 있는 앱이면 그 폴더, 백엔드+프론트 묶음이면 백엔드 폴더다. 응답의 `repository.dir`로 알려 준다.
+- 빌드할 앱이 없거나 폴더가 여러 개라 하나로 정하지 못하면 422 `build_folder_unresolved`다. 화면이 폴더를 지정하게 한다.
 - manifest당 64 KiB 제한. 접근 실패나 크기 초과는 분석 실패로 처리한다.
 - manifest 원문, README, `.env`, 토큰, 환경변수, 임의 소스 코드는 JEV로 전송하지 않는다.
 - 서버에서 정해 둔 의존성 이름만 추출해 전달한다. 저장소 코드를 실행하지 않는다.
+- `pom.xml`의 groupId/artifactId는 `group:artifact`로 읽는다. 줄 전체가 `#`·`//` 주석이거나 XML 주석인 부분은 읽지 않는다.
+- Java AWS SDK v2 모듈(`software.amazon.awssdk:s3`·`sqs`·`sns`·`bedrock`·`bedrockruntime`)은 npm 패키지와 같은 서비스 단서다.
 - 이는 의존성 문자열의 정적 분석이다. 실제 사용 여부·GPU 필요 여부·학습량·데이터 위치를 증명하지 않는다.
 - 지원 manifest가 없으면 분석 응답에 한계를 표시하고 배포는 `repository_manifest_required`로 보류한다.
 
@@ -37,7 +45,13 @@ Groq의 코드 수정 기능도 이 API와 별개다. JEV는 저장소 특성과
 
 `repository.affinity`는 `aws | gcp | portable | unknown`, `source`는 `jev | rules`다.
 실제 선택인 `decision.provider`와 구분한다. GCP 연관성이 있어도 GCP 실행기가 없으면 GCP로 배포하지 않는다.
-JEV 응답 신뢰도가 0.8 미만이거나 유효하지 않으면 연관성은 `unknown`으로 남는다.
+
+| 의존성 단서 | 연관성 |
+|---|---|
+| AWS·GCP SDK나 관리형 서비스 단서가 있음 | JEV가 판단. 신뢰도가 기준(기본 0.8) 미만이거나 유효하지 않으면 `unknown` |
+| 웹·DB·ML·데이터 같은 일반 의존성만 있음 | JEV에 묻지 않고 규칙으로 `portable` |
+| Azure·기업 계정 단서만 있음 | JEV에 묻지 않고 규칙으로 `unknown` (통합 검토 필요) |
+| 아는 의존성이 없음 | `unknown` |
 
 `sourceCommit`으로 분석한 SHA를 worker에 전달한다. worker도 이 브랜치의 BuildRequest/GitHubSource를
 포함한 버전이어야 한다. catalog의 `pinned-source-v1`은 해당 버전을 배포한 뒤에만 등록한다.
@@ -47,14 +61,18 @@ JEV 응답 신뢰도가 0.8 미만이거나 유효하지 않으면 연관성은 
 - 실행기 URL·지역이 등록되어 있고, 요청 profile·허용 지역·필요 기능이 일치해야 한다.
 - 월 예상 비용이 예산 이하이고 P95가 상한 이하여야 한다.
 - 데이터는 기본 300초 이내여야 한다. 미래 시각 30초 초과, 누락/잘못된 값, 같은 profile의 중복 provider는 보류한다.
-- `cost`: 비용 최소, 동률이면 P95 최소.
-- `latency`: P95 최소, 동률이면 비용 최소.
+- `cost`: 비용 최소, 동률이면 P95 최소. JEV에 묻지 않는다(`priority_rules`).
+- `latency`: P95 최소, 동률이면 비용 최소. JEV에 묻지 않는다(`priority_rules`).
 - `balanced` **기본값**: 비용과 P95를 동등하게 고려하고 저장소 연관성을 참고한다.
-  JEV 실패 시 `비용 / 후보 최소 비용 + P95 / 후보 최소 P95`가 최소인 후보를 선택한다.
-  분모는 각각 최소 $0.01, 1ms다. 완전 동률이면 provider 이름순으로 정한다.
-- 모델이 비용과 P95 모두에서 열등한 후보를 고르거나 명시한 cost/latency 우선순위를 어기면 규칙으로 대체한다.
+  - 한 후보가 비용과 P95 모두 앞서면 그 후보다. JEV에 묻지 않는다(`dominant_candidate`).
+  - 비용·P95가 서로 엇갈리는 후보(파레토 앞선)가 둘 이상일 때만 JEV에 묻는다. 선택지는 그 후보들과 `hold`뿐이라
+    모델이 둘 다 열등한 후보를 고를 수 없다.
+  - JEV 실패·확신 부족 시 `비용 / 후보 최소 비용 + P95 / 후보 최소 P95`가 최소인 후보를 선택한다(`jev_fallback`).
+    분모는 각각 최소 $0.01, 1ms다. 완전 동률이면 provider 이름순으로 정한다.
 - JEV가 높은 신뢰도로 `hold`를 반환하면 보류한다. 후보가 하나이거나 수동 provider를 지정하면 규칙으로 선택한다.
 - 실행 직전 조건이 바뀌면 `changed_before_dispatch`로 보류한다. 다른 provider로 몰래 바꾸지 않는다.
+- catalog를 설정하지 않았으면 `catalog_unconfigured`, 읽지 못했으면 `catalog_unavailable`로 보류한다.
+  정상 응답에 후보가 없을 때의 `no_eligible_cloud`와 구분한다. 실행 직전 재확인에서 읽지 못해도 같은 사유다.
 
 예산은 예상값에 대한 필터이며 실제 청구액 상한 기능은 아니다. 저장소 분석으로 가격이나 성능을 만들어내지 않는다.
 
@@ -96,9 +114,15 @@ JEV 응답 신뢰도가 0.8 미만이거나 유효하지 않으면 연관성은 
 private 저장소는 `build.token`으로 전달한다. 모델에는 보내지 않고 저장소 읽기와 선택된 worker의 빌드에만 사용한다.
 
 배포 응답은 202 `{decision, repository, build, statusPath}`다. 저장소 분석 실패는 422,
-선택 보류는 409다. worker 응답 문제는 502와 `retryable:false`를 반환한다.
-응답이 끊겨도 worker에 이미 접수되었을 수 있으므로 **자동 POST 재시도·다른 클라우드 재전송을 하지 않는다.**
-앱 이름으로 worker 이력을 먼저 확인한다. 호출자가 반복 POST하는 것까지 막는 영속 idempotency 저장소는 아직 없다.
+선택 보류는 409다.
+
+- worker가 4xx로 거절하면 502 `dispatch_rejected`, `retryable:true`다. 접수되지 않은 것이 확실하다.
+- 그 밖의 worker 문제(5xx·시간 초과)는 502 `dispatch_unconfirmed`, `retryable:false`다.
+  응답이 끊겨도 worker에 이미 접수되었을 수 있으므로 **자동 POST 재시도·다른 클라우드 재전송을 하지 않는다.**
+- 같은 앱 이름으로 10분 안에 보낸 배포가 있으면 worker를 부르지 않고 409 `build_already_started`와
+  먼저 보낸 배포의 `statusPath`를 돌려준다. 거절(`dispatch_rejected`)된 배포만 바로 다시 보낼 수 있다.
+- 이 중복 방지는 builder 프로세스 메모리에만 있다. 재시작이나 여러 replica 사이의 반복 POST는
+  frontend의 배포 기록이 막아야 한다. worker 이력 API는 전체 이력을 로그와 함께 돌려줘 배포마다 조회하지 않는다.
 
 상태 응답은 id/appName/status/url/stage/stageName/createdAt/updatedAt/commit만 반환한다.
 전체 로그·AI 수정 진행 이벤트·앱 삭제/롤백/DB 이전은 이 프록시에 아직 연결하지 않았다.
@@ -172,7 +196,10 @@ catalog의 해당 기능은 네트워크·권한·서비스 연결이 확인된 
 | 변수 | 설정 위치/용도 |
 |---|---|
 | `CLOUD_API_TOKEN` | 선택 API 인증용 서버 비밀값, 최소 32자. 프론트의 서버 코드에서만 사용 |
-| `JEV_API_KEY` | 저장소 연관성·최종 후보 선택. 없으면 unknown/규칙 기반 선택 |
+| `JEV_API_KEY` | 저장소 연관성·최종 후보 선택. 없으면 규칙 기반 연관성·선택 |
+| `CLOUD_JEV_MODEL` | JEV 모델 이름. 비우면 lily-jev 기본값 `jev-latest`(버전 미고정) |
+| `CLOUD_JEV_MIN_CONFIDENCE` | 연관성·선택 답을 받아들일 최소 확신도. 기본 0.8, 0 초과 1 이하가 아니면 시작하지 않음 |
+| `CLOUD_JEV_CACHE_SECONDS` | 같은 상태의 JEV 답을 다시 쓰는 시간. 기본 900, 0이면 끔 |
 | `CLOUD_CATALOG_URL` | 운영자가 제공하는 관측 snapshot GET API 전체 URL |
 | `CLOUD_CATALOG_TOKEN` | catalog Bearer 토큰, 필요할 때 설정 |
 | `CLOUD_MAX_AGE_SECONDS` | 기본 300, 허용 1~3600 |
@@ -238,6 +265,8 @@ provider당 실행기는 한 지역을 지원한다. GPU/BigQuery 연결 가능 
 ## 테스트
 
 JDK 21과 형제 폴더 `../lily-jev` 또는 프로젝트 설정에 맞는 composite build 경로가 필요하다.
+`CachedJev`와 모델 이름 설정이 있는 lily-jev(`feature/jev-reuse`의 `afe6e85` 이후)가 있어야 컴파일된다.
+이미지 빌드는 Dockerfile의 `JEV_REF` 커밋을 받으므로 lily-jev 커밋을 GitHub에 올린 뒤에 빌드한다.
 
 ```sh
 ./gradlew test --tests 'com.lily.builder.cloud.*'
@@ -248,7 +277,9 @@ JDK 21과 형제 폴더 `../lily-jev` 또는 프로젝트 설정에 맞는 compo
 이 테스트는 클라우드 리소스를 생성하거나 실제 배포를 시작하지 않는다.
 
 자동 테스트 범위: 정책 필터·균형 기본값·잘못된 모델 응답·JSON 직렬화·토큰·본문 제한·실행 전 재확인,
-worker HTTP 전달/상태 조회/재시도 방지, 저장소 rootDir·SHA 고정·모델 입력 비밀값 제외.
+worker HTTP 전달/상태 조회/재시도 방지, 저장소 rootDir·SHA 고정·모델 입력 비밀값 제외,
+배포와 같은 앱 폴더 분석, JEV 호출 조건(우선순위·우세 후보·SDK 단서), 미리보기·배포의 같은 결론,
+catalog 미설정·장애 사유, 같은 앱 중복 전송, Java AWS SDK·Maven·주석 처리.
 GCP 실제 배포·실제 비용 절감·실사용 성능은 GCP 환경과 관측 수집기를 연결한 뒤 별도 검증해야 한다.
 
 ### 2026-10-03 검증 기록
@@ -267,3 +298,12 @@ GCP 실제 배포·실제 비용 절감·실사용 성능은 GCP 환경과 관�
 - 데이터 위치/단일 운영/필수 서비스 조건, 조건 충돌, 미지원 환경, 실행 직전 조건 유지,
   API 입력 검증과 context 전달, 기업 계정 SDK의 이식성 미확정 처리를 확인했다.
 - 이 보완 작업에서는 실제 JEV와 클라우드 worker를 호출하지 않았다.
+
+### 리뷰 반영 후 검증 (2026-10-03)
+
+- 반영: 분석 폴더를 배포와 같게, JEV는 규칙으로 정할 수 없을 때만, 같은 상태의 답 재사용, catalog 장애 사유 구분,
+  같은 앱 중복 전송 방지, Java AWS SDK·Maven·주석 처리, 확신도·모델 설정.
+- Docker JDK 21에서 전체 `./gradlew test`: 214개 중 210개 통과, 4개 건너뜀(실제 JEV 3개, 기존 1개), 실패 0개.
+- lily-jev `feature/jev-reuse`: 10개 통과.
+- 실제 JEV 테스트(`CloudLiveTest`)는 키가 없어 실행하지 않았다. 이제 일반 의존성만 있는 `lily-blog-sample`은 JEV에 묻지 않고
+  `portable`이어야 하며, 실제 JEV 호출은 합성 GCP SDK manifest와 비용·P95가 엇갈리는 후보로 확인하도록 바꿨다.
