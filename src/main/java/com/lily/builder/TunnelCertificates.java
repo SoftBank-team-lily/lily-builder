@@ -83,6 +83,43 @@ public class TunnelCertificates {
         }
     }
 
+    /**
+     * 클러스터 Job 이 배스천으로 DB 터널(-L)만 여는 일회용 키와 인증서. 앱을 다른 클라우드로 옮길 때 DB 복사 Job 이 쓴다.
+     * 역방향 포트는 주지 않는다. 에이전트 인증서와 key ID 가 겹치지 않게 {@code job-{name}} 으로 서명한다.
+     *
+     * @param name    Job 이름 ([a-z0-9-])
+     * @param minutes 유효 시간
+     */
+    public JobKey jobKey(String name, int minutes) {
+        if (!enabled()) {
+            throw new IllegalStateException("DB 터널 CA 가 설정되지 않았다");
+        }
+        if (!name.matches("[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")) {
+            throw new IllegalArgumentException("Job 이름이 아니다: " + name);
+        }
+        Path dir = null;
+        try {
+            dir = Files.createTempDirectory("lily-job-key");
+            Path key = dir.resolve("id");
+            run(List.of("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "job-" + name, "-f", key.toString()));
+            run(List.of("ssh-keygen", "-q", "-s", ca().toString(),
+                    "-I", "job-" + name,
+                    "-n", settings.sshUser(),
+                    "-V", "-5m:+" + Math.max(1, minutes) + "m",
+                    "-O", "clear", "-O", "permit-port-forwarding",
+                    dir.resolve("id.pub").toString()));
+            return new JobKey(Files.readString(key), Files.readString(dir.resolve("id-cert.pub")).trim());
+        } catch (IOException e) {
+            throw new IllegalStateException("Job 키를 만들지 못했다: " + e.getMessage(), e);
+        } finally {
+            deleteQuietly(dir);
+        }
+    }
+
+    /** @param privateKey OpenSSH 개인키 본문, @param certificate 그 공개키의 인증서 한 줄 */
+    public record JobKey(String privateKey, String certificate) {
+    }
+
     /** ssh-keygen 은 다른 사용자가 읽을 수 있는 개인키를 거절한다. 환경변수의 키를 소유자 전용 파일로 한 번 옮긴다 */
     private synchronized Path ca() throws IOException {
         if (caFile == null) {

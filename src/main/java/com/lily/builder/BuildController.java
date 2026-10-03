@@ -39,6 +39,8 @@ public class BuildController {
     private final EdgeWorker edge;
     /** 온프레미스 앱 삭제. 테스트 생성자에서는 null (클라우드 앱만 지운다) */
     private final OnPremAppRemoval onPrem;
+    /** 다른 클라우드로 옮기는 중인 앱의 배포·롤백·내리기를 막는다. 테스트 생성자에서는 null */
+    private final AppMigration migration;
     private final ObjectMapper json = new ObjectMapper();
 
     BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
@@ -46,9 +48,15 @@ public class BuildController {
         this(service, clusterApps, CloudRouting.awsOnly(cicd), agents, addresses, EdgeWorker.disabled(), null);
     }
 
-    @Autowired
     public BuildController(BuildService service, ClusterApps clusterApps, CloudRouting clouds, AgentDeployService agents,
                            AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem) {
+        this(service, clusterApps, clouds, agents, addresses, edge, onPrem, null);
+    }
+
+    @Autowired
+    public BuildController(BuildService service, ClusterApps clusterApps, CloudRouting clouds, AgentDeployService agents,
+                           AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem, AppMigration migration) {
+        this.migration = migration;
         this.onPrem = onPrem;
         this.edge = edge;
         this.service = service;
@@ -60,8 +68,22 @@ public class BuildController {
 
     /** 빌드·배포는 몇 분 걸려서 바로 id 만 돌려준다. 진행 상황은 GET 으로 본다 */
     @PostMapping("/api/builds")
-    public ResponseEntity<Build> start(@Valid @RequestBody BuildRequest request) {
+    public ResponseEntity<?> start(@Valid @RequestBody BuildRequest request) {
+        Optional<String> conflict = migration == null ? Optional.empty() : migration.conflict(request);
+        if (conflict.isPresent()) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(conflict.get()));
+        }
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.start(request));
+    }
+
+    /** 다른 클라우드로 옮기는 중이면 409. 아니면 null */
+    private ResponseEntity<String> moving(String appName) {
+        if (migration == null || !migration.inProgress(appName)) {
+            return null;
+        }
+        return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                .body(rejected(appName + " 은 다른 클라우드로 옮기는 중이다"));
     }
 
     /** 배포 전에 레포가 쓰는 DB 를 본다. 화면이 사용자에게 맞는지 묻는다 */
@@ -122,6 +144,9 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
+        if (moving(appName) != null) {
+            return moving(appName);
+        }
         try {
             Optional<String> onprem = agents.rollback(appName);
             if (onprem.isPresent()) {
@@ -141,6 +166,9 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
+        if (moving(appName) != null) {
+            return moving(appName);
+        }
         return passthrough(clouds.cicdOf(appName).stop(appName));
     }
 
@@ -149,6 +177,9 @@ public class BuildController {
     public ResponseEntity<String> startApp(@PathVariable String appName) {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
+        }
+        if (moving(appName) != null) {
+            return moving(appName);
         }
         return passthrough(clouds.cicdOf(appName).start(appName));
     }
@@ -163,6 +194,9 @@ public class BuildController {
                                          @RequestParam(defaultValue = "false") boolean database) {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
+        }
+        if (moving(appName) != null) {
+            return moving(appName);
         }
         if (onPrem != null) {
             try {
@@ -179,6 +213,10 @@ public class BuildController {
             }
         }
         CicdClient.Passthrough removed = clouds.cicdOf(appName).remove(appName, database);
+        if (removed.status() == 200 && migration != null) {
+            // 다른 클라우드로 옮긴 뒤 정리 전이면 원본 클러스터의 replicas 0 앱과 DB 도 지운다
+            migration.onRemoved(appName);
+        }
         if (removed.status() == 200 && addresses.enabled()) {
             try {
                 addresses.removeCloud(appName);

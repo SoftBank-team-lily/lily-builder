@@ -108,6 +108,40 @@ public class BuildService {
 
     /** @param note 큐에 넣을 때 같이 남길 줄 (예: 대기 배포를 요청한 에이전트) */
     public Build start(BuildRequest request, String note) {
+        return start(request, note, null);
+    }
+
+    /**
+     * 다른 클라우드로 옮길 때 ({@link AppMigration}): 이미지만 만들어 레지스트리에 올리고 lily-cicd 로 보내지 않는다.
+     * 다운타임 전에 빌드를 끝내 두려고 나눈다. 성공하면 SUCCEEDED 와 이미지·커밋이 남는다
+     */
+    public Build prepareImage(BuildRequest request, String note) {
+        return start(request, note, Prepared.IMAGE_ONLY);
+    }
+
+    /**
+     * 다른 클라우드로 옮길 때: {@link #prepareImage} 로 만든 이미지를 같은 커밋으로 배포만 한다.
+     * 공개 주소는 바꾸지 않는다 (옮기는 쪽이 확인한 뒤 바꾼다)
+     */
+    public Build deployImage(BuildRequest request, String image, String commit, String note) {
+        return start(request, note, new Prepared(image, commit));
+    }
+
+    /**
+     * 옮기기용 빌드의 단계. null 이면 보통 배포 (빌드부터 주소까지).
+     *
+     * @param image  만들어 둔 이미지. null 이면 이미지만 만들고 멈춘다
+     * @param commit 그 이미지의 커밋
+     */
+    record Prepared(String image, String commit) {
+        static final Prepared IMAGE_ONLY = new Prepared(null, null);
+
+        boolean imageOnly() {
+            return image == null;
+        }
+    }
+
+    private Build start(BuildRequest request, String note, Prepared prepared) {
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch()
                 + (build.getRootDir() == null ? "" : " dir=" + build.getRootDir()));
@@ -120,7 +154,7 @@ public class BuildService {
         live.put(build.getId(), build);
         runner.run(() -> {
             try {
-                execute(build, request);
+                execute(build, request, prepared);
             } finally {
                 live.remove(build.getId());
             }
@@ -218,11 +252,16 @@ public class BuildService {
     }
 
     void execute(Build build, BuildRequest request) {
+        execute(build, request, null);
+    }
+
+    void execute(Build build, BuildRequest request, Prepared prepared) {
         String tag = ZonedDateTime.now(ZoneOffset.UTC).format(TAG);
         // 실패하면 어디까지 왔는지로 원인을 본다
         Attempt attempt = new Attempt(request);
         try {
-            String commit = github.resolveCommit(request);
+            String commit = prepared != null && prepared.commit() != null
+                    ? prepared.commit() : github.resolveCommit(request);
             attempt.commit = commit;
             build.commit(commit);
             build.log("source: commit " + commit);
@@ -254,12 +293,23 @@ public class BuildService {
             } else if (ecr.ensure(request.appName())) {
                 build.log("build: created ecr repository " + request.appName());
             }
-            advance(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
-            String image = registry == null
-                    ? kaniko.build(build.getId(), request, tag, commit, dockerfile)
-                    : kaniko.build(build.getId(), request, tag, commit, dockerfile, registry, authSecret);
-            build.image(image);
-            build.log("build: pushed " + image);
+            String image;
+            if (prepared != null && !prepared.imageOnly()) {
+                image = prepared.image();
+                build.image(image);
+                build.log("build: prepared image " + image);
+            } else {
+                advance(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
+                image = registry == null
+                        ? kaniko.build(build.getId(), request, tag, commit, dockerfile)
+                        : kaniko.build(build.getId(), request, tag, commit, dockerfile, registry, authSecret);
+                build.image(image);
+                build.log("build: pushed " + image);
+            }
+            if (prepared != null && prepared.imageOnly()) {
+                update(build, Build.Status.SUCCEEDED, "prepared: " + image);
+                return;
+            }
 
             advance(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
@@ -296,8 +346,10 @@ public class BuildService {
                     build.log("standby: scaled to 0");
                 }
                 edge(build, request.appName(), provider);
-            } else {
+            } else if (prepared == null) {
                 address(build, request.appName(), provider);
+            } else {
+                build.log("address: left to the migration");
             }
             update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
         } catch (RestClientResponseException e) {
