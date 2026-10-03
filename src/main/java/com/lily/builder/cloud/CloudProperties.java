@@ -12,6 +12,11 @@ public record CloudProperties(
         @DefaultValue("") String catalogToken,
         @DefaultValue("300") long maxAgeSeconds,
         @DefaultValue("") String jevApiKey,
+        // 비우면 lily-jev 기본 모델(jev-latest). 판마다 확신도가 달라질 수 있어 고정할 수 있게 둔다
+        @DefaultValue("") String jevModel,
+        @DefaultValue("0.8") double jevMinConfidence,
+        // 같은 상태의 답을 다시 쓰는 시간. 미리보기와 실제 배포가 같은 결론을 내게 한다. 0 이면 끈다
+        @DefaultValue("900") long jevCacheSeconds,
         @DefaultValue Worker aws,
         @DefaultValue Worker gcp) {
     public record Worker(@DefaultValue("") String url, @DefaultValue("") String token, @DefaultValue("") String region) {}

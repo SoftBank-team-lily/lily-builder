@@ -1,8 +1,8 @@
 package com.lily.builder.cloud;
 
-import com.lily.jev.HttpJev;
 import com.lily.jev.Jev;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import java.time.Clock;
 import java.util.*;
@@ -14,9 +14,8 @@ public class CloudService {
     private final CloudPolicy policy;
     private final Clock clock;
     @Autowired
-    public CloudService(CloudCatalog catalog, CloudProperties props) {
-        this(catalog, props, new CloudPolicy(props.jevApiKey() == null || props.jevApiKey().isBlank()
-                ? Jev.disabled() : new HttpJev(props.jevApiKey(), .8)), Clock.systemUTC());
+    public CloudService(CloudCatalog catalog, CloudProperties props, @Qualifier("cloudJev") Jev jev) {
+        this(catalog, props, new CloudPolicy(jev, props.jevMinConfidence()), Clock.systemUTC());
     }
     CloudService(CloudCatalog catalog, CloudProperties props, CloudPolicy policy, Clock clock) {
         this.catalog = catalog; this.props = props; this.policy = policy; this.clock = clock;

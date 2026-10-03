@@ -84,6 +84,9 @@ lily:
     catalog-token: ${CLOUD_CATALOG_TOKEN:}
     max-age-seconds: ${CLOUD_MAX_AGE_SECONDS:300}
     jev-api-key: ${JEV_API_KEY:}
+    jev-model: ${CLOUD_JEV_MODEL:}
+    jev-min-confidence: ${CLOUD_JEV_MIN_CONFIDENCE:0.8}
+    jev-cache-seconds: ${CLOUD_JEV_CACHE_SECONDS:900}
     aws:
       url: ${CLOUD_AWS_URL:}
       token: ${CLOUD_AWS_TOKEN:}

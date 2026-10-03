@@ -4,6 +4,7 @@ import com.lily.builder.BuildRequest;
 import com.lily.builder.GitHubSource;
 import com.lily.jev.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import java.util.*;
 import java.util.regex.Pattern;
@@ -59,12 +60,15 @@ public class CloudRepository {
     }
     private final GitHubSource github;
     private final Jev jev;
+    private final double minConfidence;
     @Autowired
-    public CloudRepository(GitHubSource github, CloudProperties properties) {
-        this(github, properties.jevApiKey() == null || properties.jevApiKey().isBlank()
-            ? Jev.disabled() : new HttpJev(properties.jevApiKey(), .8));
+    public CloudRepository(GitHubSource github, CloudProperties properties, @Qualifier("cloudJev") Jev jev) {
+        this(github, jev, properties.jevMinConfidence());
     }
-    CloudRepository(GitHubSource github, Jev jev) { this.github = github; this.jev = jev; }
+    CloudRepository(GitHubSource github, Jev jev) { this(github, jev, CloudPolicy.DEFAULT_MIN_CONFIDENCE); }
+    CloudRepository(GitHubSource github, Jev jev, double minConfidence) {
+        this.github = github; this.jev = jev; this.minConfidence = minConfidence;
+    }
 
     public Evidence inspect(BuildRequest request) {
         try {
@@ -104,8 +108,7 @@ public class CloudRepository {
                             "unknown", "Insufficient or conflicting evidence")));
                 if (answer.isPresent()) {
                     var a = answer.get();
-                    if (a.noul() == null && Double.isFinite(a.confidence()) && a.confidence() >= .8 && a.confidence() <= 1
-                        && Set.of("aws", "gcp", "portable", "unknown").contains(Objects.toString(a.choice(), ""))) {
+                    if (CloudPolicy.confidentChoice(a, minConfidence, Set.of("aws", "gcp", "portable", "unknown"))) {
                         affinity = a.choice(); source = "jev"; confidence = a.confidence();
                         if (signals.containsKey("azure-sdk") || signals.containsKey("enterprise-identity")) {
                             // Azure/기업 계정 연동의 이식성을 아직 확인하지 않았으므로 portable로 단정하지 않는다.

@@ -58,8 +58,17 @@ public final class CloudPolicy {
                            String reason, Candidate selected, List<Candidate> candidates,
                            List<Exclusion> excluded, Instant decidedAt) {}
 
+    public static final double DEFAULT_MIN_CONFIDENCE = 0.8;
     private final Jev jev;
-    public CloudPolicy(Jev jev) { this.jev = jev; }
+    private final double minConfidence;
+    public CloudPolicy(Jev jev) { this(jev, DEFAULT_MIN_CONFIDENCE); }
+    public CloudPolicy(Jev jev, double minConfidence) { this.jev = jev; this.minConfidence = minConfidence; }
+
+    /** 허용한 선택지 중 하나이고 확신도가 기준 이상인 선택 답인가. 저장소 연관성 판단도 같은 기준을 쓴다. */
+    static boolean confidentChoice(Answer a, double minConfidence, Set<String> allowed) {
+        return a.noul() == null && Double.isFinite(a.confidence()) && a.confidence() >= minConfidence
+            && a.confidence() <= 1 && a.choice() != null && allowed.contains(a.choice());
+    }
 
     public Decision decide(Request request, List<Candidate> candidates, Map<String,String> workers,
                            Instant now, long maxAgeSeconds) {
@@ -108,8 +117,7 @@ public final class CloudPolicy {
                     """, choices));
             if (answer.isPresent()) {
                 Answer a = answer.get();
-                if (a.noul() == null && Double.isFinite(a.confidence()) && a.confidence() >= .8 && a.confidence() <= 1
-                        && a.choice() != null && choices.containsKey(a.choice())) {
+                if (confidentChoice(a, minConfidence, choices.keySet())) {
                     if (a.choice().equals("hold")) return new Decision("held", null, null, "jev", a.confidence(), "jev_hold", null, List.copyOf(eligible), List.copyOf(excluded), now);
                     Candidate chosen = eligible.stream().filter(c -> c.provider().equals(a.choice())).findFirst().orElseThrow();
                     if (request.priorityOrDefault().equals("balanced") && eligible.stream().anyMatch(c ->
@@ -128,10 +136,11 @@ public final class CloudPolicy {
     }
 
     // HttpJev의 기본 ObjectMapper는 java.time 모듈이 없으므로 외부 상태는 JSON 기본 타입으로 보낸다.
+    // 관측 시각은 신선도 규칙이 이미 걸렀다. 모델 입력에 넣으면 수집할 때마다 상태가 달라져 같은 근거의 답을 다시 쓰지 못한다.
     private static Map<String,Object> facts(Candidate c) {
         return Map.of("provider", c.provider(), "region", c.region(), "profile", c.profile(),
-            "monthlyCostUsd", c.monthlyCostUsd(), "p95Ms", c.p95Ms(), "capabilities", c.capabilities(),
-            "observedAt", c.observedAt().toString(), "evidenceId", c.evidenceId());
+            "monthlyCostUsd", c.monthlyCostUsd(), "p95Ms", c.p95Ms(), "capabilities", List.copyOf(new TreeSet<>(c.capabilities())),
+            "evidenceId", c.evidenceId());
     }
 
     private static String rejection(Request r, Candidate c, Map<String,String> workers, Instant now, long age) {

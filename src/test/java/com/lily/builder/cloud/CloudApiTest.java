@@ -23,8 +23,34 @@ class CloudApiTest {
         return repository;
     }
     static CloudProperties props(String catalog, String worker) {
-        return new CloudProperties(TOKEN,catalog,"",300,"",new CloudProperties.Worker(worker,"","ap-northeast-2"),
+        return new CloudProperties(TOKEN,catalog,"",300,"","",0.8,900,new CloudProperties.Worker(worker,"","ap-northeast-2"),
             new CloudProperties.Worker(worker,"","asia-northeast3"));
+    }
+    @Test void previewAndDeployReachTheSameDecisionForTheSameEvidence() {
+        var catalog = mock(CloudCatalog.class);
+        // 같은 근거를 다시 수집해 관측 시각만 바뀐다
+        var refreshed = CloudPolicyTest.candidates().stream().map(c -> new CloudPolicy.Candidate(c.provider(),c.region(),c.profile(),
+            c.monthlyCostUsd(),c.p95Ms(),c.available(),c.capabilities(),c.observedAt().minusSeconds(60),c.evidenceId())).toList();
+        when(catalog.read()).thenReturn(CloudPolicyTest.candidates(), refreshed);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        // 부를 때마다 다른 답을 내는 모델
+        com.lily.jev.Jev model = (state,question) -> java.util.Optional.of(
+            new com.lily.jev.Answer(calls.incrementAndGet() == 1 ? "gcp" : "aws", null, .95));
+        var jev = new com.lily.jev.CachedJev(model, java.time.Duration.ofMinutes(15), 16);
+        var service = new CloudService(catalog, props("", "http://worker"), new CloudPolicy(jev),
+            Clock.fixed(CloudPolicyTest.NOW, ZoneOffset.UTC));
+        var preview = service.plan(CloudPolicyTest.request("balanced"));
+        var deploy = service.plan(CloudPolicyTest.request("balanced"));
+        assertThat(calls.get()).isEqualTo(1);
+        assertThat(deploy.provider()).isEqualTo(preview.provider()).isEqualTo("gcp");
+    }
+    @Test void cloudJevFollowsConfiguredConfidenceAndKey() {
+        var config = new CloudConfiguration();
+        assertThat(config.cloudJev(props("","")).available()).isFalse();
+        var keyed = new CloudProperties(TOKEN,"","",300,"k".repeat(40),"",0.8,900,null,null);
+        assertThat(config.cloudJev(keyed)).isInstanceOf(com.lily.jev.CachedJev.class);
+        var invalid = new CloudProperties(TOKEN,"","",300,"k".repeat(40),"",1.5,900,null,null);
+        assertThatThrownBy(() -> config.cloudJev(invalid)).isInstanceOf(IllegalStateException.class);
     }
     @Test void authenticatesAndValidatesBeforeCallingModel() throws Exception {
         var service = mock(CloudService.class);
