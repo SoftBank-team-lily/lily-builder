@@ -36,6 +36,7 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 실제 가격/관측 catalog와 클라우드별 worker 연결이 필요하며,
 GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변수·연결 순서](docs/cloud-placement.md).
 데이터 위치·기존 클라우드 유지·필수 서비스 접근 조건은 `policy.context`로 지정한다.
+미리보기의 `planId`와 배포별 `requestId`로 실행하며, `CLOUD_STATE_TABLE`에 계획과 중복 방지 기록을 저장한다.
 저장소의 서비스 SDK 단서와 계정 연동 검토 항목도 응답에 포함된다.
 
 ### 기존 빌드 API
@@ -44,7 +45,8 @@ GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변
 |---|---|---|
 | POST | `/api/builds` | 빌드·배포 시작. 바로 `202` 와 id 를 돌려준다 |
 | POST | `/api/detect` | 배포 전 DB 감지. 본문 `{repoUrl, branch?, token?, rootDir?}` → `{database, databaseSource, dir, apps, config, problem}` (`database` 는 postgres / mysql / null. `apps` 는 루트에 앱이 없을 때 폴더 후보, `config` 는 앱이 기동할 때 읽는 설정 키와 채울 방법, `problem` 은 폴더를 하나로 못 정한 이유). 빌드하지 않는다. 브랜치·앱을 못 찾으면 `422` |
-| GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
+| GET | `/api/builds/{id}` | 상태 (`QUEUED` → `BUILDING` → `DEPLOYING` → `SUCCEEDED` / `FAILED` / `ROLLED_BACK` / `CANCELLED`), 진행 단계, canary 판정, 단계별 로그, 이미지, URL |
+| POST | `/api/builds/{id}/cancel` | 진행 중인 배포 취소 → `202` 와 `CANCELLED` 빌드. 클라우드는 lily-cicd 로 넘기기 전(`QUEUED`·`BUILDING`, 빌드 중이면 Kaniko Job 삭제), 온프레미스는 에이전트에 `cancel` 을 보내고 바로 닫는다 (에이전트는 트래픽을 바꾸기 전이면 후보를 지운다. 끊겨 있으면 기록만 닫는다). 끝났거나 `DEPLOYING` 인 클라우드 빌드는 `409`, 없으면 `404` |
 | GET | `/api/builds` | 배포 이력 (최신순) |
 | GET | `/api/apps` | k3s 에 떠 있는 앱 |
 | GET | `/api/apps/{app}/release` | 슬롯별 릴리스와 롤백 가능 여부 |

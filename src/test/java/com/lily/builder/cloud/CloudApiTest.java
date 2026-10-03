@@ -144,7 +144,9 @@ class CloudApiTest {
                 .andExpect(jsonPath("$.build.token").doesNotExist());
             var posted = worker.takeRequest();
             assertThat(posted.getPath()).isEqualTo("/api/builds");
-            assertThat(JSON.readTree(posted.getBody().readUtf8()).path("sourceCommit").asText()).isEqualTo("a".repeat(40));
+            var payload=JSON.readTree(posted.getBody().readUtf8());
+            assertThat(payload.path("sourceCommit").asText()).isEqualTo("a".repeat(40));
+            assertThat(payload.path("cloudProvider").asText()).isEqualTo("GCP");
             mvc.perform(get("/api/cloud/builds/gcp/abc123")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("SUCCEEDED"));
             assertThat(worker.takeRequest().getPath()).isEqualTo("/api/builds/abc123");
         }

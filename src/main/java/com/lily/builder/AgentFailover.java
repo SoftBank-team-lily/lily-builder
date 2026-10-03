@@ -37,6 +37,7 @@ public class AgentFailover {
     private final AgentHub hub;
     private final AgentDeployService deploys;
     private final CicdClient cicd;
+    private final CloudClients clouds;
     private final AppAddress addresses;
     private final Duration grace;
     private final int replicas;
@@ -49,16 +50,22 @@ public class AgentFailover {
     @Autowired
     public AgentFailover(AgentHub hub, AgentDeployService deploys, CicdClient cicd, AppAddress addresses,
                          @Value("${lily.builder.failover.grace-seconds:60}") int graceSeconds,
-                         @Value("${lily.builder.failover.replicas:2}") int replicas) {
+                         @Value("${lily.builder.failover.replicas:2}") int replicas, CloudClients clouds) {
         this(hub, deploys, cicd, addresses, Duration.ofSeconds(graceSeconds), replicas, Duration.ofSeconds(120),
-                Instant::now, task -> Thread.ofVirtual().name("lily-failover").start(task));
+                Instant::now, task -> Thread.ofVirtual().name("lily-failover").start(task), clouds);
     }
 
     AgentFailover(AgentHub hub, AgentDeployService deploys, CicdClient cicd, AppAddress addresses, Duration grace,
                   int replicas, Duration readyTimeout, Supplier<Instant> clock, Runner runner) {
+        this(hub, deploys, cicd, addresses, grace, replicas, readyTimeout, clock, runner, null);
+    }
+
+    AgentFailover(AgentHub hub, AgentDeployService deploys, CicdClient cicd, AppAddress addresses, Duration grace,
+                  int replicas, Duration readyTimeout, Supplier<Instant> clock, Runner runner, CloudClients clouds) {
         this.hub = hub;
         this.deploys = deploys;
         this.cicd = cicd;
+        this.clouds = clouds;
         this.addresses = addresses;
         this.grace = grace;
         this.replicas = replicas;
@@ -115,14 +122,25 @@ public class AgentFailover {
 
     void failover(String key, String app) {
         try {
-            cicd.scale(app, replicas);
-            if (!awaitReady(app)) {
+            boolean gcp = "GCP".equals(deploys.cloudProvider(app));
+            CicdClient target = cicd;
+            String origin = null;
+            if (gcp) {
+                if (clouds == null || !clouds.deployConfigured() || clouds.origin().isBlank()) {
+                    log.warn("failover aborted: app={} GCP cloud is not configured", app);
+                    return;
+                }
+                target = clouds.cicd();
+                origin = clouds.origin();
+            }
+            target.scale(app, replicas);
+            if (!awaitReady(app, target)) {
                 log.warn("failover aborted: app={} cloud pod not ready", app);
                 return;
             }
             if (hub.connected(key)) {
                 // 기다리는 동안 PC 가 돌아왔다. 주소는 그대로 두고 대기 수로 되돌린다
-                cicd.scale(app, 1);
+                target.scale(app, 1);
                 log.info("failover cancelled: app={} agent reconnected", app);
                 return;
             }
@@ -131,17 +149,21 @@ public class AgentFailover {
                 log.info("failover skipped: app={} address is {}", app, state.home());
                 return;
             }
-            addresses.pointCloud(app);
+            if (origin == null) {
+                addresses.pointCloud(app);
+            } else {
+                addresses.pointCloud(app, origin);
+            }
             log.warn("failover: app={} agent {} disconnected, address {} now points to cloud", app, key, state.host());
         } catch (RuntimeException e) {
             log.warn("failover failed: app={} message={}", app, e.getMessage());
         }
     }
 
-    private boolean awaitReady(String app) {
+    private boolean awaitReady(String app, CicdClient client) {
         Instant deadline = clock.get().plus(readyTimeout);
         while (true) {
-            CicdClient.AppStatus status = cicd.status(app);
+            CicdClient.AppStatus status = client.status(app);
             if (status != null && status.readyReplicas() >= 1) {
                 return true;
             }

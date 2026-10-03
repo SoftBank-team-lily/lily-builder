@@ -172,6 +172,39 @@ class AgentDeployServiceTest {
     }
 
     @Test
+    void 잡을_받은_에이전트가_다른_agentId로_hello를_보내면_제한_시간을_기다리지_않고_FAILED() {
+        Build build = service.start(KEY, request("blog"));
+        service.agentStatus(KEY, build.getId(), "BUILDING", "build: docker build", "");
+
+        service.agentHello(KEY, "edge-2");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs().get(build.getLogs().size() - 1))
+                .contains("에이전트가 다시 시작돼 잡이 사라졌다 (edge-1 → edge-2)");
+    }
+
+    @Test
+    void 잡을_받은_에이전트가_같은_agentId로_다시_hello를_보내면_빌드를_그대로_두고_이후_단계를_받는다() {
+        Build build = service.start(KEY, request("blog"));
+        service.agentStatus(KEY, build.getId(), "BUILDING", "build: docker build", "");
+
+        service.agentHello(KEY, "edge-1");
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+    }
+
+    @Test
+    void 다른_key의_에이전트가_hello를_보내면_이_key로_보낸_빌드는_그대로_둔다() {
+        Build build = service.start(KEY, request("blog"));
+        service.agentStatus(KEY, build.getId(), "BUILDING", "build: docker build", "");
+
+        service.agentHello("ffffffffffff", "edge-9");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.BUILDING);
+    }
+
+    @Test
     void 에이전트_앱_이름_규칙에_맞지_않으면_거절한다() {
         assertThatThrownBy(() -> service.start(KEY, request("1blog")))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -522,6 +555,73 @@ class AgentDeployServiceTest {
         assertThat(burst.builds()).containsOnlyKeys("homeBuild");
         assertThat(burst.builds().get("homeBuild").status()).isEqualTo("BUILDING");
         assertThat(burst.builds().get("homeBuild").line()).contains("kaniko");
+    }
+
+    @Test
+    void 진행_중인_빌드를_취소하면_에이전트에_cancel을_보내고_CANCELLED로_닫는다() throws Exception {
+        when(hub.supports(KEY, "cancel")).thenReturn(true);
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "BUILDING", "build: docker build", "");
+
+        Build cancelled = service.cancel(build.getId());
+
+        assertThat(cancelled.getStatus()).isEqualTo(Build.Status.CANCELLED);
+        assertThat(cancelled.getLogs()).contains("cancel: 에이전트에 보냈다", "cancelled: 사용자가 취소했다");
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub, org.mockito.Mockito.times(2)).send(eq(KEY), sent.capture());
+        JsonNode message = new ObjectMapper().readTree(sent.getValue());
+        assertThat(message.path("type").asText()).isEqualTo("cancel");
+        assertThat(message.path("id").asText()).isEqualTo(build.getId());
+    }
+
+    @Test
+    void 취소한_뒤에_에이전트가_보낸_단계와_결과는_받지_않고_CANCELLED_그대로() {
+        when(hub.supports(KEY, "cancel")).thenReturn(true);
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.cancel(build.getId());
+
+        service.agentStatus(KEY, build.getId(), "HEALTH", "health: ok", "");
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        restarted(0).agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+
+        Build saved = store.find(build.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.CANCELLED);
+        assertThat(saved.getUrl()).isNull();
+    }
+
+    @Test
+    void 에이전트가_끊겨_있으면_cancel을_보내지_않고_기록만_CANCELLED로_닫는다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        when(hub.connected(KEY)).thenReturn(false);
+
+        Build cancelled = service.cancel(build.getId());
+
+        assertThat(cancelled.getStatus()).isEqualTo(Build.Status.CANCELLED);
+        assertThat(cancelled.getLogs()).contains("cancel: 에이전트가 연결돼 있지 않아 기록만 닫는다");
+        verify(hub, org.mockito.Mockito.times(1)).send(eq(KEY), anyString());
+    }
+
+    @Test
+    void 잡을_보내기_전에_취소되면_에이전트에_잡을_보내지_않는다() {
+        when(github.resolveCommit(any())).thenAnswer(call -> {
+            service.cancel(store.findAll().get(0).getId());
+            return COMMIT;
+        });
+
+        Build build = service.start(KEY, request("blog-1b62c0"));
+
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.CANCELLED);
+        verify(hub, never()).send(eq(KEY), org.mockito.ArgumentMatchers.contains("\"type\":\"job\""));
+    }
+
+    @Test
+    void 끝난_온프레미스_빌드를_취소하면_IllegalStateException이고_상태는_그대로() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+
+        assertThatThrownBy(() -> service.cancel(build.getId()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("SUCCEEDED");
+        assertThat(store.find(build.getId()).orElseThrow().getStatus()).isEqualTo(Build.Status.SUCCEEDED);
     }
 
     @Test

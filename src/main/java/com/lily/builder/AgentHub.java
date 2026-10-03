@@ -66,6 +66,18 @@ public class AgentHub {
         }
     }
 
+    public void sshPublicKey(String key, String publicKey) {
+        Connection connection = connections.get(key);
+        if (connection != null && publicKey != null) {
+            connection.sshPublicKey = publicKey;
+        }
+    }
+
+    public String sshPublicKey(String key) {
+        Connection connection = connections.get(key);
+        return connection == null || connection.sshPublicKey == null ? "" : connection.sshPublicKey;
+    }
+
     public boolean supports(String key, String feature) {
         Connection connection = connections.get(key);
         return connection != null && connection.features.contains(feature);
@@ -221,6 +233,7 @@ public class AgentHub {
         private volatile Tunnel tunnel;
         private volatile Set<String> databaseModes = Set.of();
         private volatile Set<String> features = Set.of();
+        private volatile String sshPublicKey = "";
         private volatile JsonNode burstState;
 
         Connection(WebSocketSession session, Instant connectedAt) {

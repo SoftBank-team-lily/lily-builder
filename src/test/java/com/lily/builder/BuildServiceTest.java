@@ -214,6 +214,60 @@ class BuildServiceTest {
     }
 
     @Test
+    void 빌드_중에_취소하면_Kaniko_Job을_지우고_CANCELLED로_남기고_cicd에_보내지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenAnswer(call -> {
+            service.cancel(call.getArgument(0));
+            throw new IllegalStateException("kaniko job disappeared: build-" + call.getArgument(0));
+        });
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.CANCELLED);
+        assertThat(build.getLogs()).contains("cancelled: 사용자가 취소했다");
+        assertThat(build.getLogs()).noneMatch(l -> l.startsWith("failed:"));
+        assertThat(build.getDiagnosis()).isNull();
+        verify(kaniko).cancel(build.getId());
+        cicd.verify();
+    }
+
+    @Test
+    void 이미지가_나온_직후에_취소됐으면_cicd에_보내지_않고_CANCELLED() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenAnswer(call -> {
+            service.cancel(call.getArgument(0));
+            return "reg/blog:t";
+        });
+
+        Build build = service.start(request(""));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.CANCELLED);
+        assertThat(build.getLogs()).noneMatch(l -> l.startsWith("deploy: lily-cicd"));
+        cicd.verify();
+    }
+
+    @Test
+    void lily_cicd로_넘어간_빌드를_취소하면_IllegalStateException이고_상태는_DEPLOYING_그대로() {
+        Build deploying = new Build("d1", "blog", "https://github.com/org/repo", "main", null, null,
+                java.time.Instant.now(), null, Build.Status.DEPLOYING, "reg/blog:t", null, java.util.List.of());
+        store.save(deploying);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.cancel("d1"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("lily-cicd");
+        assertThat(deploying.getStatus()).isEqualTo(Build.Status.DEPLOYING);
+        verify(kaniko, never()).cancel(anyString());
+    }
+
+    @Test
+    void 끝난_빌드를_취소하면_IllegalStateException이고_상태는_그대로() {
+        Build done = new Build("s1", "blog", "https://github.com/org/repo", "main", null, null,
+                java.time.Instant.now(), null, Build.Status.SUCCEEDED, "reg/blog:t", null, java.util.List.of());
+        store.save(done);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.cancel("s1"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("SUCCEEDED");
+        assertThat(done.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+    }
+
+    @Test
     void 배포가_실패하면_cicd_응답을_남긴다() {
         when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
         cicd.expect(requestTo("http://cicd/api/deployments"))

@@ -37,16 +37,24 @@ public class AppAddress {
 
     private final PlatformProperties.Cloudflare settings;
     private final String origin;
+    /** GCP 로드밸런서. 비어 있으면 AWS ALB 만 클라우드로 본다 */
+    private final String extraOrigin;
     private final AgentCloudflare.Api api;
 
     @Autowired
-    public AppAddress(PlatformProperties props) {
-        this(props.cloudflare(), props.burst().origin(), new AgentCloudflare.HttpApi(props.cloudflare().apiToken()));
+    public AppAddress(PlatformProperties props, CloudClients clouds) {
+        this(props.cloudflare(), props.burst().origin(), new AgentCloudflare.HttpApi(props.cloudflare().apiToken()),
+                clouds.origin());
     }
 
     AppAddress(PlatformProperties.Cloudflare settings, String origin, AgentCloudflare.Api api) {
+        this(settings, origin, api, "");
+    }
+
+    AppAddress(PlatformProperties.Cloudflare settings, String origin, AgentCloudflare.Api api, String extraOrigin) {
         this.settings = settings;
         this.origin = origin == null ? "" : origin;
+        this.extraOrigin = extraOrigin == null ? "" : extraOrigin;
         this.api = api;
     }
 
@@ -72,7 +80,7 @@ public class AppAddress {
         }
         String content = normalize(record.path("content").asText(""));
         Home home = !"CNAME".equals(record.path("type").asText()) ? Home.OTHER
-                : content.equals(origin) ? Home.CLOUD
+                : isCloud(content) ? Home.CLOUD
                 : content.endsWith(".cfargotunnel.com") ? Home.ONPREM
                 : Home.OTHER;
         return new State(host, home, content);
@@ -83,9 +91,15 @@ public class AppAddress {
      * 내 PC 터널이거나 다른 레코드면 그대로 두고 그 상태를 돌려준다 (같은 이름의 온프레미스 앱 주소를 뺏지 않는다)
      */
     public State ensureCloud(String app) {
+        return ensureCloud(app, origin);
+    }
+
+    /** @param cloudOrigin 이 앱의 클라우드 CNAME. 이미 다른 클라우드를 가리키면 바꾸지 않는다 */
+    public State ensureCloud(String app, String cloudOrigin) {
+        String target = cloudOrigin == null || cloudOrigin.isBlank() ? origin : cloudOrigin;
         State state = state(app);
-        if (state.home() == Home.NONE || state.home() == Home.CLOUD) {
-            return pointCloud(app);
+        if (state.home() == Home.NONE || target.equals(state.content())) {
+            return pointCloud(app, target);
         }
         return state;
     }
@@ -96,19 +110,24 @@ public class AppAddress {
      * @throws IllegalStateException 앱 레코드가 아니다
      */
     public State pointCloud(String app) {
+        return pointCloud(app, origin);
+    }
+
+    public State pointCloud(String app, String cloudOrigin) {
+        String target = cloudOrigin == null || cloudOrigin.isBlank() ? origin : cloudOrigin;
         String host = host(app);
         JsonNode record = record(host);
         State state = stateOf(host, record);
         if (state.home() == Home.OTHER) {
             throw new IllegalStateException(host + " 은 앱 주소 레코드가 아니다");
         }
-        if (state.home() == Home.CLOUD && record.path("proxied").asBoolean(false)) {
+        if (state.home() == Home.CLOUD && target.equals(state.content()) && record.path("proxied").asBoolean(false)) {
             return state;
         }
         ObjectNode body = MAPPER.createObjectNode();
         body.put("type", "CNAME");
         body.put("name", host);
-        body.put("content", origin);
+        body.put("content", target);
         body.put("proxied", true);
         body.put("ttl", 1);
         String zone = "/zones/" + settings.zoneId();
@@ -117,7 +136,11 @@ public class AppAddress {
         } else {
             api.call("PUT", zone + "/dns_records/" + record.path("id").asText(), body);
         }
-        return new State(host, Home.CLOUD, origin);
+        return new State(host, Home.CLOUD, target);
+    }
+
+    private boolean isCloud(String content) {
+        return content.equals(origin) || (!extraOrigin.isBlank() && content.equals(extraOrigin));
     }
 
     /** 클라우드 앱을 지운 뒤. ALB 를 가리키는 레코드만 지운다 */

@@ -74,7 +74,7 @@ public class CloudDispatches {
         if (run.terminal() || run.buildId() == null) return run;
         var current=workers.get(run.provider(),run.buildId());
         String status=current.path("status").asText();
-        if (Set.of("SUCCEEDED","FAILED","ROLLED_BACK").contains(status)) {
+        if (Set.of("SUCCEEDED","FAILED","ROLLED_BACK","CANCELLED").contains(status)) {
             var finished=run.with(run.buildId(),status);
             if (state.update(run,finished)) return finished;
             return state.request(run.requestId()).orElseThrow(CloudState.Unavailable::new);

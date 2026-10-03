@@ -120,6 +120,7 @@ private 저장소는 `build.token`으로 전달한다. 모델에는 보내지 �
 
 선택 가능한 미리보기 응답은 `{planId, expiresAt, repository, decision}`이다. 보류/manifest 미지원에는 planId를 발급하지 않는다.
 `POST /api/cloud/plans`는 기존의 정책 계산 전용 API이며 실행 가능한 planId를 발급하지 않는다.
+`build.cloudProvider`가 명시되면 정책 provider와 일치해야 하며, auto 정책도 해당 provider로 제한한다.
 실행 요청의 `build`는 미리보기와 같은 값이어야 한다. GitHub 토큰은 교체할 수 있으며 실행은 분석한 SHA에 고정된다.
 
 ```json
@@ -143,7 +144,7 @@ private 저장소는 `build.token`으로 전달한다. 모델에는 보내지 �
 - 같은 requestId/planId 재전송은 기존 buildId를 반환(200)하며 worker POST를 반복하지 않는다.
   같은 requestId에 다른 planId를 쓰면 `request_id_conflict`다. 같은 ID 재전송의 build 본문으로 기존 실행을 수정하지 않는다.
 - 같은 앱의 이전 실행이 진행 중이면 새 requestId도 409 `build_in_progress`다.
-- 이전 worker 상태가 SUCCEEDED/FAILED/ROLLED_BACK이면 새 requestId의 배포를 즉시 허용한다. 10분 대기가 없다.
+- 이전 worker 상태가 SUCCEEDED/FAILED/ROLLED_BACK/CANCELLED이면 새 requestId의 배포를 즉시 허용한다. 10분 대기가 없다.
 - 최초 접수 이후 provider 변경은 `provider_change_requires_migration`으로 막는다. 새로운 미리보기에서 기존 provider를 명시한다.
 - worker가 명확히 거절한 요청은 REJECTED로 남긴다. 수정 후 새로운 requestId로 다시 요청한다.
 - 시간 초과·응답 유실·접수 후 DB 저장 실패는 DISPATCHING 상태를 보존한다. 자동 만료·다른 provider 재시도는 없다.
@@ -292,11 +293,13 @@ provider당 실행기는 한 지역을 지원한다. GPU/BigQuery 연결 가능 
 ## GCP 준비와 프론트 연결 순서
 
 1. 현재는 GCP 변수와 catalog GCP 후보를 비워 둔다. 저장소 affinity가 gcp여도 AWS 또는 보류 결과가 정상이다.
-2. GKE 등 Kubernetes 환경에 같은 builder/CI-CD worker 계약을 준비한다. Cloud Run 어댑터는 없다.
-3. 현재 코드의 registry 인증 Secret 이름은 `ecr-pull`이다. GCP registry를 사용할 때도 이 이름의 유효한
-   Docker registry 인증이 필요하다. ECR 저장소 자동 생성 코드는 ECR 주소에서만 동작한다.
-4. worker의 Kubernetes 권한, registry 주소, 해당 클러스터의 `CICD_URL`, DB provisioner, 공개 ingress/DNS,
-   네트워크 연결과 자원 설정을 준비한다. 현재 메타데이터 저장은 DynamoDB이므로 GCP worker도 해당 접근 설정이 필요하다.
+2. 팀원의 GCP 데이터 플레인 연결 코드를 함께 병합했다. 선택 실행기는 BuildRequest에 `cloudProvider=AWS|GCP`를 명시한다.
+   하나의 builder가 두 클라우드를 처리하도록 구성했다면 CLOUD_AWS_URL/CLOUD_GCP_URL에 같은 builder URL을 쓸 수 있다.
+   선택 API가 아닌 기존 `/api/builds`로 전달되므로 재귀 호출은 없다. Cloud Run 어댑터는 없다.
+3. GCP 대상 worker에 `GCP_CICD_URL`, `GCP_REGISTRY`, `GCP_REGISTRY_AUTH_SECRET`(기본 `gcp-pull`)을 설정한다.
+   Kaniko가 사용할 유효한 dockerconfigjson Secret을 준비한다. GCP 설정이 없으면 AWS로 대신 배포하지 않는다.
+4. DB/버스팅/주소 전환을 사용하는 경우 `GCP_PROVISIONER_URL`, `GCP_PROVISIONER_API_TOKEN`, GCP ingress/origin/터널 설정도 준비한다.
+   클러스터 권한·네트워크·자원 설정과 실제 기능은 운영 환경에서 검증해야 한다. 메타데이터 저장은 기존 DynamoDB를 사용한다.
 5. 실제 관측/가격 수집기를 연결하고 확인된 기능만 catalog에 게시한다. `available`은 실행기 상태를 반영해야 한다.
 6. frontend 서버가 사용자 로그인·프로젝트 소유권을 확인한 뒤 이 내부 API를 호출한다.
 7. 사용자에게 repository 신호·분석 한계·decision 후보/제외 이유를 보여 준다.

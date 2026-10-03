@@ -38,12 +38,20 @@ public class AgentBurst {
     private final AgentDeployService deploys;
     private final Validator validator;
     private final ProvisionerClient provisioner;
+    private final CloudClients clouds;
     private final ObjectMapper json = new ObjectMapper().findAndRegisterModules()
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     public AgentBurst(BuildService builds, CicdClient cicd, AgentDeployService deploys, Validator validator,
                       ProvisionerClient provisioner) {
+        this(builds, cicd, deploys, validator, provisioner, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentBurst(BuildService builds, CicdClient cicd, AgentDeployService deploys, Validator validator,
+                      ProvisionerClient provisioner, CloudClients clouds) {
         this.provisioner = provisioner;
+        this.clouds = clouds;
         this.builds = builds;
         this.cicd = cicd;
         this.deploys = deploys;
@@ -64,14 +72,14 @@ public class AgentBurst {
                 throw new IllegalArgumentException("온프레미스 전용은 클라우드 대기 배포, 스케일, DB 프로비저닝을 하지 않는다");
             }
             if (action.isEmpty() && "GET".equals(method)) {
-                CicdClient.AppStatus status = cicd.status(name);
+                CicdClient.AppStatus status = cicdOf(name).status(name);
                 require(status != null, name + " 의 클라우드 배포가 없다");
                 return json.valueToTree(status);
             }
             if ("/replicas".equals(action) && "PUT".equals(method)) {
                 int replicas = body == null ? -1 : body.path("replicas").asInt(-1);
                 require(replicas >= 0 && replicas <= 5, "replicas 는 0~5");
-                return json.valueToTree(cicd.scale(name, replicas));
+                return json.valueToTree(cicdOf(name).scale(name, replicas));
             }
             if ("/database".equals(action) && "POST".equals(method)) {
                 String engine = body == null ? "" : body.path("engine").asText("");
@@ -80,18 +88,20 @@ public class AgentBurst {
                 require(engine.equals("postgres") || engine.equals("mysql"), "engine 은 postgres 또는 mysql");
                 require(HOST.matcher(host).matches(), "host 형식이 아니다");
                 require(port >= 1 && port <= 65535, "port 는 1~65535");
-                ProvisionerClient.Connection connection = provisioner.ensure(name, engine, host, port);
+                ProvisionerClient db = provisionerOf(name);
+                ProvisionerClient.Connection connection = db.ensure(name, engine, host, port);
                 if (body.path("pgroll").asBoolean(false)) {
-                    // pgroll init 은 이벤트 트리거라 RDS 관리자 권한이 필요하다. 에이전트 대신 provisioner 로 켠다
+                    // pgroll init 은 이벤트 트리거라 관리자 권한이 필요하다. 에이전트 대신 provisioner 로 켠다
                     require("postgres".equals(engine), "pgroll 은 postgres 만");
-                    provisioner.enablePgroll(name);
+                    db.enablePgroll(name);
                 }
                 return json.valueToTree(connection);
             }
             if ("/standby".equals(action) && "POST".equals(method)) {
-                BuildRequest request = request(body);
+                BuildRequest request = BurstController.standbyOf(request(body))
+                        .withCloudProvider(deploys.cloudProvider(name));
                 require(name.equals(request.appName()), "appName 이 경로와 다르다");
-                return json.valueToTree(builds.start(BurstController.standbyOf(request), STANDBY_MARK + key));
+                return json.valueToTree(builds.start(request, STANDBY_MARK + key));
             }
         }
         Matcher build = BUILD.matcher(path == null ? "" : path);
@@ -117,6 +127,26 @@ public class AgentBurst {
             throw new IllegalArgumentException(first.getPropertyPath() + " " + first.getMessage());
         }
         return request;
+    }
+
+    private CicdClient cicdOf(String app) {
+        if (!"GCP".equals(deploys.cloudProvider(app))) {
+            return cicd;
+        }
+        if (clouds == null) {
+            throw new IllegalStateException(CloudClients.MISSING);
+        }
+        return clouds.cicd();
+    }
+
+    private ProvisionerClient provisionerOf(String app) {
+        if (!"GCP".equals(deploys.cloudProvider(app))) {
+            return provisioner;
+        }
+        if (clouds == null) {
+            throw new IllegalStateException(CloudClients.MISSING_DB);
+        }
+        return clouds.provisioner();
     }
 
     private static void require(boolean condition, String message) {

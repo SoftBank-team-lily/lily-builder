@@ -27,7 +27,9 @@ class CloudPlansTest {
     String id() { return UUID.randomUUID().toString(); }
     @Test void storesNoSecretsAndReusesTheExactDecisionAcrossServiceInstances() throws Exception {
         var p=plan("env-secret");
-        assertThat(CloudApiTest.JSON.writeValueAsString(p)).doesNotContain("repo-secret","env-secret");
+        String serialized=CloudApiTest.JSON.writeValueAsString(p);
+        assertThat(serialized).doesNotContain("repo-secret","env-secret");
+        assertThat(CloudApiTest.JSON.readValue(serialized,CloudState.Plan.class)).isEqualTo(p);
         var restarted=new CloudPlans(state,props,CloudApiTest.JSON,Clock.fixed(CloudPolicyTest.NOW,ZoneOffset.UTC));
         assertThat(restarted.require(p.id(),build("env-secret"))).isEqualTo(p);
         assertThatThrownBy(() -> restarted.require(p.id(),build("changed"))).hasMessage("plan_request_mismatch");

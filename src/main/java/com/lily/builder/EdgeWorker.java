@@ -49,20 +49,28 @@ public class EdgeWorker {
     private final PlatformProperties.Cloudflare settings;
     private final PlatformProperties.Edge edge;
     private final String origin;
+    private final String extraOrigin;
     private final AgentCloudflare.Api api;
     private final Uploader uploader;
 
     @Autowired
-    public EdgeWorker(PlatformProperties props) {
+    public EdgeWorker(PlatformProperties props, CloudClients clouds) {
         this(props.cloudflare(), props.edge(), props.burst().origin(),
-                new AgentCloudflare.HttpApi(props.cloudflare().apiToken()), new HttpUploader(props.cloudflare().apiToken()));
+                new AgentCloudflare.HttpApi(props.cloudflare().apiToken()), new HttpUploader(props.cloudflare().apiToken()),
+                clouds.origin());
     }
 
     EdgeWorker(PlatformProperties.Cloudflare settings, PlatformProperties.Edge edge, String origin,
                AgentCloudflare.Api api, Uploader uploader) {
+        this(settings, edge, origin, api, uploader, "");
+    }
+
+    EdgeWorker(PlatformProperties.Cloudflare settings, PlatformProperties.Edge edge, String origin,
+               AgentCloudflare.Api api, Uploader uploader, String extraOrigin) {
         this.settings = settings;
         this.edge = edge;
         this.origin = origin == null ? "" : origin;
+        this.extraOrigin = extraOrigin == null ? "" : extraOrigin;
         this.api = api;
         this.uploader = uploader;
     }
@@ -105,16 +113,22 @@ public class EdgeWorker {
      * @return 화면 로그에 남길 한 줄
      */
     public String attach(String app) {
+        return attach(app, origin);
+    }
+
+    /** @param cloudOrigin {app}-cloud CNAME 내용물. 비우면 AWS ALB */
+    public String attach(String app, String cloudOrigin) {
+        String target = cloudOrigin == null || cloudOrigin.isBlank() ? origin : cloudOrigin;
         String cloud = cloudHost(app);
         JsonNode record = record(cloud);
-        if (record != null && !origin.equals(normalize(record.path("content").asText("")))) {
+        if (record != null && !target.equals(normalize(record.path("content").asText("")))) {
             throw new IllegalStateException(cloud + " 은 다른 곳을 가리킨다");
         }
         if (record == null || !record.path("proxied").asBoolean(false)) {
             ObjectNode body = MAPPER.createObjectNode();
             body.put("type", "CNAME");
             body.put("name", cloud);
-            body.put("content", origin);
+            body.put("content", target);
             body.put("proxied", true);
             body.put("ttl", 1);
             if (record == null) {
@@ -141,7 +155,8 @@ public class EdgeWorker {
         }
         String cloud = cloudHost(app);
         JsonNode record = record(cloud);
-        if (record != null && origin.equals(normalize(record.path("content").asText("")))) {
+        String content = record == null ? "" : normalize(record.path("content").asText(""));
+        if (record != null && (origin.equals(content) || (!extraOrigin.isBlank() && extraOrigin.equals(content)))) {
             api.call("DELETE", zone() + "/dns_records/" + record.path("id").asText(), null);
         }
     }

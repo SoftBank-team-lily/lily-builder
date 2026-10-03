@@ -8,7 +8,7 @@ public interface CloudState {
     record Plan(String id, String appName, String fingerprint, CloudPolicy.Request policy,
                 CloudRepository.Evidence repository, CloudPolicy.Decision decision, Instant expiresAt) {}
     record Run(String requestId, String planId, String appName, String provider, String buildId, String status, String commit, Instant submittedAt) {
-        public boolean terminal() { return java.util.Set.of("SUCCEEDED","FAILED","ROLLED_BACK","REJECTED").contains(status); }
+        public boolean terminal() { return java.util.Set.of("SUCCEEDED","FAILED","ROLLED_BACK","CANCELLED","REJECTED").contains(status); }
         public Run with(String id, String state) { return new Run(requestId,planId,appName,provider,id,state,commit,submittedAt); }
     }
     void savePlan(Plan plan);

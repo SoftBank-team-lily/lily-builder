@@ -42,6 +42,8 @@ public class AgentDeployService {
     /** 에이전트(lily-on-premise DeployJob)의 앱 이름 규칙. 클라우드보다 짧다 */
     static final Pattern APP_NAME = Pattern.compile("[a-z][a-z0-9-]{0,30}");
     private static final String DEFAULT_HEALTH_PATH = "/actuator/health/readiness";
+    /** 잡을 보낸 직후 남기는 줄. 뒤에 에이전트 프로세스 id 가 붙는다 */
+    private static final String SENT_TO = "agent: send to ";
     private static final Logger log = LoggerFactory.getLogger(AgentDeployService.class);
 
     private final BuildStore store;
@@ -51,17 +53,33 @@ public class AgentDeployService {
     private final BuildService.BuildRunner runner;
     private final BuilderProperties props;
     private final ProvisionerClient provisioner;
+    private final CloudClients clouds;
+    private final CloudWelcome welcome;
     private final ObjectMapper json = new ObjectMapper();
     /** 진행 중인 온프레미스 빌드 id → 에이전트 key. 다른 에이전트가 보낸 상태는 받지 않는다 */
     private final Map<String, String> running = new ConcurrentHashMap<>();
     /** 롤백·거점 전환 id → 에이전트가 SUCCEEDED/FAILED 를 보낼 때까지 기다리는 응답 */
     private final Map<String, CompletableFuture<String>> rollbackWaiters = new ConcurrentHashMap<>();
+    /**
+     * 취소, 에이전트가 보낸 단계, 잡 보내기 직전 저장, 제한 시간 정리를 한 번에 하나씩 한다.
+     * 늦게 온 단계나 보내기 전 저장이 CANCELLED 를 덮지 않게 한다
+     */
+    private final Object transitions = new Object();
 
     public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
                               BuildService.BuildRunner runner, BuilderProperties props,
                               ProvisionerClient provisioner) {
+        this(store, github, builds, hub, runner, props, provisioner, null, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
+                              BuildService.BuildRunner runner, BuilderProperties props,
+                              ProvisionerClient provisioner, CloudClients clouds, CloudWelcome welcome) {
         this.store = store;
         this.provisioner = provisioner;
+        this.clouds = clouds;
+        this.welcome = welcome;
         this.github = github;
         this.builds = builds;
         this.hub = hub;
@@ -77,6 +95,7 @@ public class AgentDeployService {
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch() + " target=onprem agent=" + agentKey);
         build.log("deploymentMode=" + request.deploymentModeOrDefault());
+        build.log("cloudProvider=" + request.cloudProviderOrDefault());
         store.save(build);
         running.put(build.getId(), agentKey);
         runner.run(() -> send(build, request, agentKey));
@@ -98,6 +117,16 @@ public class AgentDeployService {
 
             String database = resolved.database();
             boolean only = request.onPremOnly();
+            String provider = request.cloudProviderOrDefault();
+            if ("GCP".equals(provider)) {
+                if (!hub.supports(agentKey, "cloud-target")) {
+                    throw new IllegalStateException("내 PC 에이전트가 GCP 클라우드를 받지 못하는 판이다."
+                            + " 에이전트를 최신 이미지로 다시 실행한다");
+                }
+                if (welcome == null) {
+                    throw new IllegalStateException(CloudClients.MISSING);
+                }
+            }
             if (only && request.importsDatabase()) {
                 throw new IllegalArgumentException("온프레미스 전용은 RDS 데이터를 옮기지 않는다");
             }
@@ -132,16 +161,25 @@ public class AgentDeployService {
             // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
             Map<String, String> databaseEnv = null;
             boolean importing = onPremDatabase && request.importsDatabase() && !only;
-            if (!only && (importing || !onPremDatabase) && database != null && !database.isBlank()
-                    && hub.platformDatabase(agentKey)) {
+            boolean cloudDb = !only && (importing || !onPremDatabase) && database != null && !database.isBlank()
+                    && hub.platformDatabase(agentKey);
+            if ("GCP".equals(provider)) {
+                welcome.retarget(agentKey, resolved.appName(), cloudDb);
+            }
+            if (cloudDb) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
-                databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
+                databaseEnv = provisionerOf(provider).ensure(resolved.appName(), database, at.host(), at.port()).env();
                 build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port()
                         + (importing ? " (import into my pc)" : ""));
             }
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
-            build.log("agent: send to " + hub.agentId(agentKey));
-            store.save(build);
+            synchronized (transitions) {
+                if (cancelled(build)) {
+                    return;
+                }
+                build.log(SENT_TO + hub.agentId(agentKey));
+                store.save(build);
+            }
             // PostgreSQL 은 db/pgroll 이 있으면 pgroll 파일을 보낸다 (에이전트가 무중단으로 적용한다). MySQL 은 Flyway SQL 만
             Map<String, String> migrations = "postgres".equals(database)
                     ? github.migrations(resolved, commit) : github.sqlMigrations(resolved, commit);
@@ -152,7 +190,7 @@ public class AgentDeployService {
                 }
                 if (databaseEnv != null) {
                     // RDS 에 pgroll 을 켠다. init 은 이벤트 트리거라 관리자 권한이 있는 provisioner 가 한다
-                    provisioner.enablePgroll(resolved.appName());
+                    provisionerOf(provider).enablePgroll(resolved.appName());
                     build.log("database: pgroll enabled on RDS");
                 }
                 build.log("source: pgroll migrations " + migrations.keySet());
@@ -171,9 +209,66 @@ public class AgentDeployService {
                     job.put("importDatabase", true);
                 }
             }
-            hub.send(agentKey, json.writeValueAsString(job));
+            String message = json.writeValueAsString(job);
+            synchronized (transitions) {
+                if (cancelled(build)) {
+                    return;
+                }
+                hub.send(agentKey, message);
+            }
         } catch (RuntimeException | JsonProcessingException e) {
-            fail(build, e.getMessage());
+            synchronized (transitions) {
+                if (!cancelled(build)) {
+                    fail(build, e.getMessage());
+                }
+            }
+        }
+    }
+
+    /** 잡을 보내기 전에 취소됐다 ({@link #cancel} 이 running 에서 뺐다) */
+    private boolean cancelled(Build build) {
+        if (running.containsKey(build.getId())) {
+            return false;
+        }
+        log.info("onprem build cancelled before send: id={}", build.getId());
+        return true;
+    }
+
+    /** 에이전트로 보낸 온프레미스 빌드다. 클라우드 대기 배포(버스팅)는 아니다 */
+    public static boolean onPrem(Build build) {
+        return build.getLogs().stream().anyMatch(line -> line.contains("target=onprem agent="));
+    }
+
+    /**
+     * 온프레미스 빌드를 멈춘다. 에이전트에 취소를 보내고 바로 CANCELLED 로 닫는다. 에이전트는 트래픽을 새 버전으로
+     * 바꾸기 전이면 후보를 지우고 멈춘다. 그 뒤에 에이전트가 보내는 이 빌드의 단계는 받지 않는다.
+     * 에이전트가 끊겼으면 (잡이 이미 사라졌다) 기록만 닫는다.
+     *
+     * @throws IllegalStateException 이미 끝난 빌드
+     */
+    public Build cancel(String id) {
+        synchronized (transitions) {
+            Build build = store.find(id).orElseThrow(() -> new java.util.NoSuchElementException(id));
+            if (!inFlight(build)) {
+                throw new IllegalStateException("이미 끝난 배포다: " + build.getStatus());
+            }
+            running.remove(id);
+            String key = agentKey(build);
+            if (key == null || !hub.connected(key)) {
+                build.log("cancel: 에이전트가 연결돼 있지 않아 기록만 닫는다");
+            } else if (!hub.supports(key, "cancel")) {
+                build.log("cancel: 에이전트가 취소를 받지 못하는 판이라 PC 작업이 끝까지 갈 수 있다. 최신 이미지로 다시 실행한다");
+            } else {
+                try {
+                    hub.send(key, json.writeValueAsString(Map.of("type", "cancel", "id", id)));
+                    build.log("cancel: 에이전트에 보냈다");
+                } catch (JsonProcessingException | RuntimeException e) {
+                    build.log("cancel: 에이전트에 보내지 못했다 " + e.getMessage());
+                }
+            }
+            update(build, Build.Status.CANCELLED, "cancelled: 사용자가 취소했다");
+            log.info("onprem build cancelled: id={} app={} agent={}", id, build.getAppName(), key);
+            return build;
         }
     }
 
@@ -403,6 +498,25 @@ public class AgentDeployService {
                 .map(Build::getAppName);
     }
 
+    /** 이 앱의 가장 최근 빌드에 기록된 클라우드. 기록이 없으면 AWS */
+    public String cloudProvider(String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(build -> build.getLogs().stream().anyMatch(line -> line.startsWith("cloudProvider=GCP")))
+                .orElse(false) ? "GCP" : "AWS";
+    }
+
+    private ProvisionerClient provisionerOf(String provider) {
+        if (!"GCP".equals(provider)) {
+            return provisioner;
+        }
+        if (clouds == null) {
+            throw new IllegalStateException(CloudClients.MISSING_DB);
+        }
+        return clouds.provisioner();
+    }
+
     /** 이 앱의 가장 최근 빌드에 기록된 배포 모드. 기록이 없으면 HYBRID */
     public String deploymentMode(String app) {
         return onPremOnly(app) ? "ONPREM_ONLY" : "HYBRID";
@@ -531,12 +645,17 @@ public class AgentDeployService {
             }
             return;
         }
-        Optional<Build> found = runningBuild(agentKey, buildId);
-        if (found.isEmpty()) {
-            log.debug("agent status ignored: key={} id={}", agentKey, buildId);
-            return;
+        synchronized (transitions) {
+            Optional<Build> found = runningBuild(agentKey, buildId);
+            if (found.isEmpty()) {
+                log.debug("agent status ignored: key={} id={}", agentKey, buildId);
+                return;
+            }
+            record(found.get(), buildId, status, line, url);
         }
-        Build build = found.get();
+    }
+
+    private void record(Build build, String buildId, String status, String line, String url) {
         String logLine = "agent: " + status + (line == null || line.isBlank() ? "" : " " + line);
         switch (status) {
             case "SUCCEEDED" -> {
@@ -598,6 +717,43 @@ public class AgentDeployService {
         }
     }
 
+    /**
+     * 에이전트가 hello 를 보냈다. 같은 key 에 다른 agentId 면 에이전트 프로세스가 새로 뜬 것이다.
+     * 잡은 에이전트 메모리에만 있어서 이전 프로세스로 보낸 진행 중 빌드는 다시 오지 않는다. 제한 시간을 기다리지 않고 바로 닫는다.
+     * 같은 agentId 의 재연결(소켓만 끊겼다 붙음)은 잡이 계속 돌고 있으니 그대로 둔다
+     */
+    public void agentHello(String agentKey, String agentId) {
+        if (agentId == null || agentId.isBlank()) {
+            return;
+        }
+        // 잡 보내기 직전 저장과 겹치지 않게 한다. 여기서 닫으면 send 가 cancelled 로 보고 잡을 보내지 않는다
+        synchronized (transitions) {
+            running.forEach((id, key) -> {
+                if (!agentKey.equals(key)) {
+                    return;
+                }
+                store.find(id).ifPresent(build -> {
+                    String sentTo = sentTo(build);
+                    if (inFlight(build) && sentTo != null && !sentTo.equals(agentId)) {
+                        fail(build, "agent: 에이전트가 다시 시작돼 잡이 사라졌다 (" + sentTo + " → " + agentId
+                                + "). 다시 배포한다");
+                    }
+                });
+            });
+        }
+    }
+
+    /** 잡을 보낸 에이전트 프로세스 id. 아직 보내기 전이거나 hello 전에 보냈으면 null */
+    private static String sentTo(Build build) {
+        String agentId = null;
+        for (String line : build.getLogs()) {
+            if (line.startsWith(SENT_TO)) {
+                agentId = line.substring(SENT_TO.length()).trim();
+            }
+        }
+        return agentId == null || agentId.isBlank() || "null".equals(agentId) ? null : agentId;
+    }
+
     private static boolean inFlight(Build build) {
         return build.getStatus() == Build.Status.QUEUED || build.getStatus() == Build.Status.BUILDING
                 || build.getStatus() == Build.Status.DEPLOYING;
@@ -607,12 +763,19 @@ public class AgentDeployService {
     @Scheduled(fixedDelay = 30_000)
     void expire() {
         Instant limit = Instant.now().minus(Duration.ofSeconds(props.buildTimeoutSeconds()));
-        running.keySet().forEach(id -> store.find(id).ifPresentOrElse(build -> {
-            if (build.getUpdatedAt().isBefore(limit)) {
-                running.remove(id);
-                fail(build, "agent: " + props.buildTimeoutSeconds() + "초 동안 응답이 없다");
+        running.keySet().forEach(id -> {
+            synchronized (transitions) {
+                if (!running.containsKey(id)) {
+                    return;
+                }
+                store.find(id).ifPresentOrElse(build -> {
+                    if (build.getUpdatedAt().isBefore(limit)) {
+                        running.remove(id);
+                        fail(build, "agent: " + props.buildTimeoutSeconds() + "초 동안 응답이 없다");
+                    }
+                }, () -> running.remove(id));
             }
-        }, () -> running.remove(id)));
+        });
     }
 
     /** lily-on-premise DeployJob */

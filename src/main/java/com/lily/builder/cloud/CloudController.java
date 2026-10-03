@@ -49,7 +49,14 @@ public class CloudController {
         else if (build.database() != null && !build.database().isBlank()) capabilities.add(build.database());
         if (build.givenDatabase() || "external".equals(build.databaseMode())) capabilities.add("external-db");
         var p = request.policy();
-        return new CloudPolicy.Request(p.provider(), p.priority(), p.profile(), p.maxMonthlyCostUsd(), p.maxP95Ms(), p.regions(), capabilities, p.context());
+        String provider=p.provider();
+        if (build.cloudProvider()!=null && !build.cloudProvider().isBlank()) {
+            String explicit=build.cloudProvider().toLowerCase(Locale.ROOT);
+            if (!p.providerOrDefault().equals("auto") && !p.providerOrDefault().equals(explicit))
+                throw new CloudPlans.Invalid("cloud_provider_conflict");
+            provider=explicit;
+        }
+        return new CloudPolicy.Request(provider, p.priority(), p.profile(), p.maxMonthlyCostUsd(), p.maxP95Ms(), p.regions(), capabilities, p.context());
     }
     public record Execution(
             @NotBlank @Pattern(regexp="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}") String requestId,

@@ -30,6 +30,14 @@ public class CicdClient {
         this.http = http;
     }
 
+    /** GCP 클러스터의 lily-cicd. AWS 용 빈과 타임아웃은 같다 */
+    public static CicdClient forUrl(String url) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(Duration.ofSeconds(420));
+        return new CicdClient(RestClient.builder().requestFactory(factory).baseUrl(url).build());
+    }
+
     /** @param migrations 파일명 → SQL. 비어 있으면 보내지 않는다 (앱의 Flyway 가 스키마를 맡는다) */
     public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations) {
         return deploy(request, image, version, migrations, List.of());

@@ -43,7 +43,7 @@ public class CloudRepository {
     public record Evidence(String commit, String dir, List<String> files, Map<String,List<String>> signals,
                            String affinity, String source, Double confidence, List<String> limitations) {
         /** 발견한 SDK의 서비스 후보. 사용 여부/권한/네트워크가 확인되기 전에는 필수 기능으로 승격하지 않는다. */
-        @com.fasterxml.jackson.annotation.JsonProperty("serviceHints")
+        @com.fasterxml.jackson.annotation.JsonProperty(value="serviceHints", access=com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
         public Set<String> serviceHints() {
             Map<String,String> names = Map.of("bigquery","gcp-bigquery", "vertex-ai","gcp-vertex-ai",
                 "gcs","gcp-storage", "pubsub","gcp-pubsub", "s3","aws-s3", "bedrock","aws-bedrock",
@@ -52,7 +52,7 @@ public class CloudRepository {
             names.forEach((signal, capability) -> { if (signals.containsKey(signal)) hints.add(capability); });
             return Collections.unmodifiableSet(hints);
         }
-        @com.fasterxml.jackson.annotation.JsonProperty("reviewItems")
+        @com.fasterxml.jackson.annotation.JsonProperty(value="reviewItems", access=com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
         public List<String> reviewItems() {
             List<String> items = new ArrayList<>(List.of("confirm_data_location", "confirm_existing_cloud_and_operations",
                 "include_network_cost_in_estimate"));

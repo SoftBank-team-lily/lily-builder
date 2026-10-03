@@ -14,7 +14,7 @@ public class CloudWorkers {
     private final CloudProperties props;
     private final ObjectMapper json;
     private final RestClient http;
-    private static final Set<String> STATUSES = Set.of("QUEUED", "BUILDING", "DEPLOYING", "SUCCEEDED", "FAILED", "ROLLED_BACK");
+    private static final Set<String> STATUSES = Set.of("QUEUED", "BUILDING", "DEPLOYING", "SUCCEEDED", "FAILED", "ROLLED_BACK","CANCELLED");
     public CloudWorkers(CloudProperties props, ObjectMapper json) {
         this.props = props; this.json = json;
         var factory = new SimpleClientHttpRequestFactory() {
@@ -26,7 +26,7 @@ public class CloudWorkers {
         factory.setConnectTimeout(2000); factory.setReadTimeout(15000);
         this.http = RestClient.builder().requestFactory(factory).build();
     }
-    public JsonNode start(String provider, BuildRequest build) { return exchange(provider, null, build); }
+    public JsonNode start(String provider, BuildRequest build) { return exchange(provider, null, build.withCloudProvider(provider.toUpperCase(java.util.Locale.ROOT))); }
     public JsonNode get(String provider, String id) { return exchange(provider, id, null); }
     private JsonNode exchange(String provider, String id, BuildRequest build) {
         var worker = props.worker(provider);
