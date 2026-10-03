@@ -163,16 +163,17 @@ test("큐에_요청이_남아_있으면_PC가_정상이어도_새_POST는_PC에_
   assert.equal(sent.length, 0);
 });
 
-test("PC에_보낸_뒤_엣지_502_오류_페이지가_오면_큐에_넣지_않고_502를_주고_PC_장애를_표시한다", async () => {
+test("PC에_보낸_POST와_다시_확인한_GET이_모두_엣지_502_오류_페이지를_받으면_큐에_넣고_202를_주고_PC_장애를_표시한다", async () => {
   pc = async () => new Response("<html><a href=\"/cdn-cgi/l/\">bad gateway</a></html>",
     { status: 502, headers: { "content-type": "text/html" } });
 
   const { response, marked } = await submit(post("/posts", "{}"));
 
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 202);
   assert.equal(response.headers.get("X-Lily-Pc-Down"), null);
   assert.equal(marked, true);
-  assert.equal(blogQueue().pending(), 0);
+  assert.equal(blogQueue().pending(), 1);
+  assert.deepEqual(sent.map((r) => r.method), ["POST", "GET"]);
 });
 
 test("앱이_돌려준_500은_큐에_넣지_않고_그대로_준다", async () => {
@@ -482,14 +483,14 @@ test("PC_확인_요청이_연결에_실패하면_status_null_edge로_남기고_P
   assert.equal(lastCheck.edge, true);
 });
 
-test("PC에_보낸_뒤_엣지_텍스트_오류_502가_오면_큐에_넣지_않고_502를_주고_PC_장애를_표시한다", async () => {
+test("PC에_보낸_POST와_다시_확인한_GET이_모두_엣지_텍스트_오류_502를_받으면_큐에_넣고_202를_준다", async () => {
   pc = async () => new Response("error code: 502", { status: 502, headers: { "content-type": "text/plain" } });
 
   const { response, marked } = await submit(post("/posts", "{}"));
 
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 202);
   assert.equal(marked, true);
-  assert.equal(blogQueue().pending(), 0);
+  assert.equal(blogQueue().pending(), 1);
 });
 
 test("앱이_text_plain으로_돌려준_502는_엣지_오류가_아니라_그대로_준다", async () => {
