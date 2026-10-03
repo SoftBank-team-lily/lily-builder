@@ -247,6 +247,57 @@ public class AgentDeployService {
         }
     }
 
+    /**
+     * 이 앱을 마지막으로 다룬 에이전트에 앱 삭제를 보낸다 (슬롯 컨테이너, 이미지, database 면 PC 의 앱 DB).
+     *
+     * @return 최근 빌드가 에이전트 빌드가 아니면 empty (클라우드 앱). 에이전트가 꺼져 있으면 status offline
+     * @throws IllegalStateException 에이전트가 거절했다 (예: 거점을 옮기는 중)
+     */
+    public Optional<AgentRemoval> remove(String app, boolean database) {
+        Optional<String> key = store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(AgentDeployService::agentKey);
+        if (key.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!hub.connected(key.get())) {
+            return Optional.of(new AgentRemoval(key.get(), "offline", "에이전트가 꺼져 있어 PC 의 컨테이너는 남는다"));
+        }
+        if (!hub.supports(key.get(), "remove")) {
+            return Optional.of(new AgentRemoval(key.get(), "unsupported",
+                    "에이전트가 앱 삭제를 모르는 이전 버전이라 PC 의 컨테이너는 남는다"));
+        }
+        String id = "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 7);
+        CompletableFuture<String> done = new CompletableFuture<>();
+        rollbackWaiters.put(id, done);
+        try {
+            hub.send(key.get(), json.writeValueAsString(Map.of(
+                    "type", "remove", "app", app, "id", id, "database", database)));
+            String line = done.get(props.buildTimeoutSeconds(), TimeUnit.SECONDS);
+            return Optional.of(new AgentRemoval(key.get(), "removed", line == null ? "" : line));
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("온프레미스 앱 삭제 응답이 제한 시간 안에 오지 않았다");
+        } catch (ExecutionException e) {
+            String message = e.getCause() == null ? "앱 삭제에 실패했다" : e.getCause().getMessage();
+            throw new IllegalStateException(message);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("온프레미스 앱 삭제가 중단되었다");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("앱 삭제 요청을 만들지 못했다");
+        } finally {
+            rollbackWaiters.remove(id);
+        }
+    }
+
+    /**
+     * @param agent  에이전트 key
+     * @param status removed (PC 에서 지움), offline (꺼져 있음), unsupported (이전 버전 에이전트)
+     */
+    public record AgentRemoval(String agent, String status, String message) {
+    }
+
     private Optional<String> agentFor(String app) {
         Optional<Build> latest = store.findAll().stream()
                 .filter(build -> app.equals(build.getAppName()) && build.getStatus() == Build.Status.SUCCEEDED)

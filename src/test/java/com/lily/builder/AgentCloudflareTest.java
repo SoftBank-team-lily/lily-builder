@@ -110,6 +110,37 @@ class AgentCloudflareTest {
     }
 
     @Test
+    void removeHostnameDropsOnlyThatHostRuleAndKeepsTheRest() {
+        List<String> puts = new ArrayList<>();
+        AgentCloudflare withConfig = new AgentCloudflare(
+                new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"), "alb.example.net",
+                (key, app) -> true,
+                (method, path, body) -> {
+                    if (path.startsWith(A + "/cfd_tunnel?")) {
+                        return json("[{\"id\":\"" + TUNNEL + "\",\"name\":\"lily-agent-" + KEY + "\"}]");
+                    }
+                    if ("GET".equals(method) && path.endsWith("/configurations")) {
+                        return json("{\"config\":{\"ingress\":[{\"hostname\":\"blog.lilycloud.kr\",\"service\":\"http://127.0.0.1:8099\"},"
+                                + "{\"hostname\":\"shop.lilycloud.kr\",\"service\":\"http://127.0.0.1:8099\"},"
+                                + "{\"service\":\"http_status:404\"}]}}");
+                    }
+                    if ("PUT".equals(method)) {
+                        puts.add(path + " " + body);
+                    }
+                    return json("{}");
+                });
+
+        assertThat(withConfig.removeHostname(KEY, "blog.lilycloud.kr")).isTrue();
+        assertThat(puts).hasSize(1);
+        assertThat(puts.get(0)).startsWith(A + "/cfd_tunnel/" + TUNNEL + "/configurations ")
+                .doesNotContain("blog.lilycloud.kr").contains("shop.lilycloud.kr").contains("http_status:404");
+
+        puts.clear();
+        assertThat(withConfig.removeHostname(KEY, "none.lilycloud.kr")).isFalse();
+        assertThat(puts).isEmpty();
+    }
+
+    @Test
     void otherCallsAreRefused() {
         assertThatThrownBy(() -> cloudflare.call(KEY, "DELETE", Z + "/dns_records/0123456789abcdef0123456789abcdef", null))
                 .isInstanceOf(IllegalArgumentException.class);

@@ -178,6 +178,46 @@ public class AgentCloudflare {
         throw new IllegalArgumentException("허용하지 않는 Cloudflare 호출: " + method + " " + route);
     }
 
+    /**
+     * 앱을 지운 뒤. 이 에이전트 터널의 ingress 에서 그 호스트 규칙만 뺀다 (다른 규칙과 마지막 404 는 그대로).
+     * 에이전트를 거치지 않고 플랫폼 토큰으로 직접 부른다 (에이전트가 꺼져 있어도 지운다)
+     *
+     * @return 뺀 규칙이 있으면 true
+     */
+    public boolean removeHostname(String key, String host) {
+        if (!enabled() || !AgentTokens.KEY.matcher(key).matches()) {
+            return false;
+        }
+        String id = tunnelId(key);
+        if (id.isBlank()) {
+            return false;
+        }
+        String path = "/accounts/" + settings.accountId() + "/cfd_tunnel/" + id + "/configurations";
+        JsonNode current = api.call("GET", path, null);
+        JsonNode config = current == null ? null : current.path("config");
+        JsonNode rules = config == null ? null : config.path("ingress");
+        if (rules == null || !rules.isArray()) {
+            return false;
+        }
+        ObjectNode next = config.deepCopy();
+        var out = next.putArray("ingress");
+        boolean removed = false;
+        for (JsonNode rule : rules) {
+            if (host.equalsIgnoreCase(rule.path("hostname").asText())) {
+                removed = true;
+                continue;
+            }
+            out.add(rule);
+        }
+        if (!removed) {
+            return false;
+        }
+        ObjectNode body = MAPPER.createObjectNode();
+        body.set("config", next);
+        api.call("PUT", path, body);
+        return true;
+    }
+
     static String tunnelName(String key) {
         return "lily-" + tunnelAgentId(key);
     }

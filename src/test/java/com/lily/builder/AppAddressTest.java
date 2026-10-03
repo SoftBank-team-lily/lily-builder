@@ -90,6 +90,24 @@ class AppAddressTest {
     }
 
     @Test
+    void 온프레미스_앱을_지우면_내_PC_터널을_가리키는_주소도_지운다() {
+        existing = record("CNAME", TUNNEL, true);
+
+        assertThat(addresses.remove("blog")).isTrue();
+
+        assertThat(calls).contains("DELETE " + Z + "/dns_records/rec1");
+    }
+
+    @Test
+    void 온프레미스_앱을_지워도_앱_레코드가_아니면_지우지_않는다() {
+        existing = record("A", "75.2.85.42", true);
+
+        assertThat(addresses.remove("www")).isFalse();
+
+        assertThat(calls).noneMatch(call -> call.startsWith("DELETE"));
+    }
+
+    @Test
     void 존이나_ALB_가_없으면_꺼진다() {
         assertThat(AppAddress.disabled().enabled()).isFalse();
         assertThat(new AppAddress(new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"), "",

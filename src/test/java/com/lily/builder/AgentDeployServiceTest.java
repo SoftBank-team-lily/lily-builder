@@ -197,6 +197,66 @@ class AgentDeployServiceTest {
     }
 
     @Test
+    void 온프레미스_앱을_지우면_그_에이전트에_database_옵션과_함께_remove를_보내고_removed를_돌려준다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.supports(KEY, "remove")).thenReturn(true);
+        java.util.List<JsonNode> sent = new java.util.ArrayList<>();
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("remove".equals(body.path("type").asText())) {
+                sent.add(body);
+                service.agentStatus(KEY, body.path("id").asText(), "SUCCEEDED", "removed: containers", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        AgentDeployService.AgentRemoval removal = service.remove("blog-1b62c0", true).orElseThrow();
+
+        assertThat(sent).hasSize(1);
+        assertThat(sent.get(0).path("app").asText()).isEqualTo("blog-1b62c0");
+        assertThat(sent.get(0).path("database").asBoolean()).isTrue();
+        assertThat(removal.status()).isEqualTo("removed");
+        assertThat(removal.agent()).isEqualTo(KEY);
+    }
+
+    @Test
+    void 온프레미스_앱을_지울_때_에이전트가_꺼져_있으면_보내지_않고_offline을_돌려준다() {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.connected(KEY)).thenReturn(false);
+
+        AgentDeployService.AgentRemoval removal = service.remove("blog-1b62c0", false).orElseThrow();
+
+        assertThat(removal.status()).isEqualTo("offline");
+        verify(hub, never()).send(eq(KEY), org.mockito.ArgumentMatchers.contains("\"type\":\"remove\""));
+    }
+
+    @Test
+    void 온프레미스_앱_삭제를_에이전트가_거절하면_그_이유로_실패한다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.supports(KEY, "remove")).thenReturn(true);
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("remove".equals(body.path("type").asText())) {
+                service.agentStatus(KEY, body.path("id").asText(), "FAILED", "failed: 거점을 옮기는 중이라 지울 수 없습니다", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        assertThatThrownBy(() -> service.remove("blog-1b62c0", false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("거점을 옮기는 중");
+    }
+
+    @Test
+    void 에이전트_빌드가_없는_앱은_지우기를_보내지_않고_empty를_돌려준다() {
+        assertThat(service.remove("cloud-app", true)).isEmpty();
+        verify(hub, never()).send(anyString(), anyString());
+    }
+
+    @Test
     void 최근_성공이_온프레미스면_그_에이전트에_거점_전환을_보낸다() throws Exception {
         Build build = service.start(KEY, request("blog-1b62c0"));
         service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");

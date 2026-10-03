@@ -35,16 +35,19 @@ public class BuildController {
     private final AgentDeployService agents;
     private final AppAddress addresses;
     private final EdgeWorker edge;
+    /** 온프레미스 앱 삭제. 테스트 생성자에서는 null (클라우드 앱만 지운다) */
+    private final OnPremAppRemoval onPrem;
     private final ObjectMapper json = new ObjectMapper();
 
     BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
                     AppAddress addresses) {
-        this(service, clusterApps, cicd, agents, addresses, EdgeWorker.disabled());
+        this(service, clusterApps, cicd, agents, addresses, EdgeWorker.disabled(), null);
     }
 
     @Autowired
     public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
-                           AppAddress addresses, EdgeWorker edge) {
+                           AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem) {
+        this.onPrem = onPrem;
         this.edge = edge;
         this.service = service;
         this.clusterApps = clusterApps;
@@ -128,14 +131,29 @@ public class BuildController {
     }
 
     /**
-     * 앱을 클러스터에서 지운다 (Deployment, Service, Ingress, Secret, 릴리스 기록).
-     * {@code database=true} 면 DB 도 DROP 한다. 없으면 404, 배포 중이면 409
+     * 앱을 지운다. 클라우드 앱은 클러스터에서 (Deployment, Service, Ingress, Secret, 릴리스 기록),
+     * 온프레미스 앱은 PC 의 컨테이너와 공개 주소, 클라우드 대기 배포까지 ({@link OnPremAppRemoval}).
+     * {@code database=true} 면 DB 도 DROP 한다. 없으면 404, 배포·거점 전환 중이면 409
      */
     @DeleteMapping("/api/apps/{appName}")
     public ResponseEntity<String> remove(@PathVariable String appName,
                                          @RequestParam(defaultValue = "false") boolean database) {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
+        }
+        if (onPrem != null) {
+            try {
+                Optional<Map<String, Object>> removed = onPrem.remove(appName, database);
+                if (removed.isPresent()) {
+                    return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                            .body(json.writeValueAsString(removed.get()));
+                }
+            } catch (IllegalStateException e) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                        .body(rejected(e.getMessage()));
+            } catch (JsonProcessingException e) {
+                return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body("{\"status\":\"REMOVED\"}");
+            }
         }
         CicdClient.Passthrough removed = cicd.remove(appName, database);
         if (removed.status() == 200 && addresses.enabled()) {
