@@ -59,7 +59,7 @@ class AppMigrationTest {
         when(addresses.enabled()).thenReturn(true);
         when(addresses.host(APP)).thenReturn("blog.lilycloud.kr");
         when(addresses.state(APP)).thenReturn(new AppAddress.State("blog.lilycloud.kr", AppAddress.Home.CLOUD, "alb.example"));
-        when(aws.release(APP)).thenReturn(ok("{\"activeSlot\":\"stable\",\"slots\":[{\"slot\":\"stable\",\"database\":\"postgres\"}]}"));
+        when(aws.release(APP)).thenReturn(ok("{\"activeSlot\":null,\"slots\":[{\"slot\":\"stable\",\"database\":\"postgres\"}]}"));
         when(aws.schema(APP)).thenReturn(ok("{\"engine\":\"flyway\"}"));
         when(gcp.release(APP)).thenReturn(ok("{\"activeSlot\":null,\"slots\":[]}"));
         when(awsDb.engine(APP)).thenReturn(Optional.of("postgres"));
