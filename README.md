@@ -34,7 +34,7 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 (AWS·GCP SDK 단서가 있을 때만 JEV에 묻는다), `POST /api/cloud/builds`로 예산·P95·실행기 준비 여부를 검사한 뒤
 배포 대상을 선택할 수 있다. 기본 정책은 비용·속도 균형이며, 규칙으로 정할 수 없을 때만 JEV가 고른다.
 실제 가격/관측 catalog와 클라우드별 worker 연결이 필요하며,
-GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변수·연결 순서](docs/cloud-placement.md).
+GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변수·연결 순서](docs/cloud-placement.md). [JEV 적용 흐름과 팀 공유 설명](docs/jev-flow.md).
 데이터 위치·기존 클라우드 유지·필수 서비스 접근 조건은 `policy.context`로 지정한다.
 미리보기의 `planId`와 배포별 `requestId`로 실행하며, `CLOUD_STATE_TABLE`에 계획과 중복 방지 기록을 저장한다.
 저장소의 서비스 SDK 단서와 계정 연동 검토 항목도 응답에 포함된다.

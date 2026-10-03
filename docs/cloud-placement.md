@@ -356,3 +356,7 @@ GCP 실제 배포·실제 비용 절감·실사용 성능은 GCP 환경과 관�
 - lily-jev `feature/jev-reuse`: 10개 통과.
 - 실제 JEV 테스트(`CloudLiveTest`)는 키가 없어 실행하지 않았다. 이제 일반 의존성만 있는 `lily-blog-sample`은 JEV에 묻지 않고
   `portable`이어야 하며, 실제 JEV 호출은 합성 GCP SDK manifest와 비용·P95가 엇갈리는 후보로 확인하도록 바꿨다.
+
+## 영속 계획·동시 요청 병합 통합 검증
+
+builder 232개 통과·4개 제외, lily-jev 12개 통과. DynamoDB Local에서 계획 직렬화·다른 인스턴스 읽기, 동시 선점, 상태 비교 갱신을 확인했다. 실제 카탈로그·GCP 환경을 사용한 운영 배포 검증은 포함하지 않았다.
