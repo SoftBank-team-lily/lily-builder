@@ -239,6 +239,7 @@ public class AgentSocket implements WebSocketConfigurer {
                         java.util.Set<String> features = new java.util.HashSet<>();
                         node.path("features").forEach(feature -> features.add(feature.asText()));
                         hub.features(key, features);
+                        deploys.agentHello(key, node.path("agentId").asText(null));
                         welcome(key, node);
                     }
                     case "cloudflare" -> relay(key, node);
