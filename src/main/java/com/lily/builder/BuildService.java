@@ -583,6 +583,18 @@ public class BuildService {
     }
 
     /**
+     * 실제 배포가 볼 앱 폴더 (레포 루트 기준, 루트면 ""). {@link #source} 와 같은 방법으로 정한다.
+     * 백엔드와 프론트를 한 이미지로 묶으면 백엔드 폴더다 ({@link #inspect} 의 dir 과 같다). 빌드는 하지 않는다.
+     *
+     * @throws IllegalStateException 빌드할 앱이 없거나 폴더가 여러 개라 하나로 정하지 못했을 때
+     */
+    public String appFolder(BuildRequest request, String commit) {
+        Source source = source(new Build("analysis", request), request, commit);
+        String dir = source.detectDir() != null ? source.detectDir() : source.request().rootDir();
+        return isBlank(dir) ? "" : dir;
+    }
+
+    /**
      * @param database       postgres / mysql. 드라이버가 안 보이면 null
      * @param databaseSource 근거. 예: {@code build.gradle: org.postgresql}
      * @param dir            본 폴더 (레포 루트 기준). 루트면 null

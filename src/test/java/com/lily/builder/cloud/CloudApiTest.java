@@ -18,7 +18,7 @@ class CloudApiTest {
     static final ObjectMapper JSON = new ObjectMapper().findAndRegisterModules();
     static CloudRepository repository() {
         var repository = mock(CloudRepository.class);
-        when(repository.inspect(any())).thenReturn(new CloudRepository.Evidence("a".repeat(40),List.of("package.json"),
+        when(repository.inspect(any())).thenReturn(new CloudRepository.Evidence("a".repeat(40),"",List.of("package.json"),
             java.util.Map.of("web",List.of("next")),"portable","rules",null,List.of()));
         return repository;
     }
@@ -88,6 +88,11 @@ class CloudApiTest {
         body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
         mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
             .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("repository_analysis_unavailable"));
+        // 배포할 폴더를 정하지 못하면 화면이 폴더를 고르게 할 수 있도록 이유를 따로 준다
+        reset(repository);
+        when(repository.inspect(any())).thenThrow(new CloudRepository.Unavailable("build_folder_unresolved"));
+        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
+            .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("build_folder_unresolved"));
         verifyNoInteractions(service,workers);
     }
     @Test void controllerPreservesContextAndValidatesItsFields() throws Exception {

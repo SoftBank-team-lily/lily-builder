@@ -423,6 +423,25 @@ class BuildServiceTest {
     }
 
     @Test
+    void 클라우드_분석은_실제_배포와_같은_앱_폴더를_본다() {
+        repo(Map.of("backend/build.gradle", "implementation 'org.postgresql:postgresql'"));
+        when(github.folders(any(), eq(COMMIT))).thenReturn(java.util.List.of("backend"));
+
+        assertThat(service.appFolder(auto(null), COMMIT)).isEqualTo("backend");
+        verifyNoInteractions(kaniko);
+        assertThat(store.findAll()).isEmpty();
+    }
+
+    @Test
+    void 클라우드_분석은_루트에_앱이_있으면_루트를_보고_없으면_폴더를_정하지_않는다() {
+        assertThat(service.appFolder(auto(null), COMMIT)).isEmpty();
+
+        when(github.file(any(), eq(COMMIT), eq("Dockerfile"))).thenReturn(null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.appFolder(auto(null), COMMIT))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void 배포_전_감지에서_드라이버가_없으면_DB_는_null() {
         BuildService.Detection found = service.inspect(
                 new DetectRequest("https://github.com/org/repo", null, null, null));

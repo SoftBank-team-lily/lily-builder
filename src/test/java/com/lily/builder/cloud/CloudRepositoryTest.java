@@ -46,6 +46,29 @@ class CloudRepositoryTest {
         assertThat(evidence.signals()).containsKeys("ml","data");
         assertThat(calls.get()).isZero();
     }
+    @Test void analyzesTheFolderTheBuildWillUse() {
+        var github = mock(GitHubSource.class);
+        when(github.resolveCommit(any())).thenReturn(SHA);
+        // 루트의 package.json 은 도구용이고 실제 앱은 api/ 에 있다
+        when(github.paths(any(),eq(SHA))).thenReturn(List.of("package.json","api/build.gradle"));
+        when(github.analysisFile(argThat(r -> "api".equals(r.rootDir())),eq(SHA),eq("build.gradle")))
+            .thenReturn("implementation 'org.springframework.boot:spring-boot-starter-web'");
+        var root = new BuildRequest("https://github.com/owner/sample","main",null,null,"sample",null,null,null,null,Map.of());
+        var evidence = new CloudRepository(github,Jev.disabled(),.8,(r,commit) -> {
+            assertThat(r.sourceCommit()).isEqualTo(commit);
+            return "api";
+        }).inspect(root);
+        assertThat(evidence.dir()).isEqualTo("api");
+        assertThat(evidence.files()).containsExactly("build.gradle");
+        verify(github,never()).analysisFile(any(),anyString(),eq("package.json"));
+    }
+    @Test void unresolvedBuildFolderIsReportedSeparately() {
+        var github = mock(GitHubSource.class);
+        when(github.resolveCommit(any())).thenReturn(SHA);
+        var repository = new CloudRepository(github,Jev.disabled(),.8,(r,commit) -> { throw new IllegalStateException("앱 폴더가 여러 개"); });
+        assertThatThrownBy(() -> repository.inspect(request())).hasMessage("build_folder_unresolved");
+        verify(github,never()).analysisFile(any(),any(),any());
+    }
     @Test void repositoryErrorsStopAnalysisWithoutReturningUpstreamSecrets() {
         var github = mock(GitHubSource.class);
         when(github.resolveCommit(any())).thenThrow(new IllegalStateException("private-secret"));

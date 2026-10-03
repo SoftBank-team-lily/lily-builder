@@ -1,6 +1,7 @@
 package com.lily.builder.cloud;
 
 import com.lily.builder.BuildRequest;
+import com.lily.builder.BuildService;
 import com.lily.builder.GitHubSource;
 import com.lily.jev.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,7 +36,8 @@ public class CloudRepository {
     /** 특정 클라우드의 SDK·관리형 서비스 단서. 이것이 있을 때만 연관성을 모델에 묻는다 */
     static final Set<String> PROVIDER_SIGNALS = Set.of("aws-sdk", "gcp-sdk", "bigquery", "vertex-ai", "sagemaker",
         "s3", "bedrock", "aws-messaging", "gcs", "pubsub");
-    public record Evidence(String commit, List<String> files, Map<String,List<String>> signals,
+    /** @param dir 분석한 앱 폴더 (레포 루트 기준, 루트면 ""). 실제 배포가 볼 폴더와 같다 */
+    public record Evidence(String commit, String dir, List<String> files, Map<String,List<String>> signals,
                            String affinity, String source, Double confidence, List<String> limitations) {
         /** 발견한 SDK의 서비스 후보. 사용 여부/권한/네트워크가 확인되기 전에는 필수 기능으로 승격하지 않는다. */
         @com.fasterxml.jackson.annotation.JsonProperty("serviceHints")
@@ -57,34 +59,47 @@ public class CloudRepository {
             return List.copyOf(items);
         }
         public Map<String,Object> facts() {
-            return Map.of("commit", commit, "files", files, "signals", signals, "affinity", affinity,
+            return Map.of("commit", commit, "dir", dir, "files", files, "signals", signals, "affinity", affinity,
                 "source", source, "limitations", limitations, "serviceHints", serviceHints(), "reviewItems", reviewItems());
         }
     }
+    /** 실제 배포가 볼 앱 폴더를 정한다. 정하지 못하면 IllegalStateException */
+    interface AppFolders { String find(BuildRequest request, String commit); }
+
     private final GitHubSource github;
     private final Jev jev;
     private final double minConfidence;
+    private final AppFolders folders;
     @Autowired
-    public CloudRepository(GitHubSource github, CloudProperties properties, @Qualifier("cloudJev") Jev jev) {
-        this(github, jev, properties.jevMinConfidence());
+    public CloudRepository(GitHubSource github, CloudProperties properties, @Qualifier("cloudJev") Jev jev, BuildService builds) {
+        this(github, jev, properties.jevMinConfidence(), builds::appFolder);
     }
-    CloudRepository(GitHubSource github, Jev jev) { this(github, jev, CloudPolicy.DEFAULT_MIN_CONFIDENCE); }
-    CloudRepository(GitHubSource github, Jev jev, double minConfidence) {
-        this.github = github; this.jev = jev; this.minConfidence = minConfidence;
+    /** 테스트: 요청의 rootDir 를 그대로 앱 폴더로 본다 */
+    CloudRepository(GitHubSource github, Jev jev) {
+        this(github, jev, CloudPolicy.DEFAULT_MIN_CONFIDENCE, (request, commit) -> request.rootDir());
+    }
+    CloudRepository(GitHubSource github, Jev jev, double minConfidence, AppFolders folders) {
+        this.github = github; this.jev = jev; this.minConfidence = minConfidence; this.folders = folders;
     }
 
     public Evidence inspect(BuildRequest request) {
         try {
-            String root = request.rootDir() == null ? "" : request.rootDir().replaceAll("^/+|/+$", "");
-            if (Arrays.asList(root.split("/")).contains("..")) throw new Unavailable();
+            if (request.rootDir() != null && Arrays.asList(request.rootDir().split("/")).contains("..")) throw new Unavailable();
             String commit = github.resolveCommit(request);
             if (commit == null || !commit.matches("[0-9a-f]{40}")) throw new Unavailable();
-            Set<String> paths = new HashSet<>(github.paths(request, commit));
+            // rootDir 를 비우면 배포는 하위 폴더에서 앱을 찾는다. 분석도 그 폴더를 본다
+            String found;
+            try { found = folders.find(request.withCommit(commit), commit); }
+            catch (IllegalStateException e) { throw new Unavailable("build_folder_unresolved"); }
+            String root = found == null ? "" : found.replaceAll("^/+|/+$", "");
+            if (Arrays.asList(root.split("/")).contains("..")) throw new Unavailable();
+            BuildRequest analyzed = request.withCommit(commit).withSource(root, request.migrationsPath(), request.targetPort());
+            Set<String> paths = new HashSet<>(github.paths(analyzed, commit));
             List<String> files = new ArrayList<>();
             Map<String,List<String>> signals = new TreeMap<>();
             for (String file : FILES) {
                 if (!paths.contains(root.isEmpty() ? file : root + "/" + file)) continue;
-                String body = github.analysisFile(request, commit, file);
+                String body = github.analysisFile(analyzed, commit, file);
                 if (body == null) throw new Unavailable();
                 files.add(file);
                 extract(body, signals);
@@ -124,8 +139,10 @@ public class CloudRepository {
                     }
                 }
             }
-            return new Evidence(commit, List.copyOf(files), Map.copyOf(signals), affinity, source, confidence, List.copyOf(limitations));
-        } catch (RuntimeException e) { throw new Unavailable(); }
+            return new Evidence(commit, root, List.copyOf(files), Map.copyOf(signals), affinity, source, confidence, List.copyOf(limitations));
+        } catch (Unavailable e) { throw e; }
+        // 외부 오류에 담길 수 있는 토큰·본문은 돌려주지 않는다
+        catch (RuntimeException e) { throw new Unavailable(); }
     }
     static void extract(String body, Map<String,List<String>> signals) {
         String lower = body.toLowerCase(Locale.ROOT);
@@ -138,6 +155,8 @@ public class CloudRepository {
         });
     }
     public static final class Unavailable extends RuntimeException {
-        public Unavailable() { super("repository_analysis_unavailable"); }
+        public Unavailable() { this("repository_analysis_unavailable"); }
+        /** @param code 화면이 안내를 고를 수 있는 이유. 예: build_folder_unresolved (배포할 폴더를 지정해야 한다) */
+        public Unavailable(String code) { super(code); }
     }
 }

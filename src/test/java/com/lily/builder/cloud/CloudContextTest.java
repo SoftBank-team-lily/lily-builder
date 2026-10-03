@@ -59,7 +59,7 @@ class CloudContextTest {
     @Test void serviceHintsAreAdvisoryAndEnterpriseIdentityNeedsReview() {
         Map<String,List<String>> signals = new TreeMap<>();
         CloudRepository.extract("@aws-sdk/client-bedrock-runtime @aws-sdk/client-s3 @google-cloud/bigquery @azure/msal-node",signals);
-        var evidence = new CloudRepository.Evidence("a".repeat(40),List.of("package.json"),signals,"unknown","rules",null,List.of());
+        var evidence = new CloudRepository.Evidence("a".repeat(40),"",List.of("package.json"),signals,"unknown","rules",null,List.of());
         assertThat(evidence.serviceHints()).contains("aws-bedrock","aws-s3","gcp-bigquery","entra-integration");
         assertThat(evidence.reviewItems()).contains("review_azure_identity_and_service_integration","confirm_data_location");
         assertThat(evidence.facts()).containsKeys("serviceHints","reviewItems");
