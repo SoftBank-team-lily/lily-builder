@@ -33,6 +33,9 @@ public class GitHubSource {
     /** lily-cicd 가 한 ConfigMap 에 보관할 수 있는 크기 */
     static final int MAX_TOTAL_BYTES = 900 * 1024;
     private static final Pattern MIGRATION_FILE = Pattern.compile("[VUR][^/]*__[^/]*\\.sql");
+    /** pgroll 무중단 마이그레이션. {rootDir}/db/pgroll 바로 아래 */
+    static final String PGROLL_PATH = "db/pgroll";
+    private static final Pattern PGROLL_FILE = Pattern.compile("\\d+_[a-z0-9_]+\\.(ya?ml|json)");
 
     private final RestClient http;
     private final String apiBase;
@@ -68,9 +71,19 @@ public class GitHubSource {
 
     /**
      * {rootDir}/{migrationsPath} 아래의 V, U, R 파일 (하위 폴더 포함, 파일명 → 내용).
+     * {rootDir}/db/pgroll 에 pgroll 파일({번호}_{설명}.yaml|json)이 있으면 SQL 대신 그 파일들을 돌려준다.
      * 폴더가 없거나 {@code migrate=false} 면 비어 있다. 그러면 lily-cicd 는 이전처럼 앱의 Flyway 에 맡긴다.
      */
     public Map<String, String> migrations(BuildRequest request, String commit) {
+        return migrations(request, commit, true);
+    }
+
+    /** 온프레미스 에이전트용. 에이전트는 Flyway SQL 만 적용하므로 pgroll 폴더는 보지 않는다 */
+    public Map<String, String> sqlMigrations(BuildRequest request, String commit) {
+        return migrations(request, commit, false);
+    }
+
+    private Map<String, String> migrations(BuildRequest request, String commit, boolean allowPgroll) {
         if (!request.migrateOrDefault()) {
             return Map.of();
         }
@@ -84,14 +97,22 @@ public class GitHubSource {
         } catch (RestClientResponseException e) {
             throw new IllegalStateException("레포 파일 목록을 읽지 못했다 (GitHub " + e.getStatusCode().value() + ")", e);
         }
+        List<Tree.Entry> entries = tree == null || tree.tree() == null ? List.of() : tree.tree();
+        // pgroll 파일이 있으면 그쪽만 보낸다. Flyway 로 관리하던 앱이 넘어와도 옛 SQL 은 레포에 남아 있다
+        String pgrollPrefix = pgrollFolder(request) + "/";
+        boolean pgroll = allowPgroll && entries.stream().anyMatch(e -> "blob".equals(e.type()) && e.path().startsWith(pgrollPrefix)
+                && PGROLL_FILE.matcher(e.path().substring(pgrollPrefix.length())).matches());
+        Pattern pattern = pgroll ? PGROLL_FILE : MIGRATION_FILE;
+        String folder = pgroll ? pgrollPrefix : prefix;
         Map<String, String> files = new TreeMap<>();
         long bytes = 0;
-        for (Tree.Entry entry : tree == null || tree.tree() == null ? List.<Tree.Entry>of() : tree.tree()) {
-            if (!"blob".equals(entry.type()) || !entry.path().startsWith(prefix)) {
+        for (Tree.Entry entry : entries) {
+            if (!"blob".equals(entry.type()) || !entry.path().startsWith(folder)
+                    || pgroll && entry.path().indexOf('/', folder.length()) >= 0) {
                 continue;
             }
             String name = entry.path().substring(entry.path().lastIndexOf('/') + 1);
-            if (!MIGRATION_FILE.matcher(name).matches()) {
+            if (!pattern.matcher(name).matches()) {
                 continue;
             }
             String sql = get(request, URI.create(rawBase + "/" + repo(request) + "/" + commit + "/" + entry.path()))
@@ -159,6 +180,12 @@ public class GitHubSource {
                 .filter(entry -> "blob".equals(entry.type()))
                 .map(Tree.Entry::path)
                 .toList();
+    }
+
+    /** 레포 기준 pgroll 마이그레이션 폴더. 예: {@code backend/db/pgroll} */
+    static String pgrollFolder(BuildRequest request) {
+        String root = request.rootDir() == null ? "" : request.rootDir();
+        return (root + "/" + PGROLL_PATH).replaceAll("/+", "/").replaceAll("^/|/$", "");
     }
 
     /** 레포 기준 마이그레이션 폴더. 예: {@code backend/src/main/resources/db/migration} */

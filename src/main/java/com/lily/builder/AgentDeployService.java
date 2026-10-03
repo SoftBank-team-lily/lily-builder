@@ -136,7 +136,7 @@ public class AgentDeployService {
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));
             store.save(build);
-            Map<String, String> migrations = github.migrations(resolved, commit);
+            Map<String, String> migrations = github.sqlMigrations(resolved, commit);
             Map<String, Object> job = job(build.getId(), resolved, database, dockerfile, migrations, resolved.canaryPath());
             if (databaseEnv != null) {
                 job.put("databaseEnv", databaseEnv);
