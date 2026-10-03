@@ -500,3 +500,64 @@ test("앱이_text_plain으로_돌려준_502는_엣지_오류가_아니라_그대
   assert.equal(response.status, 502);
   assert.equal(marked, false);
 });
+
+const EDGE_502 = () => new Response("<html><a href=\"/cdn-cgi/l/\">502: Bad gateway</a></html>",
+  { status: 502, headers: { "content-type": "text/html" } });
+
+test("PC에_보낸_POST가_엣지_502를_받고_다시_확인한_GET이_530이면_큐에_넣고_202를_준다", async () => {
+  pc = async (request) => request.method === "POST" ? EDGE_502() : new Response("tunnel", { status: 530 });
+
+  const { response, marked } = await submit(post("/posts", "{\"n\":1}"));
+
+  assert.equal(response.status, 202);
+  assert.equal(marked, true);
+  assert.equal(blogQueue().pending(), 1);
+  assert.deepEqual(sent.map((r) => r.method), ["POST", "GET"]);
+});
+
+test("PC에_보낸_POST가_엣지_502를_받고_다시_확인한_GET이_200이면_502를_그대로_주고_장애_상태로_두지_않는다", async () => {
+  pc = async (request) => request.method === "POST" ? EDGE_502() : new Response("ok");
+
+  const { response, marked } = await submit(post("/posts", "{}"));
+
+  assert.equal(response.status, 502);
+  assert.equal(marked, false);
+  assert.equal(blogQueue().downSince(), null);
+  assert.equal(blogQueue().pending(), 0);
+});
+
+test("PC에_연결하지_못한_뒤에는_큐가_비고_Worker의_장애_표시가_없어도_다음_POST를_PC에_보내지_않고_큐에_넣는다", async () => {
+  pc = async () => { throw new TypeError("connect failed"); };
+  await submit(post("/posts", "{\"n\":1}"));
+  blogQueue().db.exec("DELETE FROM q");
+  sent = [];
+
+  const { response } = await submit(post("/posts", "{\"n\":2}"));
+
+  assert.equal(response.status, 202);
+  assert.equal(sent.length, 0);
+});
+
+test("큐가_비어도_장애_상태면_alarm이_PC를_확인하고_PC가_돌아오면_장애_상태를_풀어_새_POST를_PC로_보낸다", async () => {
+  pc = async () => { throw new TypeError("connect failed"); };
+  await submit(post("/posts", "{}"));
+  blogQueue().db.exec("DELETE FROM q");
+  assert.notEqual(blogQueue().downSince(), null);
+  assert.notEqual(blogQueue().alarmAt(), null);
+  pc = async () => new Response("created", { status: 201 });
+
+  await blogQueue().alarm();
+
+  assert.equal(blogQueue().downSince(), null);
+  assert.deepEqual(sent.map((r) => r.method).slice(-1), ["GET"]);
+  const { response } = await submit(post("/posts", "{}"));
+  assert.equal(response.status, 201);
+});
+
+test("관리_상태에_장애_상태_시작_시각이_보인다", async () => {
+  await submit(post("/posts", "{}"), { down: true });
+
+  const state = await adminState();
+
+  assert.match(state.downSince, /^\d{4}-\d{2}-\d{2}T/);
+});

@@ -3,9 +3,12 @@
 //
 //   - 등록 경로는 앱의 DO 에 둔다 (builder 가 관리 주소 QUEUE_ADMIN_HOST 로 바꾼다). Worker 는 앱마다 CONFIG_MILLIS 동안 기억한다
 //   - 등록 경로의 POST 는 평소에도 DO 를 거친다. DO 가 요청을 하나씩 처리하므로 재전송 중에 들어온 POST 도 큐 뒤에 붙는다
-//   - 큐가 비어 있고 PC 장애 표시가 없으면 DO 가 바로 PC 로 보내고 PC 응답을 그대로 돌려준다
+//   - 큐가 비어 있고 장애 상태가 아니면 DO 가 바로 PC 로 보내고 PC 응답을 그대로 돌려준다
 //   - PC 가 받지 못했으면(530·연결 실패, 또는 이 데이터센터가 PC 를 장애로 표시) 큐에 넣고 202 와 X-Lily-Queued-Id 를 돌려준다
-//   - PC 에 보낸 뒤 엣지 오류가 나면 PC 가 받았을 수 있어 큐에 넣지 않고 오류를 그대로 돌려준다
+//   - PC 에 보낸 뒤 엣지 오류(502 등)가 나면 바로 GET / 로 다시 확인한다. 530(터널에 연결 없음)이면 PC 가 받지 못했으니 쌓고,
+//     확인도 모호하면 PC 가 받았을 수 있어 쌓지 않고 오류를 그대로 돌려준다
+//   - 장애를 한 번 보면 DO 가 장애 상태를 기억한다. PC 확인이 성공할 때까지 새 POST 는 PC 에 보내지 않고 쌓는다
+//     (Worker 의 장애 표시는 DOWN_MILLIS 뒤 풀리지만 DO 의 장애 상태는 확인이 성공해야 풀린다)
 //   - 재전송: alarm 이 PC 에 닿는지 확인하고 순번대로 보낸다. 2xx·4xx 는 끝, 5xx·엣지 오류·시간 초과는 멈추고 다시 예약한다
 //   - 결과 조회: GET /__lily_edge/queued/{id}
 //
@@ -178,7 +181,11 @@ export class WriteQueue {
     const down = request.headers.get(DOWN_HEADER) === "1";
     const body = request.body === null ? null : await request.arrayBuffer();
     const headers = kept(request.headers);
-    if (down || this.pending() > 0) {
+    const origin = new URL(target).origin;
+    if (down) {
+      await this.markDown(origin);
+    }
+    if (down || this.pending() > 0 || this.downSince() !== null) {
       return this.enqueue(target, headers, body, false);
     }
     let response;
@@ -186,18 +193,49 @@ export class WriteQueue {
       response = await fetch(await this.toPc(target, headers, body));
     } catch (e) {
       // PC 에 연결하지 못했다. PC 가 받지 않았으니 쌓는다
+      await this.markDown(origin);
       return this.enqueue(target, headers, body, true);
     }
     if (response.status === 530) {
+      await this.markDown(origin);
       return this.enqueue(target, headers, body, true);
     }
     if (await edgeFailed(response)) {
-      // PC 가 받았을 수 있다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 POST 부터는 쌓는다)
+      // 엣지의 502 등은 PC 가 받은 뒤 끊겼을 수도 있다. 바로 다시 확인해서 터널에 연결이 없으면(530) PC 가 받지 못한 것이다
+      const check = await this.probe(origin);
+      if (!check.edge) {
+        return response;
+      }
+      await this.markDown(origin);
+      if (check.status === 530) {
+        return this.enqueue(target, headers, body, true);
+      }
+      // 확인도 모호하다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 POST 부터는 쌓는다)
       const out = new Headers(response.headers);
       out.set(DOWN_HEADER, "1");
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
     }
     return response;
+  }
+
+  /** PC 장애를 봤다. PC 확인이 성공할 때까지 새 POST 는 PC 에 보내지 않고 쌓는다. 큐가 비어 있어도 alarm 이 확인한다 */
+  async markDown(origin) {
+    if (this.downSince() === null) {
+      this.sql.exec("INSERT INTO config (name, value) VALUES ('down', ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+        JSON.stringify({ since: Date.now(), origin }));
+    }
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + RETRY_MIN_MILLIS);
+    }
+  }
+
+  down() {
+    const row = this.sql.exec("SELECT value FROM config WHERE name = 'down'").toArray()[0];
+    return row === undefined ? null : JSON.parse(row.value);
+  }
+
+  downSince() {
+    return this.down()?.since ?? null;
   }
 
   async enqueue(target, headers, body, discovered) {
@@ -227,13 +265,16 @@ export class WriteQueue {
   async drain() {
     this.sql.exec("DELETE FROM q WHERE state != 'queued' AND updated_at < ?", Date.now() - KEEP_MILLIS);
     const rows = this.sql.exec("SELECT id, origin, iv, payload FROM q WHERE state = 'queued' ORDER BY seq").toArray();
-    if (rows.length === 0) {
+    const down = this.down();
+    if (rows.length === 0 && down === null) {
       this.retry = RETRY_MIN_MILLIS;
       return;
     }
-    if (!(await this.ready(rows[0].origin))) {
+    if (!(await this.ready(rows[0]?.origin ?? down.origin))) {
       return this.later();
     }
+    // PC 에 닿는다. 쌓인 요청을 보내고, 큐가 비면 새 POST 는 다시 PC 로 바로 간다
+    this.sql.exec("DELETE FROM config WHERE name = 'down'");
     for (const row of rows) {
       let saved;
       try {
@@ -351,7 +392,9 @@ export class WriteQueue {
     }));
     const check = this.lastCheck();
     const lastCheck = check.at === null ? null : { ...check, at: new Date(check.at).toISOString() };
-    return Response.json({ paths: this.paths(), counts, items, lastCheck });
+    const since = this.downSince();
+    return Response.json({ paths: this.paths(), counts, items, lastCheck,
+      downSince: since === null ? null : new Date(since).toISOString() });
   }
 
   status(id) {
