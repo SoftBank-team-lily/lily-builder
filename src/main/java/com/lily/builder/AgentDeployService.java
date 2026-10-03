@@ -224,7 +224,7 @@ public class AgentDeployService {
             throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
         }
         try {
-            hub.send(key, json.writeValueAsString(Map.of("type", "schema-complete", "app", app)));
+            hub.send(key, json.createObjectNode().put("type", "schema-complete").put("app", app).toString());
             return Optional.of(json.writeValueAsString(Map.of("status", "ACCEPTED", "appName", app,
                     "message", "내 PC 에이전트에 complete 를 보냈다. 상태는 몇 초 안에 바뀐다")));
         } catch (JsonProcessingException e) {
