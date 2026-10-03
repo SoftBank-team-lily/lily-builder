@@ -47,7 +47,7 @@ class AppMigrationTest {
     @BeforeEach
     void setUp() {
         migration = new AppMigration(store, builds, deploys, aws, awsDb, clouds, addresses, copy, certificates,
-                new BuildServiceTest.SyncRunner(), url -> publicStatus.get(), Duration.ofMillis(50), Duration.ofMillis(5));
+                new BuildServiceTest.SyncRunner(), url -> publicStatus.get(), Duration.ofMillis(50), Duration.ofMillis(5), Duration.ofMillis(1));
         store.save(succeeded(new Build("old00001", request()), "cloudProvider=AWS"));
         when(deploys.cloudProvider(APP)).thenReturn("AWS");
         when(clouds.profile()).thenReturn(new CloudProfiles("http://gcp-cicd", "gcp-reg", "gcp-pull",
@@ -67,6 +67,8 @@ class AppMigrationTest {
         when(awsDb.existing(APP, null, null)).thenReturn(Optional.of(new ProvisionerClient.Connection("a", Map.of("DATABASE_URL", RDS_URL))));
         when(gcpDb.existing(APP, "127.0.0.1", DatabaseCopy.LOCAL_PORT))
                 .thenReturn(Optional.of(new ProvisionerClient.Connection("g", Map.of("DATABASE_URL", CLOUDSQL_URL))));
+        when(gcpDb.ensure(APP, "postgres", "127.0.0.1", DatabaseCopy.LOCAL_PORT))
+                .thenReturn(new ProvisionerClient.Connection("g", Map.of()));
         when(certificates.enabled()).thenReturn(true);
         when(certificates.jobKey(anyString(), anyInt())).thenReturn(new TunnelCertificates.JobKey("key", "cert"));
         when(aws.stop(APP)).thenReturn(ok("{}"));
@@ -104,7 +106,7 @@ class AppMigrationTest {
         Build record = migration.start(APP, request().withCloudProvider("GCP"));
 
         verify(aws).start(APP);
-        verify(gcpDb).delete(APP);
+        verify(gcpDb).deleteById("g");
         verify(addresses, never()).pointCloud(anyString(), any());
         verify(builds, never()).deployImage(any(), anyString(), anyString(), anyString());
         Build saved = store.find(record.getId()).orElseThrow();
@@ -167,13 +169,17 @@ class AppMigrationTest {
         record.log("cloudProvider=AWS");
         record.log("migrate: database postgres");
         record.status(Build.Status.DEPLOYING, "migrate: started");
+        record.log(AppMigration.STEP + "PREPARE");
+        record.log(AppMigration.STEP + "DATABASE");
+        record.log(AppMigration.TARGET_DB + "g");
+        record.log(AppMigration.STEP + "FREEZE");
         record.log(AppMigration.STEP + "COPY");
         store.save(record);
 
         migration.resumeInterrupted();
 
         verify(aws).start(APP);
-        verify(gcpDb).delete(APP);
+        verify(gcpDb).deleteById("g");
         verify(addresses, never()).pointCloud(anyString(), any());
         assertThat(store.find("mig00001").orElseThrow().getStatus()).isEqualTo(Build.Status.FAILED);
     }
@@ -240,5 +246,37 @@ class AppMigrationTest {
 
     private static CicdClient.Passthrough ok(String body) {
         return new CicdClient.Passthrough(200, body);
+    }
+
+    @Test
+    void DB_없는_앱은_GCP_에_먼저_띄우고_주소를_바꾼_뒤에_원본을_내려_다운타임이_없다() {
+        when(aws.release(APP)).thenReturn(ok("{\"activeSlot\":null,\"slots\":[{\"slot\":\"stable\",\"database\":null}]}"));
+
+        Build record = migration.start(APP, request().withCloudProvider("GCP"));
+
+        InOrder order = inOrder(builds, addresses, aws);
+        order.verify(builds).deployImage(any(), eq("img:1"), eq("abc"), anyString());
+        order.verify(addresses).pointCloud(APP, "gcp.lilycloud.kr");
+        order.verify(aws).stop(APP);
+        verify(copy, never()).copy(anyString(), anyString(), anyString(), any());
+        verify(gcpDb, never()).ensure(anyString(), anyString(), anyString(), anyInt());
+        Build saved = store.find(record.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(saved.getLogs()).contains("migrate: downtime 0ms");
+    }
+
+    @Test
+    void 새_클라우드_provisioner_가_원본_DB_기록을_돌려주면_원본을_내리지_않고_원본_DB_를_지우지_않는다() {
+        when(gcpDb.ensure(APP, "postgres", "127.0.0.1", DatabaseCopy.LOCAL_PORT))
+                .thenReturn(new ProvisionerClient.Connection("a", Map.of()));
+
+        Build record = migration.start(APP, request().withCloudProvider("GCP"));
+
+        verify(aws, never()).stop(anyString());
+        verify(gcpDb, never()).deleteById(anyString());
+        verify(awsDb, never()).deleteById(anyString());
+        Build saved = store.find(record.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(saved.getLogs()).anyMatch(l -> l.contains("기록 테이블 공유"));
     }
 }
