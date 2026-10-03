@@ -33,7 +33,7 @@ public class GitHubSource {
     /** lily-cicd 가 한 ConfigMap 에 보관할 수 있는 크기 */
     static final int MAX_TOTAL_BYTES = 900 * 1024;
     private static final Pattern MIGRATION_FILE = Pattern.compile("[VUR][^/]*__[^/]*\\.sql");
-    /** pgroll 무중단 마이그레이션 (lily-cicd docs/schema-migration.md 7 절). {rootDir}/db/pgroll 바로 아래 */
+    /** pgroll 무중단 마이그레이션. {rootDir}/db/pgroll 바로 아래 */
     static final String PGROLL_PATH = "db/pgroll";
     private static final Pattern PGROLL_FILE = Pattern.compile("\\d+_[a-z0-9_]+\\.(ya?ml|json)");
 
