@@ -18,7 +18,7 @@ import java.util.Optional;
  * <ol>
  *   <li>에이전트: 슬롯 컨테이너·이미지, database 면 PC 의 앱 DB ({@link AgentDeployService#remove}). 꺼져 있으면 건너뛴다</li>
  *   <li>공개 주소: {@code {app}.{zone}} 레코드(터널이든 ALB 든)와 에이전트 터널의 호스트 규칙, 엣지 Worker 라우트</li>
- *   <li>클러스터: 버스팅·거점 전환이 만든 클라우드 대기 배포. database 면 RDS DB 도 (lily-cicd 가 provisioner 로)</li>
+ *   <li>클러스터: 버스팅·거점 전환이 만든 클라우드 대기 배포. database 면 클라우드 DB(RDS·Cloud SQL) 도 (lily-cicd 가 provisioner 로)</li>
  * </ol>
  * 에이전트가 거절하면(거점을 옮기는 중 등) 주소와 클러스터는 건드리지 않는다.
  */
@@ -31,16 +31,16 @@ public class OnPremAppRemoval {
     private final AgentCloudflare cloudflare;
     private final AppAddress addresses;
     private final EdgeWorker edge;
-    private final CicdClient cicd;
+    private final CloudRouting clouds;
 
     @Autowired
     public OnPremAppRemoval(AgentDeployService agents, AgentCloudflare cloudflare, AppAddress addresses,
-                            EdgeWorker edge, CicdClient cicd) {
+                            EdgeWorker edge, CloudRouting clouds) {
         this.agents = agents;
         this.cloudflare = cloudflare;
         this.addresses = addresses;
         this.edge = edge;
-        this.cicd = cicd;
+        this.clouds = clouds;
     }
 
     /**
@@ -48,6 +48,8 @@ public class OnPremAppRemoval {
      * @throws IllegalStateException 에이전트나 lily-cicd 가 거절했다 (거점 전환·배포 중)
      */
     public Optional<Map<String, Object>> remove(String app, boolean database) {
+        // 대기 배포는 이 앱의 클라우드(AWS·GCP) 클러스터에 있다. GCP 가 연결되지 않았으면 PC 를 지우기 전에 거절한다
+        CicdClient cicd = clouds.cicdOf(app);
         Optional<AgentDeployService.AgentRemoval> agent = agents.remove(app, database);
         if (agent.isEmpty()) {
             return Optional.empty();
