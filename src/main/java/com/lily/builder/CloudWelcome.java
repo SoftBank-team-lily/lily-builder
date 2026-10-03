@@ -33,7 +33,10 @@ public class CloudWelcome {
     }
 
     /**
-     * @param databaseTunnel 이 배포가 클라우드 DB 터널을 쓴다. 그러면 배스천·Cloud SQL 주소가 있어야 한다
+     * DB 터널(정방향 Cloud SQL, 역방향 내 PC DB)도 GCP 배스천으로 바꾼다. 클라우드 DB 를 쓰지 않는 배포(내 PC DB)도
+     * GCP 대기 Pod 가 역방향 터널로 PC DB 에 붙고, 거점 전환의 DB 이전이 Cloud SQL 로 가야 해서 함께 보낸다.
+     *
+     * @param databaseTunnel 이 배포가 클라우드 DB 터널을 쓴다. 그러면 배스천·Cloud SQL 주소가 꼭 있어야 한다
      */
     public void retarget(String key, String app, boolean databaseTunnel) {
         CloudProfiles gcp = clouds.profile();
@@ -48,14 +51,16 @@ public class CloudWelcome {
         burst.put("cloudOrigin", gcp.origin());
         burst.put("app", app);
         message.put("burst", burst);
+        String publicKey = hub.sshPublicKey(key);
         if (databaseTunnel) {
             if (!gcp.tunnelConfigured() || !certificates.enabled()) {
                 throw new IllegalStateException(MISSING_TUNNEL);
             }
-            String publicKey = hub.sshPublicKey(key);
             if (publicKey.isBlank()) {
                 throw new IllegalStateException("에이전트가 DB 터널 키를 보내지 않았다. 에이전트를 다시 실행한다");
             }
+        }
+        if (gcp.tunnelConfigured() && certificates.enabled() && !publicKey.isBlank()) {
             Map<String, Object> database = new LinkedHashMap<>();
             database.put("sshHost", gcp.tunnelSshHost());
             database.put("sshUser", gcp.tunnelSshUser());
