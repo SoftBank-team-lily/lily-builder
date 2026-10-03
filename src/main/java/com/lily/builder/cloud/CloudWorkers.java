@@ -38,7 +38,9 @@ public class CloudWorkers {
             if (worker.token() != null && !worker.token().isBlank()) request.header("Authorization", "Bearer " + worker.token());
             if (build != null) request.contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(build);
             return request.exchange((req, response) -> {
-                if (!response.getStatusCode().is2xxSuccessful()) throw new Unavailable(build == null ? "worker_unavailable" : "dispatch_unconfirmed");
+                // 4xx 면 worker 가 빌드를 접수하지 않은 것이 확실하다. 그 밖의 실패는 접수됐을 수도 있다
+                if (!response.getStatusCode().is2xxSuccessful()) throw new Unavailable(build == null ? "worker_unavailable"
+                    : response.getStatusCode().is4xxClientError() ? "dispatch_rejected" : "dispatch_unconfirmed");
                 byte[] body = response.getBody().readNBytes(262145);
                 if (body.length > 262144) throw new Unavailable("invalid_worker_response");
                 JsonNode node = json.readTree(body);

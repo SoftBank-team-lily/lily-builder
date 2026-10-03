@@ -13,8 +13,9 @@ public class CloudController {
     private final CloudService service;
     private final CloudWorkers workers;
     private final CloudRepository repository;
-    public CloudController(CloudService service, CloudWorkers workers, CloudRepository repository) {
-        this.service = service; this.workers = workers; this.repository = repository;
+    private final CloudDispatches dispatches;
+    public CloudController(CloudService service, CloudWorkers workers, CloudRepository repository, CloudDispatches dispatches) {
+        this.service = service; this.workers = workers; this.repository = repository; this.dispatches = dispatches;
     }
     public record Deployment(@Valid @NotNull CloudPolicy.Request policy, @Valid @NotNull BuildRequest build) {}
     @PostMapping("/plans")
@@ -58,14 +59,27 @@ public class CloudController {
         var decision = service.plan(effective, evidence.facts());
         if (decision.status().equals("selected")) decision = service.recheck(effective, decision);
         if (!decision.status().equals("selected")) return ResponseEntity.status(409).body(Map.of("decision", decision, "repository", evidence));
+        // 같은 앱을 방금 보냈으면 다시 보내지 않고 그 배포를 알려 준다
+        var previous = dispatches.claim(build.appName(), decision.provider());
+        if (previous.isPresent()) {
+            Map<String,Object> body = new LinkedHashMap<>(Map.of("error", "build_already_started", "appName", build.appName(),
+                "provider", previous.get().provider()));
+            if (previous.get().buildId() != null)
+                body.put("statusPath", "/api/cloud/builds/" + previous.get().provider() + "/" + previous.get().buildId());
+            return ResponseEntity.status(409).body(body);
+        }
         try {
             var buildResult = workers.start(decision.provider(), build);
+            String id = buildResult.path("id").asText();
+            dispatches.started(build.appName(), decision.provider(), id);
             return ResponseEntity.accepted().body(Map.of("decision", decision, "repository", evidence, "build", buildResult,
-                "statusPath", "/api/cloud/builds/" + decision.provider() + "/" + buildResult.path("id").asText()));
+                "statusPath", "/api/cloud/builds/" + decision.provider() + "/" + id));
         } catch (CloudWorkers.Unavailable e) {
-            // 요청이 실제로 접수됐을 가능성이 있다. 다른 클라우드로 다시 보내지 않는다.
+            // 거절이 확실하면 다시 보낼 수 있다. 그 밖에는 접수됐을 가능성이 있어 다시 보내거나 다른 클라우드로 보내지 않는다.
+            boolean rejected = "dispatch_rejected".equals(e.getMessage());
+            if (rejected) dispatches.release(build.appName());
             return ResponseEntity.status(502).body(Map.of("error", e.getMessage(), "decision", decision,
-                "appName", build.appName(), "retryable", false));
+                "appName", build.appName(), "retryable", rejected));
         }
     }
     @GetMapping("/builds/{provider:aws|gcp}/{id:[a-zA-Z0-9-]{1,64}}")
