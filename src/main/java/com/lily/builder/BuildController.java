@@ -11,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,7 +32,8 @@ public class BuildController {
 
     private final BuildService service;
     private final ClusterApps clusterApps;
-    private final CicdClient cicd;
+    /** 앱이 배포된 클라우드(AWS·GCP)의 lily-cicd 와 주소 */
+    private final CloudRouting clouds;
     private final AgentDeployService agents;
     private final AppAddress addresses;
     private final EdgeWorker edge;
@@ -41,17 +43,17 @@ public class BuildController {
 
     BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
                     AppAddress addresses) {
-        this(service, clusterApps, cicd, agents, addresses, EdgeWorker.disabled(), null);
+        this(service, clusterApps, CloudRouting.awsOnly(cicd), agents, addresses, EdgeWorker.disabled(), null);
     }
 
     @Autowired
-    public BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
+    public BuildController(BuildService service, ClusterApps clusterApps, CloudRouting clouds, AgentDeployService agents,
                            AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem) {
         this.onPrem = onPrem;
         this.edge = edge;
         this.service = service;
         this.clusterApps = clusterApps;
-        this.cicd = cicd;
+        this.clouds = clouds;
         this.agents = agents;
         this.addresses = addresses;
     }
@@ -130,7 +132,7 @@ public class BuildController {
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(rejected(e.getMessage()));
         }
-        return passthrough(cicd.rollback(appName, request != null && request.appOnly()));
+        return passthrough(clouds.cicdOf(appName).rollback(appName, request != null && request.appOnly()));
     }
 
     /** 앱을 내린다 (모든 슬롯 0). Service·Ingress·DB 가 남아서 start 로 되살린다. 배포 중이면 409 */
@@ -139,7 +141,7 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.stop(appName));
+        return passthrough(clouds.cicdOf(appName).stop(appName));
     }
 
     /** 내린 앱을 기본 레플리카로 다시 띄운다. 배포 중이면 409 */
@@ -148,7 +150,7 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.start(appName));
+        return passthrough(clouds.cicdOf(appName).start(appName));
     }
 
     /**
@@ -176,7 +178,7 @@ public class BuildController {
                 return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body("{\"status\":\"REMOVED\"}");
             }
         }
-        CicdClient.Passthrough removed = cicd.remove(appName, database);
+        CicdClient.Passthrough removed = clouds.cicdOf(appName).remove(appName, database);
         if (removed.status() == 200 && addresses.enabled()) {
             try {
                 addresses.removeCloud(appName);
@@ -227,7 +229,7 @@ public class BuildController {
                     .body(rejected("플랫폼 존이 설정되지 않았다"));
         }
         try {
-            return ResponseEntity.ok(addresses.pointCloud(appName));
+            return ResponseEntity.ok(addresses.pointCloud(appName, clouds.originOf(appName)));
         } catch (IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
                     .body(rejected(e.getMessage()));
@@ -341,7 +343,7 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(cicd.release(appName));
+        return passthrough(clouds.cicdOf(appName).release(appName));
     }
 
     /** 스키마 이력(pgroll·Flyway)과 열린 pgroll 롤백 창. 프로젝트 상세의 스키마 이력 패널이 쓴다 */
@@ -355,7 +357,7 @@ public class BuildController {
         if (onprem.isPresent()) {
             return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(onprem.get());
         }
-        return passthrough(cicd.schema(appName));
+        return passthrough(clouds.cicdOf(appName).schema(appName));
     }
 
     /** pgroll 롤백 창을 바로 닫는다 (complete). 이후에는 스키마를 되돌릴 수 없다. 열린 창이 없으면 409 */
@@ -374,7 +376,14 @@ public class BuildController {
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(rejected(e.getMessage()));
         }
-        return passthrough(cicd.completeSchema(appName));
+        return passthrough(clouds.cicdOf(appName).completeSchema(appName));
+    }
+
+    /** GCP 앱인데 GCP lily-cicd·주소가 연결되지 않았다. AWS 로 보내지 않는다 */
+    @ExceptionHandler(CloudRouting.Unconfigured.class)
+    public ResponseEntity<String> unconfigured(CloudRouting.Unconfigured e) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                .body(rejected(e.getMessage()));
     }
 
     private String rejected(String message) {
