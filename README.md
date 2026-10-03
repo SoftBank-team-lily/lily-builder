@@ -23,7 +23,8 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 - DB 를 고르면 lily-cicd 가 lily-db-provisioner 로 DB 를 만들고 접속 정보를 앱 환경변수로 넣는다
 - 마이그레이션은 같은 커밋의 `src/main/resources/db/migration` (Flyway V/U SQL) 에서 읽는다.
   `{rootDir}/db/pgroll` 바로 아래에 `{번호}_{설명}.yaml|json` 이 있으면 SQL 대신 그 파일들을 보내고, lily-cicd 가 pgroll 로 무중단 적용한다
-  (lily-cicd `docs/schema-migration.md` 7 절). 온프레미스 에이전트에는 지금처럼 SQL 만 보낸다
+  (lily-cicd `docs/schema-migration.md` 7 절). 온프레미스 에이전트가 PostgreSQL 앱이면 pgroll 파일을 에이전트로 보내고 에이전트가 적용한다
+  (`pgroll` 기능을 알리지 않은 에이전트면 거절). DB 가 RDS(`cloud`)면 보내기 전에 프로비저너로 pgroll 을 켠다
 
 ## API
 
@@ -36,6 +37,8 @@ GitHub 주소를 받아 이미지를 빌드하고 lily-cicd 로 배포를 요청
 | GET | `/api/apps` | k3s 에 떠 있는 앱 |
 | GET | `/api/apps/{app}/release` | 슬롯별 릴리스와 롤백 가능 여부 |
 | POST | `/api/apps/{app}/rollback` | 직전 릴리스로. 본문 `{appOnly}` (되돌릴 수 없는 스키마면 앱만). 온프레미스 앱은 에이전트로 보낸다 |
+| GET | `/api/apps/{app}/schema` | 스키마 이력. 클라우드 앱은 lily-cicd, 온프레미스 앱은 에이전트가 3초마다 보내는 상태에서 |
+| POST | `/api/apps/{app}/schema/complete` | 롤백 창을 닫고 바로 complete. 온프레미스 앱은 에이전트에 `schema-complete` 를 보내고 202 |
 | POST | `/api/apps/{app}/stop`, `/start` | 중지(모든 슬롯 0)·다시 시작. lily-cicd 로 넘긴다. 배포 중이면 `409` |
 | DELETE | `/api/apps/{app}?database=` | 앱 삭제. `database=true` 면 DB 도 DROP. 앱 주소 CNAME(ALB)과 엣지 라우트도 지운다 |
 | GET, PUT | `/api/apps/{app}/address` | 공개 주소 `{app}.{존}` 의 거점 (`CLOUD` ALB / `ONPREM` 터널 / `NONE` / `OTHER`). PUT `{"home":"cloud"}` 는 ALB 로 되돌린다 |
