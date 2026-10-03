@@ -662,6 +662,7 @@ public class AgentDeployService {
                 running.remove(buildId);
                 build.url(url == null || url.isBlank() ? null : url);
                 update(build, Build.Status.SUCCEEDED, logLine);
+                warmEdge(build);
             }
             case "FAILED" -> {
                 running.remove(buildId);
@@ -832,6 +833,46 @@ public class AgentDeployService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void diagnoser(FailureDiagnoser diagnoser) {
         this.diagnoser = diagnoser;
+    }
+
+    private EdgeWorker edge = EdgeWorker.disabled();
+    private EdgePrewarm prewarm;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void edgeWorker(EdgeWorker edge, EdgePrewarm prewarm) {
+        this.edge = edge;
+        this.prewarm = prewarm;
+    }
+
+    /**
+     * 온프레미스 배포가 끝났다. 공개 주소에 엣지 Worker 라우트를 걸고 주요 페이지를 열어 읽기 사본을 채운다.
+     * 대기 배포가 없는 앱(DB 가 PC 에 있는 앱, 온프레미스 전용)도 PC 장애 때 사본으로 GET 에 답하게 된다. 실패해도 배포는 성공이다
+     */
+    private void warmEdge(Build build) {
+        if (!edge.enabled()) {
+            return;
+        }
+        String app = build.getAppName();
+        runner.run(() -> {
+            try {
+                note(build, edge.attachRoute(app));
+            } catch (RuntimeException e) {
+                log.warn("edge route {} failed: {}", app, e.getMessage());
+                note(build, "edge: failed " + e.getMessage());
+                return;
+            }
+            if (prewarm != null) {
+                note(build, prewarm.warm(edge.publicUrl(app)));
+            }
+        });
+    }
+
+    /** 끝난 빌드에 한 줄 덧붙인다 */
+    private void note(Build build, String line) {
+        synchronized (transitions) {
+            build.log(line);
+            store.save(build);
+        }
     }
 
     /** FAILED 로 바꾸기 전에 원인을 정한다 (화면이 FAILED 를 보자마자 가져간다) */

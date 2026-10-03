@@ -61,6 +61,10 @@ lily:
       edge:
         enabled: ${PLATFORM_EDGE_ENABLED:false}
         script-name: ${PLATFORM_EDGE_SCRIPT_NAME:lily-edge}
+        # 쓰기 큐 (EdgeQueue): PC 장애 때 앱이 등록한 경로의 POST 를 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
+        # base64 32바이트 (쌓아 둔 헤더·본문 암호화 키, 관리 토큰). 비우면 끈다. 바꾸면 쌓여 있던 요청을 풀지 못한다
+        queue:
+          key: ${PLATFORM_EDGE_QUEUE_KEY:}
     # 하이브리드에서 고른 GCP 데이터 플레인. 비우면 AWS 만 동작하고, GCP 프로젝트는 배포 전에 거절한다
     gcp:
       cicd-url: ${GCP_CICD_URL:}
