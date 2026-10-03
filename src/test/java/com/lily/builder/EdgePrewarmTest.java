@@ -52,6 +52,38 @@ class EdgePrewarmTest {
     }
 
     @Test
+    void 첫_화면_스크립트의_fetch_GET_경로를_열고_POST_호출과_템플릿_경로는_열지_않는다() {
+        pages.put(BASE, html("""
+                <script>
+                  const res = await fetch("/api/posts");
+                  await fetch('/api/feed?page=1', { cache: "no-store" });
+                  await fetch(`/api/slow?ms=${ms}`, { cache: "no-store" });
+                  await fetch("/api/comments", { method: "POST", body: JSON.stringify(x) });
+                  await fetch("https://other.example/api/x");
+                </script>
+                """));
+        pages.put(BASE + "api/posts", new EdgePrewarm.Page(200, "application/json", ""));
+        pages.put(BASE + "api/feed?page=1", new EdgePrewarm.Page(200, "application/json", ""));
+
+        String line = prewarm.warm(BASE);
+
+        assertThat(opened).containsExactly(BASE, BASE + "sitemap.xml", BASE + "api/posts", BASE + "api/feed?page=1");
+        assertThat(line).isEqualTo("prewarm: 3/3 pages 200 from " + BASE);
+    }
+
+    @Test
+    void 같은_호스트_JS_파일의_fetch_GET_경로와_axios_get_경로도_연다() {
+        pages.put(BASE, html("<script src=\"/static/app.js\"></script><a href=\"/about\">a</a>"));
+        pages.put(BASE + "static/app.js", new EdgePrewarm.Page(200, "application/javascript",
+                "fetch(\"/api/tags\").then(r => r.json()); axios.get('/api/stats'); fetch(\"/api/posts\", {method:\"GET\"});"));
+
+        prewarm.warm(BASE);
+
+        assertThat(opened).containsExactly(BASE, BASE + "sitemap.xml", BASE + "static/app.js", BASE + "about",
+                BASE + "api/tags", BASE + "api/posts", BASE + "api/stats");
+    }
+
+    @Test
     void 다른_호스트_링크와_mailto_javascript_Worker_내부_경로는_열지_않는다() {
         pages.put(BASE, html("""
                 <a href="https://other.example/x">x</a> <a href="mailto:a@b.c">m</a>
