@@ -71,6 +71,46 @@ public class ProvisionerClient {
         http.post().uri("/api/databases/{id}/pgroll", db.id()).retrieve().toBodilessEntity();
     }
 
+    /**
+     * 이미 있는 프로젝트 DB 의 접속 정보. 만들지 않는다 (앱을 다른 클라우드로 옮길 때 원본 DB).
+     *
+     * @param host null 이면 provisioner 의 공개 주소 (RDS·Cloud SQL 엔드포인트)
+     * @return DB 가 없으면 empty
+     */
+    public java.util.Optional<Connection> existing(String projectId, String host, Integer port) {
+        if (!configured) {
+            throw new IllegalStateException("provisioner 가 설정되지 않았다 (PROVISIONER_URL, PROVISIONER_API_TOKEN)");
+        }
+        Database db = find(projectId);
+        if (db == null) {
+            return java.util.Optional.empty();
+        }
+        EnvResponse env = http.get()
+                .uri(b -> {
+                    b.path("/api/databases/{id}/env");
+                    if (host != null) {
+                        b.queryParam("host", host).queryParam("port", port);
+                    }
+                    return b.build(db.id());
+                })
+                .retrieve().body(EnvResponse.class);
+        return java.util.Optional.of(new Connection(db.id(), env == null ? Map.of() : env.env()));
+    }
+
+    /** 프로젝트 DB 의 엔진. 없으면 empty */
+    public java.util.Optional<String> engine(String projectId) {
+        Database db = find(projectId);
+        return db == null ? java.util.Optional.empty() : java.util.Optional.of(db.engine());
+    }
+
+    /** 프로젝트 DB 를 지운다 (DROP). 없으면 아무것도 하지 않는다. 옮기다 실패해 만든 빈 DB 를 치울 때 쓴다 */
+    public void delete(String projectId) {
+        Database db = find(projectId);
+        if (db != null) {
+            http.delete().uri("/api/databases/{id}", db.id()).retrieve().toBodilessEntity();
+        }
+    }
+
     private Database find(String projectId) {
         List<Database> found = http.get()
                 .uri(b -> b.path("/api/databases").queryParam("projectId", projectId).build())

@@ -506,13 +506,28 @@ public class AgentDeployService {
                 .map(Build::getAppName);
     }
 
-    /** 이 앱의 가장 최근 빌드에 기록된 클라우드. 기록이 없으면 AWS */
+    /**
+     * 이 앱의 가장 최근 빌드에 기록된 클라우드. 기록이 없으면 AWS.
+     * 다른 클라우드로 옮기는 중에 만든 빌드({@link AppMigration#PART})는 빼고, 한 빌드에 여러 줄이면 마지막 줄을 본다
+     * (옮기기 기록은 옮기기 전 클라우드를 남기고, 전환을 마치면 옮긴 클라우드를 덧붙인다)
+     */
     public String cloudProvider(String app) {
         return store.findAll().stream()
                 .filter(build -> app.equals(build.getAppName()))
+                .filter(build -> build.getLogs().stream().noneMatch(line -> line.startsWith(AppMigration.PART)))
                 .max(Comparator.comparing(Build::getCreatedAt))
-                .map(build -> build.getLogs().stream().anyMatch(line -> line.startsWith("cloudProvider=GCP")))
-                .orElse(false) ? "GCP" : "AWS";
+                .map(AgentDeployService::lastCloudProvider)
+                .orElse("AWS");
+    }
+
+    static String lastCloudProvider(Build build) {
+        String provider = "AWS";
+        for (String line : build.getLogs()) {
+            if (line.startsWith("cloudProvider=")) {
+                provider = "cloudProvider=GCP".equals(line) ? "GCP" : "AWS";
+            }
+        }
+        return provider;
     }
 
     private ProvisionerClient provisionerOf(String provider) {

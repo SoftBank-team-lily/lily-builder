@@ -637,4 +637,37 @@ class BuildServiceTest {
         verify(github, never()).file(any(), anyString(), not(eq("Dockerfile")));
         cicd.verify();
     }
+
+    @Test
+    void 옮기기용_이미지_빌드는_레지스트리에_올리고_cicd_에_배포하지_않는다() {
+        when(kaniko.build(anyString(), any(), anyString(), eq(COMMIT), any())).thenReturn("reg/blog:t");
+
+        Build build = service.prepareImage(request("postgres"), AppMigration.PART + "m1");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getImage()).isEqualTo("reg/blog:t");
+        assertThat(build.getCommit()).isEqualTo(COMMIT);
+        assertThat(build.getLogs()).contains(AppMigration.PART + "m1", "prepared: reg/blog:t");
+        cicd.verify();
+    }
+
+    @Test
+    void 옮기기용_배포는_빌드하지_않고_만들어_둔_이미지와_커밋으로_배포하며_주소를_건드리지_않는다() {
+        String other = "fedcba9876543210fedcba9876543210fedcba98";
+        when(github.migrations(any(), eq(other))).thenReturn(Map.of());
+        when(github.file(any(), eq(other), eq("Dockerfile"))).thenReturn("FROM scratch");
+        cicd.expect(requestTo("http://cicd/api/deployments"))
+                .andExpect(content().json("{\"appName\":\"blog\",\"imageUrl\":\"reg/blog:pre\"}"))
+                .andRespond(withSuccess("{\"status\":\"SUCCESS\"}", MediaType.APPLICATION_JSON));
+
+        Build build = service.deployImage(request("postgres"), "reg/blog:pre", other, AppMigration.PART + "m1");
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(build.getCommit()).isEqualTo(other);
+        assertThat(build.getLogs()).contains("build: prepared image reg/blog:pre", "address: left to the migration");
+        org.mockito.Mockito.verify(kaniko, org.mockito.Mockito.never())
+                .build(anyString(), any(), anyString(), any(), any());
+        org.mockito.Mockito.verify(github, org.mockito.Mockito.never()).resolveCommit(any());
+        cicd.verify();
+    }
 }

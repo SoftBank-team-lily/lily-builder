@@ -16,15 +16,19 @@ class DeployResume {
 
     private final BuildService builds;
     private final AgentDeployService agents;
+    private final AppMigration migration;
 
-    DeployResume(BuildService builds, AgentDeployService agents) {
+    DeployResume(BuildService builds, AgentDeployService agents, AppMigration migration) {
         this.builds = builds;
         this.agents = agents;
+        this.migration = migration;
     }
 
     @EventListener(ApplicationReadyEvent.class)
     void onReady() {
         builds.resumeInterrupted();
         agents.resumeInFlight();
+        // 옮기는 도중에 죽었으면 원본으로 되돌린다 (원본이 replicas 0 으로 남지 않게)
+        migration.resumeInterrupted();
     }
 }
