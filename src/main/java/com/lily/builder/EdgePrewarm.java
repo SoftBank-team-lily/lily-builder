@@ -22,7 +22,8 @@ import java.util.regex.Pattern;
  * 요청이 엣지 Worker 를 지나며 그 데이터센터에 읽기 사본이 생기므로, 방문자가 아직 열지 않은 페이지도 PC 장애 때 사본으로 나간다.
  *
  * <pre>
- * 고르는 주소: 첫 화면 / → 그 HTML 의 같은 호스트 href·src → /sitemap.xml 의 loc. 첫 화면을 포함해 최대 {@link #LIMIT} 개
+ * 고르는 주소: 첫 화면 / → 그 HTML 의 같은 호스트 href·src → 스크립트의 fetch GET 경로 → /sitemap.xml 의 loc
+ *            → 연 HTML·JS 파일의 fetch GET 경로. 첫 화면을 포함해 최대 {@link #LIMIT} 개
  * 사본 저장 여부는 Worker 가 정한다 (공개 응답만). 여기서는 열기만 한다
  * </pre>
  *
@@ -36,13 +37,18 @@ public class EdgePrewarm {
     static final int LIMIT = 50;
     private static final Pattern LINK = Pattern.compile("(?i)\\b(?:href|src)\\s*=\\s*[\"']([^\"'#\\s]+)");
     private static final Pattern LOC = Pattern.compile("(?is)<loc>\\s*([^<\\s]+)\\s*</loc>");
+    /** fetch("경로") 또는 fetch("경로", { 옵션 }). 경로에 $ 가 있으면(템플릿) 맞지 않는다 */
+    private static final Pattern FETCH = Pattern.compile(
+            "\\bfetch\\(\\s*([\"'`])([^\"'`$\\s]+)\\1\\s*(\\)|,\\s*\\{([^}]*)\\})");
+    private static final Pattern NOT_GET = Pattern.compile("(?i)\\bmethod\\s*:\\s*[\"'`](?!GET[\"'`])");
+    private static final Pattern AXIOS_GET = Pattern.compile("\\baxios\\.get\\(\\s*([\"'`])([^\"'`$\\s]+)\\1");
 
     /** GET 한 번. 닿지 못하면 RuntimeException */
     interface Http {
         Page get(URI uri);
     }
 
-    /** body 는 HTML·XML 일 때만 채운다 */
+    /** body 는 HTML·XML·JS 일 때만 채운다 */
     record Page(int status, String contentType, String body) {
     }
 
@@ -76,6 +82,7 @@ public class EdgePrewarm {
         Set<URI> targets = new LinkedHashSet<>();
         targets.add(root);
         collect(root, first.body(), LINK, targets);
+        collectApis(root, first.body(), targets);
         try {
             Page sitemap = http.get(root.resolve("/sitemap.xml"));
             if (sitemap.status() == 200) {
@@ -85,18 +92,48 @@ public class EdgePrewarm {
             log.debug("prewarm sitemap failed: {} {}", base, e.getMessage());
         }
 
-        List<URI> pages = new ArrayList<>(targets).subList(0, Math.min(targets.size(), LIMIT));
+        // 연 HTML·JS 에서 찾은 API 경로를 뒤에 붙여 가며 연다 (첫 화면을 포함해 LIMIT 개까지)
+        List<URI> pages = new ArrayList<>(targets);
         int ok = first.status() == 200 ? 1 : 0;
-        for (URI page : pages.subList(1, pages.size())) {
+        int opened = 1;
+        for (int i = 1; i < pages.size() && opened < LIMIT; i++, opened++) {
+            URI page = pages.get(i);
             try {
-                if (http.get(page).status() == 200) {
+                Page result = http.get(page);
+                if (result.status() == 200) {
                     ok++;
+                    int before = targets.size();
+                    collectApis(root, result.body(), targets);
+                    pages.addAll(new ArrayList<>(targets).subList(before, targets.size()));
                 }
             } catch (RuntimeException e) {
                 log.debug("prewarm page failed: {} {}", page, e.getMessage());
             }
         }
-        return "prewarm: " + ok + "/" + pages.size() + " pages 200 from " + base;
+        return "prewarm: " + ok + "/" + opened + " pages 200 from " + base;
+    }
+
+    /**
+     * 스크립트(HTML 안 또는 JS 파일)가 GET 으로 부르는 같은 호스트 경로. SPA 는 목록을 HTML 이 아니라 API 로 불러온다.
+     * fetch("…") 중 method 가 GET 이 아닌 호출, ${…} 가 든 템플릿 경로는 뺀다. axios.get("…") 도 본다
+     */
+    private static void collectApis(URI root, String text, Set<URI> targets) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        StringBuilder gets = new StringBuilder();
+        Matcher fetch = FETCH.matcher(text);
+        while (fetch.find()) {
+            String options = fetch.group(4);
+            if (options == null || !NOT_GET.matcher(options).find()) {
+                gets.append("href=\"").append(fetch.group(2)).append("\"\n");
+            }
+        }
+        Matcher axios = AXIOS_GET.matcher(text);
+        while (axios.find()) {
+            gets.append("href=\"").append(axios.group(2)).append("\"\n");
+        }
+        collect(root, gets.toString(), LINK, targets);
     }
 
     /** 같은 호스트의 http(s) 주소만 모은다. Worker 내부 경로와 해석하지 못하는 링크는 뺀다 */
@@ -152,7 +189,7 @@ public class EdgePrewarm {
             try {
                 HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
                 String type = response.headers().firstValue("content-type").orElse("");
-                boolean text = type.contains("html") || type.contains("xml");
+                boolean text = type.contains("html") || type.contains("xml") || type.contains("javascript");
                 return new Page(response.statusCode(), type,
                         text ? new String(response.body(), java.nio.charset.StandardCharsets.UTF_8) : "");
             } catch (InterruptedException e) {
