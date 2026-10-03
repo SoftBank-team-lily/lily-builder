@@ -9,6 +9,12 @@
 // 앱이 돌려준 5xx 는 엣지 오류 페이지가 아니므로 그대로 돌려준다.
 //
 // PC 가 응답하지 못하면 DOWN_MILLIS 동안 PC 를 건너뛴다. isolate 메모리와 Cache API(같은 데이터센터의 모든 isolate 가 본다)에 둔다.
+//
+// 쓰기 큐(queue.js)에 등록된 앱의 POST 는 클라우드로 다시 보내지 않고 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
+
+import { queued, WriteQueue } from "./queue.js";
+
+export { WriteQueue };
 
 /** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 */
 const DOWN_MILLIS = 10_000;
@@ -33,6 +39,10 @@ export default {
       return fetch(request);
     }
     const host = url.hostname;
+    const write = await queued(request, url, env, () => isDown(host), () => markDown(host, ctx));
+    if (write !== null) {
+      return write;
+    }
     if (await isDown(host)) {
       return toCloud(request, null, cloud, host);
     }
