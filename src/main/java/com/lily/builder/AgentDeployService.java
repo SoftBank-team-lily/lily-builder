@@ -42,6 +42,8 @@ public class AgentDeployService {
     /** 에이전트(lily-on-premise DeployJob)의 앱 이름 규칙. 클라우드보다 짧다 */
     static final Pattern APP_NAME = Pattern.compile("[a-z][a-z0-9-]{0,30}");
     private static final String DEFAULT_HEALTH_PATH = "/actuator/health/readiness";
+    /** 잡을 보낸 직후 남기는 줄. 뒤에 에이전트 프로세스 id 가 붙는다 */
+    private static final String SENT_TO = "agent: send to ";
     private static final Logger log = LoggerFactory.getLogger(AgentDeployService.class);
 
     private final BuildStore store;
@@ -149,7 +151,7 @@ public class AgentDeployService {
                 if (cancelled(build)) {
                     return;
                 }
-                build.log("agent: send to " + hub.agentId(agentKey));
+                build.log(SENT_TO + hub.agentId(agentKey));
                 store.save(build);
             }
             // PostgreSQL 은 db/pgroll 이 있으면 pgroll 파일을 보낸다 (에이전트가 무중단으로 적용한다). MySQL 은 Flyway SQL 만
@@ -668,6 +670,43 @@ public class AgentDeployService {
         if (resumed > 0) {
             log.info("onprem builds resumed after restart: {}", resumed);
         }
+    }
+
+    /**
+     * 에이전트가 hello 를 보냈다. 같은 key 에 다른 agentId 면 에이전트 프로세스가 새로 뜬 것이다.
+     * 잡은 에이전트 메모리에만 있어서 이전 프로세스로 보낸 진행 중 빌드는 다시 오지 않는다. 제한 시간을 기다리지 않고 바로 닫는다.
+     * 같은 agentId 의 재연결(소켓만 끊겼다 붙음)은 잡이 계속 돌고 있으니 그대로 둔다
+     */
+    public void agentHello(String agentKey, String agentId) {
+        if (agentId == null || agentId.isBlank()) {
+            return;
+        }
+        // 잡 보내기 직전 저장과 겹치지 않게 한다. 여기서 닫으면 send 가 cancelled 로 보고 잡을 보내지 않는다
+        synchronized (transitions) {
+            running.forEach((id, key) -> {
+                if (!agentKey.equals(key)) {
+                    return;
+                }
+                store.find(id).ifPresent(build -> {
+                    String sentTo = sentTo(build);
+                    if (inFlight(build) && sentTo != null && !sentTo.equals(agentId)) {
+                        fail(build, "agent: 에이전트가 다시 시작돼 잡이 사라졌다 (" + sentTo + " → " + agentId
+                                + "). 다시 배포한다");
+                    }
+                });
+            });
+        }
+    }
+
+    /** 잡을 보낸 에이전트 프로세스 id. 아직 보내기 전이거나 hello 전에 보냈으면 null */
+    private static String sentTo(Build build) {
+        String agentId = null;
+        for (String line : build.getLogs()) {
+            if (line.startsWith(SENT_TO)) {
+                agentId = line.substring(SENT_TO.length()).trim();
+            }
+        }
+        return agentId == null || agentId.isBlank() || "null".equals(agentId) ? null : agentId;
     }
 
     private static boolean inFlight(Build build) {
