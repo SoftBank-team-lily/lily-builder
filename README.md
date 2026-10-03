@@ -212,3 +212,7 @@ BUILDER_REGISTRY=localhost:30500 BUILDER_INSECURE=true CICD_URL=http://localhost
 ## 아직 없는 것
 
 - 인증 (누구나 배포 가능). `/api/burst` 와 에이전트 소켓만 토큰을 받는다
+
+### JEV 코드 결함 판별 기준 로컬 테스트
+
+`REMEDIATE_JEV_YES_THRESHOLD`로 수정안 생성을 허용하는 예 확률 기준을 조절한다. 기본은 `0.8`, 허용 범위는 `0.5`~`1`이다. 로컬 비교 테스트는 `.env.local`에 `REMEDIATE_JEV_YES_THRESHOLD=0.6`을 넣고 환경변수로 전달해 실행한다. 환경변수를 제거하면 기본값으로 돌아간다. 아니오 기준 `0.2`와 diff 검증은 유지한다. `.env.local`은 Spring Boot가 자동으로 읽지 않으므로 실행 환경에 별도로 주입해야 한다.

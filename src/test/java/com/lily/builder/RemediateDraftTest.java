@@ -87,6 +87,16 @@ class RemediateDraftTest {
         assertThat(new JevDefectGate((state, question) -> Optional.empty()).codeDefect("log")).isEmpty();
     }
 
+    @Test
+    void configurableThresholdKeepsDefaultAndNoBoundary() {
+        com.lily.jev.Jev model = (s, q) -> Optional.of(new com.lily.jev.Answer(null, .67, .67));
+        assertThat(new JevDefectGate(model).codeDefect("log")).isEmpty();
+        assertThat(new JevDefectGate(model, .6).codeDefect("log")).contains(true);
+        assertThat(new JevDefectGate((s,q) -> Optional.of(new com.lily.jev.Answer(null,.38,.38)), .6).codeDefect("log")).isEmpty();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new JevDefectGate(model, .4)).isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new JevDefectGate(model, Double.NaN)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     private static RemediateDraftService service(Optional<Boolean> defect, PatchModel model) {
         return new RemediateDraftService((repo, token, commit, path) -> PATH.equals(path) ? SOURCE : null,
                 log -> defect, model);

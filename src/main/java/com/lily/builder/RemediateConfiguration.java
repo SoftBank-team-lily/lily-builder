@@ -10,8 +10,9 @@ import org.springframework.context.annotation.Configuration;
 public class RemediateConfiguration {
 
     @Bean
-    DefectGate defectGate(RemediateProperties properties) {
-        return defectGateFor(properties.jevApiKey());
+    DefectGate defectGate(RemediateProperties properties,
+            @org.springframework.beans.factory.annotation.Value("${lily.remediate.jev-yes-threshold:0.8}") double threshold) {
+        return defectGateFor(properties.jevApiKey(), threshold);
     }
 
     /**
@@ -19,10 +20,14 @@ public class RemediateConfiguration {
      * PR 은 frontend 스위치와 프로젝트 동의가 막는다.
      */
     static DefectGate defectGateFor(String jevApiKey) {
+        return defectGateFor(jevApiKey, 0.8);
+    }
+
+    static DefectGate defectGateFor(String jevApiKey, double threshold) {
         if (jevApiKey == null || jevApiKey.isBlank()) {
             return log -> java.util.Optional.of(true);
         }
-        return new JevDefectGate(new com.lily.jev.HttpJev(jevApiKey, 0.8));
+        return new JevDefectGate(new com.lily.jev.HttpJev(jevApiKey, 0.8), threshold);
     }
 
     @Bean

@@ -8,15 +8,25 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * jev 에게 예 확률만 묻는다. 0.8 이상이면 코드 장애, 0.2 이하면 아니다.
+ * jev 에게 예 확률만 묻는다. 기본 0.8 이상이면 코드 장애, 0.2 이하면 아니다.
+ * 예 기준은 로컬 비교 테스트를 위해 설정할 수 있다.
  * 그 사이거나 호출이 실패하면 빈 값이다.
  */
 public final class JevDefectGate implements DefectGate {
 
     private final Jev jev;
+    private final double yesThreshold;
 
     public JevDefectGate(Jev jev) {
+        this(jev, 0.8);
+    }
+
+    public JevDefectGate(Jev jev, double yesThreshold) {
+        if (!Double.isFinite(yesThreshold) || yesThreshold < 0.5 || yesThreshold > 1) {
+            throw new IllegalArgumentException("JEV yes threshold must be between 0.5 and 1");
+        }
         this.jev = jev;
+        this.yesThreshold = yesThreshold;
     }
 
     @Override
@@ -28,7 +38,7 @@ public final class JevDefectGate implements DefectGate {
             return Optional.empty();
         }
         double yes = answer.get().noul();
-        if (yes >= 0.8) {
+        if (yes >= yesThreshold) {
             return Optional.of(true);
         }
         if (yes <= 0.2) {
