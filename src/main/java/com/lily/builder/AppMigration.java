@@ -24,14 +24,16 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 클라우드 전용 앱을 다른 클라우드로 옮긴다 (AWS ↔ GCP). DB(PostgreSQL)도 복사한다.
  *
+ * DB 가 있으면 (쓰기가 둘로 갈라지지 않게 원본을 먼저 내린다. 다운타임은 FREEZE 부터 공개 주소 확인까지):
  * <ol>
  *   <li>PREPARE: 옮길 클라우드 레지스트리에 이미지를 미리 만든다 (다운타임 전)</li>
  *   <li>DATABASE: 옮길 클라우드 provisioner 로 빈 DB 를 만든다</li>
- *   <li>FREEZE: 원본 앱을 내린다 (replicas 0). 여기서부터 다운타임</li>
+ *   <li>FREEZE: 원본 앱을 내린다 (replicas 0)</li>
  *   <li>COPY: 원본 DB → 새 DB ({@link DatabaseCopy})</li>
  *   <li>DEPLOY: 만들어 둔 이미지로 새 클라우드에 배포한다</li>
  *   <li>SWITCH: 공개 주소 CNAME 을 새 클라우드로 바꾸고 공개 주소로 확인한다</li>
  * </ol>
+ * DB 가 없으면 PREPARE → DEPLOY → SWITCH → (Cloudflare 반영 대기) → FREEZE 로 다운타임 없이 옮긴다.
  * 어느 단계에서 실패하든 원본을 다시 올리고 주소를 되돌린 뒤 새 쪽을 지운다. 끝나면 HOLD: 원본은 replicas 0 과
  * DB 를 그대로 두고, 사용자가 되돌리거나({@link #rollback}) 정리한다({@link #finalizeMigration}).
  *
@@ -51,6 +53,7 @@ public class AppMigration {
     static final String COMMITTED = "migrate: committed";
     static final String FINALIZED = "migrate: finalized";
     static final String ROLLED_BACK = "migrate: rolled back";
+    static final String TARGET_DB = "migrate: target db ";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<Build.Status> RUNNING = Set.of(Build.Status.QUEUED, Build.Status.BUILDING,
             Build.Status.DEPLOYING);
@@ -76,6 +79,8 @@ public class AppMigration {
     private final Probe probe;
     private final Duration verifyTimeout;
     private final Duration waitStep;
+    /** 주소를 바꾼 뒤 옛 쪽을 내리거나 지우기 전에 기다린다. Cloudflare 엣지마다 반영이 수십 초 늦다 */
+    private final Duration switchGrace;
     /** 지금 옮기고 있는 앱. 같은 앱을 두 번 옮기지 않는다 */
     private final Set<String> moving = ConcurrentHashMap.newKeySet();
 
@@ -84,13 +89,13 @@ public class AppMigration {
                         ProvisionerClient provisioner, CloudClients clouds, AppAddress addresses, DatabaseCopy copy,
                         TunnelCertificates certificates, BuildService.BuildRunner runner) {
         this(store, builds, deploys, cicd, provisioner, clouds, addresses, copy, certificates, runner,
-                AppMigration::httpStatus, Duration.ofSeconds(90), Duration.ofSeconds(3));
+                AppMigration::httpStatus, Duration.ofSeconds(90), Duration.ofSeconds(3), Duration.ofSeconds(90));
     }
 
     AppMigration(BuildStore store, BuildService builds, AgentDeployService deploys, CicdClient cicd,
                  ProvisionerClient provisioner, CloudClients clouds, AppAddress addresses, DatabaseCopy copy,
                  TunnelCertificates certificates, BuildService.BuildRunner runner, Probe probe,
-                 Duration verifyTimeout, Duration waitStep) {
+                 Duration verifyTimeout, Duration waitStep, Duration switchGrace) {
         this.store = store;
         this.builds = builds;
         this.deploys = deploys;
@@ -104,6 +109,7 @@ public class AppMigration {
         this.probe = probe;
         this.verifyTimeout = verifyTimeout;
         this.waitStep = waitStep;
+        this.switchGrace = switchGrace;
     }
 
     /**
@@ -221,83 +227,98 @@ public class AppMigration {
 
     void run(Build record, BuildRequest request, Plan plan) {
         String app = plan.app();
+        Set<Step> started = java.util.EnumSet.noneOf(Step.class);
         Step step = null;
-        Instant frozen = null;
         try {
-            step = step(record, Step.PREPARE);
+            step = step(record, Step.PREPARE, started);
             Build image = await(builds.prepareImage(request, PART + record.getId()), "이미지");
             record.log("migrate: image " + image.getImage() + " commit " + image.getCommit());
-
-            String sourceUrl = null;
-            String targetUrl = null;
-            if (plan.database() != null) {
-                step = step(record, Step.DATABASE);
+            long downtime;
+            if (plan.database() == null) {
+                // 둘 다 떠 있는 동안 주소를 바꾸고, 반영을 기다린 뒤 원본을 내린다
+                step = step(record, Step.DEPLOY, started);
+                await(builds.deployImage(request, image.getImage(), image.getCommit(), PART + record.getId()), "배포");
+                step = step(record, Step.SWITCH, started);
+                addresses.pointCloud(app, origin(plan.to()));
+                verify(app);
+                sleep(switchGrace);
+                step = step(record, Step.FREEZE, started);
+                CicdClient.Passthrough stopped = cicd(plan.from()).stop(app);
+                if (stopped.status() != 200) {
+                    // 주소는 이미 새 쪽이다. 원본은 finalize 가 지운다
+                    record.log("migrate: " + plan.from() + " 앱을 내리지 못했다 (" + stopped.status() + "), finalize 때 지운다");
+                }
+                downtime = 0;
+            } else {
+                step = step(record, Step.DATABASE, started);
                 ProvisionerClient target = provisioner(plan.to());
-                target.ensure(app, plan.database(), "127.0.0.1", DatabaseCopy.LOCAL_PORT);
-                sourceUrl = databaseUrl(provisioner(plan.from()), app, "GCP".equals(plan.from()));
-                targetUrl = databaseUrl(target, app, "GCP".equals(plan.to()));
-            }
+                String sourceId = provisioner(plan.from()).existing(app, null, null)
+                        .orElseThrow(() -> new IllegalStateException(plan.from() + " 에 " + app + " DB 가 없다")).databaseId();
+                String targetId = target.ensure(app, plan.database(), "127.0.0.1", DatabaseCopy.LOCAL_PORT).databaseId();
+                if (targetId.equals(sourceId)) {
+                    // 두 provisioner 가 같은 기록 테이블을 쓰면 새 DB 를 만들지 못하고 원본 기록을 돌려준다
+                    throw new IllegalStateException(plan.to() + " provisioner 가 " + plan.from() + " DB 기록을 돌려줬다 (기록 테이블 공유)");
+                }
+                record.log(TARGET_DB + targetId);
+                String sourceUrl = databaseUrl(provisioner(plan.from()), app, "GCP".equals(plan.from()));
+                String targetUrl = databaseUrl(target, app, "GCP".equals(plan.to()));
 
-            step = step(record, Step.FREEZE);
-            frozen = Instant.now();
-            CicdClient.Passthrough stopped = cicd(plan.from()).stop(app);
-            if (stopped.status() != 200) {
-                throw new IllegalStateException(plan.from() + " 앱을 내리지 못했다: " + stopped.status() + " " + stopped.body());
-            }
-
-            if (plan.database() != null) {
-                step = step(record, Step.COPY);
+                step = step(record, Step.FREEZE, started);
+                Instant frozen = Instant.now();
+                CicdClient.Passthrough stopped = cicd(plan.from()).stop(app);
+                if (stopped.status() != 200) {
+                    throw new IllegalStateException(plan.from() + " 앱을 내리지 못했다: " + stopped.status() + " " + stopped.body());
+                }
+                step = step(record, Step.COPY, started);
                 String result = copy.copy(record.getId(), sourceUrl, targetUrl, tunnel(record.getId()));
                 result.lines().filter(line -> line.startsWith("copy:")).forEach(line -> record.log("migrate: " + line));
                 store.save(record);
+
+                step = step(record, Step.DEPLOY, started);
+                await(builds.deployImage(request, image.getImage(), image.getCommit(), PART + record.getId()), "배포");
+                step = step(record, Step.SWITCH, started);
+                addresses.pointCloud(app, origin(plan.to()));
+                verify(app);
+                downtime = Duration.between(frozen, Instant.now()).toMillis();
             }
-
-            step = step(record, Step.DEPLOY);
-            await(builds.deployImage(request, image.getImage(), image.getCommit(), PART + record.getId()), "배포");
-
-            step = step(record, Step.SWITCH);
-            addresses.pointCloud(app, origin(plan.to()));
-            verify(app);
-            long downtime = Duration.between(frozen, Instant.now()).toMillis();
             record.log("migrate: downtime " + downtime + "ms");
             record.log(COMMITTED);
             record.log("cloudProvider=" + plan.to());
             record.url("https://" + addresses.host(app));
-            record.status(Build.Status.SUCCEEDED, "migrate: hold (" + plan.from() + " 앱은 replicas 0, DB 보관)");
+            record.status(Build.Status.SUCCEEDED, "migrate: hold (" + plan.from() + " 앱은 replicas 0, "
+                    + (plan.database() == null ? "DB 없음" : "DB 보관") + ")");
             store.save(record);
             log.info("migration committed: app={} {} -> {} downtime={}ms", app, plan.from(), plan.to(), downtime);
         } catch (RuntimeException e) {
             log.warn("migration failed: app={} step={} message={}", app, step, e.getMessage());
             record.log("migrate: failed at " + step + ": " + e.getMessage());
-            undo(record, plan, step);
+            undo(record, plan, started);
             record.status(Build.Status.FAILED, "failed: " + e.getMessage());
             store.save(record);
         }
     }
 
-    /** 실패한 단계까지 한 일을 되돌린다. 하나가 실패해도 나머지는 한다 */
-    private void undo(Build record, Plan plan, Step failed) {
-        if (failed == null || failed == Step.PREPARE) {
-            return;
-        }
+    /** 시작한 단계를 되돌린다. 각 동작은 여러 번 해도 같다. 하나가 실패해도 나머지는 한다 */
+    private void undo(Build record, Plan plan, Set<Step> started) {
         String app = plan.app();
-        if (failed.compareTo(Step.FREEZE) >= 0) {
+        if (started.contains(Step.FREEZE)) {
             quietly(record, "원본 다시 올리기", () -> {
-                CicdClient.Passthrough started = cicd(plan.from()).start(app);
-                if (started.status() != 200) {
-                    throw new IllegalStateException(started.status() + " " + started.body());
+                CicdClient.Passthrough up = cicd(plan.from()).start(app);
+                if (up.status() != 200) {
+                    throw new IllegalStateException(up.status() + " " + up.body());
                 }
             });
         }
-        if (failed == Step.SWITCH) {
+        if (started.contains(Step.SWITCH)) {
             quietly(record, "주소 되돌리기", () -> addresses.pointCloud(app, origin(plan.from())));
         }
-        if (failed.compareTo(Step.DEPLOY) >= 0) {
+        if (started.contains(Step.DEPLOY)) {
             quietly(record, plan.to() + " 앱 지우기", () -> cicd(plan.to()).remove(app, plan.database() != null));
         }
-        if (plan.database() != null) {
-            quietly(record, plan.to() + " DB 지우기", () -> provisioner(plan.to()).delete(app));
-        }
+        // 이번에 만든 DB 만 지운다 (id 로). 원본 DB 기록을 지우는 일이 없게
+        record.getLogs().stream().filter(l -> l.startsWith(TARGET_DB)).findFirst()
+                .map(l -> l.substring(TARGET_DB.length()))
+                .ifPresent(id -> quietly(record, plan.to() + " DB 지우기", () -> provisioner(plan.to()).deleteById(id)));
     }
 
     /**
@@ -317,6 +338,8 @@ public class AppMigration {
             }
             awaitReady(cicd(plan.from()), app);
             addresses.pointCloud(app, origin(plan.from()));
+            // 반영이 늦은 엣지가 아직 새 쪽으로 보낸다. 기다린 뒤 지운다
+            sleep(switchGrace);
             quietly(record, plan.to() + " 앱 지우기", () -> cicd(plan.to()).remove(app, plan.database() != null));
             record.log(ROLLED_BACK);
             record.log("cloudProvider=" + plan.from());
@@ -430,11 +453,12 @@ public class AppMigration {
                 store.save(record);
                 continue;
             }
-            Step step = record.getLogs().stream().filter(l -> l.startsWith(STEP)).reduce((a, b) -> b)
-                    .map(l -> Step.valueOf(l.substring(STEP.length()))).orElse(null);
-            log.warn("migration interrupted: app={} step={}", plan.app(), step);
-            record.log("migrate: builder restarted at " + step + ", undoing");
-            undo(record, plan, step);
+            Set<Step> started = java.util.EnumSet.noneOf(Step.class);
+            record.getLogs().stream().filter(l -> l.startsWith(STEP))
+                    .forEach(l -> started.add(Step.valueOf(l.substring(STEP.length()))));
+            log.warn("migration interrupted: app={} steps={}", plan.app(), started);
+            record.log("migrate: builder restarted after " + started + ", undoing");
+            undo(record, plan, started);
             record.status(Build.Status.FAILED, "failed: builder 가 옮기는 도중에 다시 시작했다");
             store.save(record);
         }
@@ -465,7 +489,8 @@ public class AppMigration {
         return new Plan(record.getAppName(), from, to, "none".equals(database) ? null : database);
     }
 
-    private Step step(Build record, Step step) {
+    private Step step(Build record, Step step, Set<Step> started) {
+        started.add(step);
         record.log(STEP + step);
         store.save(record);
         return step;

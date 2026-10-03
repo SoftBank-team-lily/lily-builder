@@ -103,12 +103,9 @@ public class ProvisionerClient {
         return db == null ? java.util.Optional.empty() : java.util.Optional.of(db.engine());
     }
 
-    /** 프로젝트 DB 를 지운다 (DROP). 없으면 아무것도 하지 않는다. 옮기다 실패해 만든 빈 DB 를 치울 때 쓴다 */
-    public void delete(String projectId) {
-        Database db = find(projectId);
-        if (db != null) {
-            http.delete().uri("/api/databases/{id}", db.id()).retrieve().toBodilessEntity();
-        }
+    /** DB 를 지운다 (DROP). 옮기다 실패해 이번에 만든 DB 만 id 로 치운다 */
+    public void deleteById(String databaseId) {
+        http.delete().uri("/api/databases/{id}", databaseId).retrieve().toBodilessEntity();
     }
 
     private Database find(String projectId) {
