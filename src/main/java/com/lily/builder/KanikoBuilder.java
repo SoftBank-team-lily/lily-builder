@@ -1,6 +1,7 @@
 package com.lily.builder;
 
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
+import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
@@ -98,6 +99,12 @@ public class KanikoBuilder {
                 k8s.configMaps().inNamespace(ns).withName(jobName).delete();
             }
         }
+    }
+
+    /** 빌드 중인 Job 을 지운다 (Pod 까지). 기다리던 {@link #build} 는 Job 이 사라졌다며 끝난다 */
+    public void cancel(String buildId) {
+        k8s.batch().v1().jobs().inNamespace(props.namespace()).withName("build-" + buildId)
+                .withPropagationPolicy(DeletionPropagation.BACKGROUND).delete();
     }
 
     Job job(String name, BuildRequest request, String image, boolean hasToken, String commit) {

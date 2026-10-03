@@ -10,8 +10,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class Build {
 
-    /** ROLLED_BACK: canary 판정에서 떨어져 새 버전을 버렸다. 트래픽은 이전 버전 그대로 */
-    public enum Status { QUEUED, BUILDING, DEPLOYING, SUCCEEDED, FAILED, ROLLED_BACK }
+    /**
+     * ROLLED_BACK: canary 판정에서 떨어져 새 버전을 버렸다. 트래픽은 이전 버전 그대로.
+     * CANCELLED: 사용자가 배포 도중 취소했다. 새 버전은 띄우지 않았고 트래픽은 이전 버전 그대로
+     */
+    public enum Status { QUEUED, BUILDING, DEPLOYING, SUCCEEDED, FAILED, ROLLED_BACK, CANCELLED }
 
     /**
      * 배포 화면의 여섯 단계. 로그로 정한다 (저장 형식을 바꾸지 않으려고).

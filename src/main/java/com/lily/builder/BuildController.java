@@ -83,6 +83,27 @@ public class BuildController {
         return service.get(id).map(ResponseEntity::ok).orElse(ResponseEntity.notFound().build());
     }
 
+    /**
+     * 진행 중인 배포를 멈춘다. 클라우드는 lily-cicd 로 넘기기 전(QUEUED·BUILDING)까지, 온프레미스는 에이전트가
+     * 트래픽을 새 버전으로 바꾸기 전까지 된다. 202 와 CANCELLED 빌드, 이미 끝났거나 멈출 수 없으면 409
+     */
+    @PostMapping("/api/builds/{id}/cancel")
+    public ResponseEntity<?> cancel(@PathVariable String id) {
+        Optional<Build> build = service.get(id);
+        if (build.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        try {
+            Build cancelled = AgentDeployService.onPrem(build.get()) ? agents.cancel(id) : service.cancel(id);
+            return ResponseEntity.accepted().body(cancelled);
+        } catch (java.util.NoSuchElementException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
+        }
+    }
+
     /** 지금 k3s 에 떠 있는 앱 (클러스터 기준) */
     @GetMapping("/api/apps")
     public List<ClusterApps.RunningApp> apps() {

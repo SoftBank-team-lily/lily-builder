@@ -14,8 +14,10 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 폼 입력 → 커밋 고정·마이그레이션 수집 → Kaniko 빌드 → lily-cicd 배포.
@@ -42,6 +44,13 @@ public class BuildService {
     private final FailureDiagnoser diagnoser;
     private final AppAddress addresses;
     private final EdgeWorker edge;
+    /**
+     * 실행 중인 클라우드 빌드. 취소는 실행 스레드와 같은 객체의 상태를 바꾼다 (저장소에서 새로 읽은 객체로 바꾸면
+     * 실행 스레드가 다음에 저장할 때 CANCELLED 를 덮는다)
+     */
+    private final Map<String, Build> live = new ConcurrentHashMap<>();
+    /** 취소와 다음 단계로 넘어가기를 한 번에 하나씩. 취소한 빌드가 lily-cicd 로 넘어가지 않게 한다 */
+    private final Object transitions = new Object();
 
     @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
@@ -98,7 +107,49 @@ public class BuildService {
             build.log(note);
         }
         store.save(build);
-        runner.run(() -> execute(build, request));
+        live.put(build.getId(), build);
+        runner.run(() -> {
+            try {
+                execute(build, request);
+            } finally {
+                live.remove(build.getId());
+            }
+        });
+        return build;
+    }
+
+    /**
+     * 클라우드 빌드를 멈춘다. lily-cicd 로 넘기기 전(QUEUED·BUILDING)만 된다. 빌드 중이면 Kaniko Job 을 지운다.
+     * 실행 스레드는 다음 단계로 넘어가려다 멈춘다.
+     *
+     * @throws NoSuchElementException 없는 빌드
+     * @throws IllegalStateException  이미 끝났거나 lily-cicd 가 배포를 시작했다
+     */
+    public Build cancel(String id) {
+        Build build;
+        boolean building;
+        synchronized (transitions) {
+            build = live.get(id);
+            if (build == null) {
+                build = store.find(id).orElseThrow(() -> new NoSuchElementException(id));
+            }
+            switch (build.getStatus()) {
+                case QUEUED, BUILDING -> {
+                }
+                case DEPLOYING -> throw new IllegalStateException("lily-cicd 가 새 버전을 띄우는 중이라 취소할 수 없다");
+                default -> throw new IllegalStateException("이미 끝난 배포다: " + build.getStatus());
+            }
+            building = build.getStatus() == Build.Status.BUILDING;
+            update(build, Build.Status.CANCELLED, "cancelled: 사용자가 취소했다");
+        }
+        log.info("build cancelled: id={} app={}", build.getId(), build.getAppName());
+        if (building) {
+            try {
+                kaniko.cancel(id);
+            } catch (RuntimeException e) {
+                log.warn("kaniko job delete failed: id={} message={}", id, e.getMessage());
+            }
+        }
         return build;
     }
 
@@ -169,12 +220,12 @@ public class BuildService {
             if (ecr.ensure(request.appName())) {
                 build.log("build: created ecr repository " + request.appName());
             }
-            update(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
+            advance(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
             String image = kaniko.build(build.getId(), request, tag, commit, dockerfile);
             build.image(image);
             build.log("build: pushed " + image);
 
-            update(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
+            advance(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
             Instant started = Instant.now();
             CicdClient.Result result;
@@ -233,7 +284,22 @@ public class BuildService {
             }
             failDiagnosed(build, attempt, "cicd " + e.getStatusCode().value() + ": " + e.getResponseBodyAsString());
         } catch (RuntimeException e) {
+            if (build.getStatus() == Build.Status.CANCELLED) {
+                // 취소가 Kaniko Job 을 지웠거나 다음 단계로 넘어가지 못하게 했다. 상태는 취소가 이미 남겼다
+                log.info("build stopped after cancel: id={} at={}", build.getId(), e.getMessage());
+                return;
+            }
             failDiagnosed(build, attempt, e.getMessage());
+        }
+    }
+
+    /** 취소되지 않았으면 다음 단계로 넘어간다 */
+    private void advance(Build build, Build.Status status, String line) {
+        synchronized (transitions) {
+            if (build.getStatus() == Build.Status.CANCELLED) {
+                throw new IllegalStateException("cancelled before " + status);
+            }
+            update(build, status, line);
         }
     }
 

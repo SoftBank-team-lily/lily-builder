@@ -56,6 +56,11 @@ public class AgentDeployService {
     private final Map<String, String> running = new ConcurrentHashMap<>();
     /** 롤백·거점 전환 id → 에이전트가 SUCCEEDED/FAILED 를 보낼 때까지 기다리는 응답 */
     private final Map<String, CompletableFuture<String>> rollbackWaiters = new ConcurrentHashMap<>();
+    /**
+     * 취소, 에이전트가 보낸 단계, 잡 보내기 직전 저장, 제한 시간 정리를 한 번에 하나씩 한다.
+     * 늦게 온 단계나 보내기 전 저장이 CANCELLED 를 덮지 않게 한다
+     */
+    private final Object transitions = new Object();
 
     public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
                               BuildService.BuildRunner runner, BuilderProperties props,
@@ -140,8 +145,13 @@ public class AgentDeployService {
                         + (importing ? " (import into my pc)" : ""));
             }
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
-            build.log("agent: send to " + hub.agentId(agentKey));
-            store.save(build);
+            synchronized (transitions) {
+                if (cancelled(build)) {
+                    return;
+                }
+                build.log("agent: send to " + hub.agentId(agentKey));
+                store.save(build);
+            }
             // PostgreSQL 은 db/pgroll 이 있으면 pgroll 파일을 보낸다 (에이전트가 무중단으로 적용한다). MySQL 은 Flyway SQL 만
             Map<String, String> migrations = "postgres".equals(database)
                     ? github.migrations(resolved, commit) : github.sqlMigrations(resolved, commit);
@@ -171,9 +181,66 @@ public class AgentDeployService {
                     job.put("importDatabase", true);
                 }
             }
-            hub.send(agentKey, json.writeValueAsString(job));
+            String message = json.writeValueAsString(job);
+            synchronized (transitions) {
+                if (cancelled(build)) {
+                    return;
+                }
+                hub.send(agentKey, message);
+            }
         } catch (RuntimeException | JsonProcessingException e) {
-            fail(build, e.getMessage());
+            synchronized (transitions) {
+                if (!cancelled(build)) {
+                    fail(build, e.getMessage());
+                }
+            }
+        }
+    }
+
+    /** 잡을 보내기 전에 취소됐다 ({@link #cancel} 이 running 에서 뺐다) */
+    private boolean cancelled(Build build) {
+        if (running.containsKey(build.getId())) {
+            return false;
+        }
+        log.info("onprem build cancelled before send: id={}", build.getId());
+        return true;
+    }
+
+    /** 에이전트로 보낸 온프레미스 빌드다. 클라우드 대기 배포(버스팅)는 아니다 */
+    public static boolean onPrem(Build build) {
+        return build.getLogs().stream().anyMatch(line -> line.contains("target=onprem agent="));
+    }
+
+    /**
+     * 온프레미스 빌드를 멈춘다. 에이전트에 취소를 보내고 바로 CANCELLED 로 닫는다. 에이전트는 트래픽을 새 버전으로
+     * 바꾸기 전이면 후보를 지우고 멈춘다. 그 뒤에 에이전트가 보내는 이 빌드의 단계는 받지 않는다.
+     * 에이전트가 끊겼으면 (잡이 이미 사라졌다) 기록만 닫는다.
+     *
+     * @throws IllegalStateException 이미 끝난 빌드
+     */
+    public Build cancel(String id) {
+        synchronized (transitions) {
+            Build build = store.find(id).orElseThrow(() -> new java.util.NoSuchElementException(id));
+            if (!inFlight(build)) {
+                throw new IllegalStateException("이미 끝난 배포다: " + build.getStatus());
+            }
+            running.remove(id);
+            String key = agentKey(build);
+            if (key == null || !hub.connected(key)) {
+                build.log("cancel: 에이전트가 연결돼 있지 않아 기록만 닫는다");
+            } else if (!hub.supports(key, "cancel")) {
+                build.log("cancel: 에이전트가 취소를 받지 못하는 판이라 PC 작업이 끝까지 갈 수 있다. 최신 이미지로 다시 실행한다");
+            } else {
+                try {
+                    hub.send(key, json.writeValueAsString(Map.of("type", "cancel", "id", id)));
+                    build.log("cancel: 에이전트에 보냈다");
+                } catch (JsonProcessingException | RuntimeException e) {
+                    build.log("cancel: 에이전트에 보내지 못했다 " + e.getMessage());
+                }
+            }
+            update(build, Build.Status.CANCELLED, "cancelled: 사용자가 취소했다");
+            log.info("onprem build cancelled: id={} app={} agent={}", id, build.getAppName(), key);
+            return build;
         }
     }
 
@@ -531,12 +598,17 @@ public class AgentDeployService {
             }
             return;
         }
-        Optional<Build> found = runningBuild(agentKey, buildId);
-        if (found.isEmpty()) {
-            log.debug("agent status ignored: key={} id={}", agentKey, buildId);
-            return;
+        synchronized (transitions) {
+            Optional<Build> found = runningBuild(agentKey, buildId);
+            if (found.isEmpty()) {
+                log.debug("agent status ignored: key={} id={}", agentKey, buildId);
+                return;
+            }
+            record(found.get(), buildId, status, line, url);
         }
-        Build build = found.get();
+    }
+
+    private void record(Build build, String buildId, String status, String line, String url) {
         String logLine = "agent: " + status + (line == null || line.isBlank() ? "" : " " + line);
         switch (status) {
             case "SUCCEEDED" -> {
@@ -607,12 +679,19 @@ public class AgentDeployService {
     @Scheduled(fixedDelay = 30_000)
     void expire() {
         Instant limit = Instant.now().minus(Duration.ofSeconds(props.buildTimeoutSeconds()));
-        running.keySet().forEach(id -> store.find(id).ifPresentOrElse(build -> {
-            if (build.getUpdatedAt().isBefore(limit)) {
-                running.remove(id);
-                fail(build, "agent: " + props.buildTimeoutSeconds() + "초 동안 응답이 없다");
+        running.keySet().forEach(id -> {
+            synchronized (transitions) {
+                if (!running.containsKey(id)) {
+                    return;
+                }
+                store.find(id).ifPresentOrElse(build -> {
+                    if (build.getUpdatedAt().isBefore(limit)) {
+                        running.remove(id);
+                        fail(build, "agent: " + props.buildTimeoutSeconds() + "초 동안 응답이 없다");
+                    }
+                }, () -> running.remove(id));
             }
-        }, () -> running.remove(id)));
+        });
     }
 
     /** lily-on-premise DeployJob */
