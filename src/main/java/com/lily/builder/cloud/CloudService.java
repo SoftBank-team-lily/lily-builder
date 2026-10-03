@@ -26,14 +26,21 @@ public class CloudService {
     public CloudPolicy.Decision plan(CloudPolicy.Request request, Map<String,?> repository) {
         if (props.maxAgeSeconds() < 1 || props.maxAgeSeconds() > 3600)
             return CloudPolicy.held("invalid_freshness_config", List.of(), List.of(), clock.instant());
-        return policy.decide(request, catalog.read(), props.regions(), clock.instant(), props.maxAgeSeconds(), repository);
+        List<CloudPolicy.Candidate> candidates;
+        try { candidates = catalog.read(); }
+        catch (CloudCatalog.Unavailable e) { return CloudPolicy.held(e.getMessage(), List.of(), List.of(), clock.instant()); }
+        return policy.decide(request, candidates, props.regions(), clock.instant(), props.maxAgeSeconds(), repository);
     }
     /** JEV 호출 중 바뀐 가용성·관측 시각도 실행 직전에 다시 검사한다. 다른 provider로 자동 재선택하지 않는다. */
     public CloudPolicy.Decision recheck(CloudPolicy.Request request, CloudPolicy.Decision decision) {
         if (!decision.status().equals("selected")) return decision;
         var pinned = new CloudPolicy.Request(decision.provider(), request.priority(), request.profile(),
             request.maxMonthlyCostUsd(), request.maxP95Ms(), Set.of(decision.region()), request.capabilities(), request.context());
-        var checked = new CloudPolicy(Jev.disabled()).decide(pinned, catalog.read(), props.regions(), clock.instant(), props.maxAgeSeconds());
+        List<CloudPolicy.Candidate> candidates;
+        // 조건이 바뀐 것이 아니라 근거를 다시 읽지 못한 것이다. 사유를 구분한다
+        try { candidates = catalog.read(); }
+        catch (CloudCatalog.Unavailable e) { return CloudPolicy.held(e.getMessage(), List.of(), List.of(), clock.instant()); }
+        var checked = new CloudPolicy(Jev.disabled()).decide(pinned, candidates, props.regions(), clock.instant(), props.maxAgeSeconds());
         return checked.status().equals("selected")
             ? new CloudPolicy.Decision("selected", decision.provider(), decision.region(), decision.source(), decision.confidence(),
                 decision.reason(), checked.selected(), checked.candidates(), checked.excluded(), clock.instant())

@@ -166,13 +166,29 @@ class CloudApiTest {
             assertThat(destination.getRequestCount()).isZero();
         }
     }
-    @Test void unavailableCatalogAndMalformedBodyAreEmpty() throws Exception {
+    @Test void catalogOutagesAreReportedApartFromNoCandidates() throws Exception {
         try (MockWebServer catalog = new MockWebServer()) {
-            catalog.start(); catalog.enqueue(new MockResponse().setResponseCode(503));
+            catalog.start(); catalog.enqueue(new MockResponse().setResponseCode(503).setBody("secret detail"));
             catalog.enqueue(new MockResponse().setBody("{broken"));
+            catalog.enqueue(new MockResponse().setBody("{\"candidates\":[]}"));
             var source = new CloudCatalog(props(catalog.url("/").toString(),""),JSON);
+            assertThatThrownBy(source::read).hasMessage("catalog_unavailable");
+            assertThatThrownBy(source::read).hasMessage("catalog_unavailable");
             assertThat(source.read()).isEmpty();
-            assertThat(source.read()).isEmpty();
+            assertThatThrownBy(() -> new CloudCatalog(props("",""),JSON).read()).hasMessage("catalog_unconfigured");
         }
+    }
+    @Test void plansAndRechecksNameTheCatalogOutage() {
+        var catalog = mock(CloudCatalog.class);
+        var service = new CloudService(catalog, props("", "http://worker"), new CloudPolicy(Jev.disabled()),
+            Clock.fixed(CloudPolicyTest.NOW, ZoneOffset.UTC));
+        var r = CloudPolicyTest.request("cost");
+        when(catalog.read()).thenThrow(new CloudCatalog.Unavailable("catalog_unconfigured"));
+        assertThat(service.plan(r).reason()).isEqualTo("catalog_unconfigured");
+        reset(catalog);
+        when(catalog.read()).thenReturn(CloudPolicyTest.candidates()).thenThrow(new CloudCatalog.Unavailable("catalog_unavailable"));
+        var selected = service.plan(r);
+        assertThat(selected.status()).isEqualTo("selected");
+        assertThat(service.recheck(r, selected).reason()).isEqualTo("catalog_unavailable");
     }
 }

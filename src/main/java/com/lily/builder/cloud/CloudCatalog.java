@@ -24,18 +24,28 @@ public class CloudCatalog {
         http = RestClient.builder().requestFactory(factory).build();
     }
     record Snapshot(List<CloudPolicy.Candidate> candidates) {}
+    /**
+     * 빈 목록은 수집기가 정상 응답했지만 후보가 없다는 뜻이다.
+     * 수집기를 설정하지 않았거나 읽지 못하면 {@link Unavailable} 로 알려 "후보 없음"과 구분한다.
+     */
     public List<CloudPolicy.Candidate> read() {
-        if (!CloudProperties.validUrl(props.catalogUrl())) return List.of();
+        if (!CloudProperties.validUrl(props.catalogUrl())) throw new Unavailable("catalog_unconfigured");
         try {
             var request = http.get().uri(props.catalogUrl());
             if (props.catalogToken() != null && !props.catalogToken().isBlank()) request.header("Authorization", "Bearer " + props.catalogToken());
             return request.exchange((req, response) -> {
-                if (response.getStatusCode().value() != 200) return List.of();
+                if (response.getStatusCode().value() != 200) throw new Unavailable("catalog_unavailable");
                 byte[] bytes = response.getBody().readNBytes(131073);
-                if (bytes.length > 131072) return List.of();
+                if (bytes.length > 131072) throw new Unavailable("catalog_unavailable");
                 Snapshot snapshot = json.readValue(bytes, Snapshot.class);
-                return snapshot.candidates() == null || snapshot.candidates().size() > 100 ? List.of() : snapshot.candidates();
+                if (snapshot.candidates() == null || snapshot.candidates().size() > 100) throw new Unavailable("catalog_unavailable");
+                return snapshot.candidates();
             });
-        } catch (RuntimeException ignored) { return List.of(); }
+        } catch (Unavailable e) { throw e; }
+        // 응답 본문·토큰이 담길 수 있는 원래 오류는 돌려주지 않는다
+        catch (RuntimeException e) { throw new Unavailable("catalog_unavailable"); }
+    }
+    public static final class Unavailable extends RuntimeException {
+        public Unavailable(String code) { super(code); }
     }
 }
