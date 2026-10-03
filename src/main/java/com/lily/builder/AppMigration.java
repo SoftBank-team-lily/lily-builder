@@ -182,7 +182,8 @@ public class AppMigration {
             throw new IllegalStateException("공개 주소가 클라우드를 가리키지 않는다: " + address.home());
         }
         JsonNode source = json(cicd(from).release(app), "원본 " + from + " 릴리스");
-        if (source.path("activeSlot").isNull() || source.path("activeSlot").asText("").isBlank()) {
+        // canary 전략은 activeSlot 이 비어 있고 slots(stable·canary)만 있다
+        if (source.path("slots").size() == 0) {
             throw new IllegalStateException(from + " 에 떠 있는 " + app + " 이 없다");
         }
         CicdClient.Passthrough targetRelease = cicd(to).release(app);
