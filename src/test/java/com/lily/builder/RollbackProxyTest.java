@@ -64,6 +64,27 @@ class RollbackProxyTest {
     }
 
     @Test
+    void 스키마_이력과_complete_결과를_그대로_넘기고_잘못된_이름은_부르지_않는다() {
+        cicd.expect(requestTo("http://cicd/api/deployments/blog/schema"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"engine\":\"pgroll\",\"currentVersion\":\"02_add_slug\"}",
+                        MediaType.APPLICATION_JSON));
+        cicd.expect(requestTo("http://cicd/api/deployments/blog/schema/complete"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.CONFLICT)
+                        .body("{\"status\":\"REJECTED\",\"message\":\"blog 에 롤백 창이 열린 pgroll 마이그레이션이 없다\"}")
+                        .contentType(MediaType.APPLICATION_JSON));
+
+        assertThat(controller.schema("blog").getBody()).contains("\"engine\":\"pgroll\"");
+        ResponseEntity<String> complete = controller.completeSchema("blog");
+        assertThat(complete.getStatusCode().value()).isEqualTo(409);
+        assertThat(complete.getBody()).contains("롤백 창이 열린");
+        assertThat(controller.schema("../x").getStatusCode().value()).isEqualTo(400);
+        assertThat(controller.completeSchema("Blog").getStatusCode().value()).isEqualTo(400);
+        cicd.verify();
+    }
+
+    @Test
     void 릴리스_상태를_넘기고_잘못된_이름은_부르지_않는다() {
         cicd.expect(requestTo("http://cicd/api/deployments/blog"))
                 .andExpect(method(HttpMethod.GET))
