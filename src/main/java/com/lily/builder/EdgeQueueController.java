@@ -23,8 +23,11 @@ import java.util.Map;
  * 온프레미스 앱의 엣지 쓰기 큐 ({@link EdgeQueue}). 클러스터 안(lily-frontend 서버)에서만 부른다.
  *
  * <pre>
- * GET /api/apps/{app}/write-queue   {routed, paths, counts:{queued,sent,failed}, items:[...]}
- * PUT /api/apps/{app}/write-queue   {"paths": ["/posts", ...]} 등록 경로를 바꾸고 GET 과 같은 값을 돌려준다
+ * GET /api/apps/{app}/write-queue   {routed, paths, snapshot, counts:{queued,sent,failed}, items:[...]}
+ * PUT /api/apps/{app}/write-queue   준 값만 바꾸고 GET 과 같은 값을 돌려준다
+ *     {"queue": true|false}    쓰기 큐 켜기(모든 POST) · 끄기 (배포 화면·모니터 패널의 체크박스)
+ *     {"snapshot": true|false} 읽기 사본(Cache API) 켜기 · 끄기
+ *     {"paths": ["/posts", ...]} 등록 경로를 직접 정한다
  * </pre>
  *
  * routed: 공개 주소에 엣지 Worker 라우트가 있는가. 없으면 경로를 등록해도 요청이 Worker 를 거치지 않는다. 확인하지 못하면 null.
@@ -51,16 +54,23 @@ public class EdgeQueueController {
     }
 
     @PutMapping
-    public ResponseEntity<?> configure(@PathVariable String appName, @Valid @RequestBody PathsRequest request) {
+    public ResponseEntity<?> configure(@PathVariable String appName, @Valid @RequestBody ConfigRequest request) {
         if (!queue.enabled() || !edge.enabled()) {
             return off();
         }
-        return ResponseEntity.ok(withRoute(appName, queue.configure(appName, request.paths())));
+        List<String> paths = request.paths() != null ? request.paths()
+                : request.queue() == null ? null : request.queue() ? List.of("/") : List.of();
+        if (paths == null && request.snapshot() == null) {
+            throw new IllegalArgumentException("queue, snapshot, paths 중 하나는 있어야 한다");
+        }
+        return ResponseEntity.ok(withRoute(appName, queue.configure(appName, paths, request.snapshot())));
     }
 
-    /** 경로는 / 로 시작하고 쿼리·공백이 없다 (queue.js 의 validPaths 와 같다) */
-    public record PathsRequest(
-            @NotNull @Size(max = 20) List<@NotNull @Pattern(regexp = "/[^?#\\s]{0,199}") String> paths) {
+    /** 경로는 / 로 시작하고 쿼리·공백이 없다 (queue.js 의 validPaths 와 같다). paths 를 주면 queue 보다 먼저 쓴다 */
+    public record ConfigRequest(
+            Boolean queue,
+            Boolean snapshot,
+            @Size(max = 20) List<@NotNull @Pattern(regexp = "/[^?#\\s]{0,199}") String> paths) {
     }
 
     private JsonNode withRoute(String app, JsonNode state) {

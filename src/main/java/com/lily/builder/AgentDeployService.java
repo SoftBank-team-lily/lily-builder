@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -96,6 +97,13 @@ public class AgentDeployService {
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch() + " target=onprem agent=" + agentKey);
         build.log("deploymentMode=" + request.deploymentModeOrDefault());
         build.log("cloudProvider=" + request.cloudProviderOrDefault());
+        // 배포 화면의 엣지 체크박스. 배포가 끝나면 warmEdge 가 읽어 앱 DO 설정에 넣는다 (비우면 앱의 지금 설정 그대로)
+        if (request.edgeSnapshot() != null) {
+            build.log(EDGE_SNAPSHOT + (request.edgeSnapshot() ? "on" : "off"));
+        }
+        if (request.edgeQueue() != null) {
+            build.log(EDGE_QUEUE + (request.edgeQueue() ? "on" : "off"));
+        }
         store.save(build);
         running.put(build.getId(), agentKey);
         runner.run(() -> send(build, request, agentKey));
@@ -837,6 +845,14 @@ public class AgentDeployService {
 
     private EdgeWorker edge = EdgeWorker.disabled();
     private EdgePrewarm prewarm;
+    private EdgeQueue queue = EdgeQueue.disabled();
+    static final String EDGE_SNAPSHOT = "edgeSnapshot=";
+    static final String EDGE_QUEUE = "edgeQueue=";
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void edgeQueue(EdgeQueue queue) {
+        this.queue = queue;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void edgeWorker(EdgeWorker edge, EdgePrewarm prewarm) {
@@ -846,7 +862,8 @@ public class AgentDeployService {
 
     /**
      * 온프레미스 배포가 끝났다. 공개 주소에 엣지 Worker 라우트를 걸고 주요 페이지를 열어 읽기 사본을 채운다.
-     * 대기 배포가 없는 앱(DB 가 PC 에 있는 앱, 온프레미스 전용)도 PC 장애 때 사본으로 GET 에 답하게 된다. 실패해도 배포는 성공이다
+     * 대기 배포가 없는 앱(DB 가 PC 에 있는 앱, 온프레미스 전용)도 PC 장애 때 사본으로 GET 에 답하게 된다. 실패해도 배포는 성공이다.
+     * 배포 화면의 엣지 체크박스를 앱 DO 설정에 넣는다: 쓰기 큐 켜기 = 모든 POST(/), 끄기 = 없음. 읽기 사본을 끄면 prewarm 도 하지 않는다
      */
     private void warmEdge(Build build) {
         if (!edge.enabled()) {
@@ -861,10 +878,30 @@ public class AgentDeployService {
                 note(build, "edge: failed " + e.getMessage());
                 return;
             }
-            if (prewarm != null) {
+            Boolean snapshot = flag(build, EDGE_SNAPSHOT);
+            Boolean writes = flag(build, EDGE_QUEUE);
+            if (queue.enabled() && (snapshot != null || writes != null)) {
+                try {
+                    queue.configure(app, writes == null ? null : (writes ? List.of("/") : List.of()), snapshot);
+                    note(build, "edge: options" + (snapshot == null ? "" : " read copy " + (snapshot ? "on" : "off"))
+                            + (writes == null ? "" : " write queue " + (writes ? "on" : "off")));
+                } catch (RuntimeException e) {
+                    log.warn("edge options {} failed: {}", app, e.getMessage());
+                    note(build, "edge: options failed " + e.getMessage());
+                }
+            }
+            if (Boolean.FALSE.equals(snapshot)) {
+                note(build, "prewarm: skipped (read copy off)");
+            } else if (prewarm != null) {
                 note(build, prewarm.warm(edge.publicUrl(app)));
             }
         });
+    }
+
+    /** start 가 남긴 엣지 체크박스 값. 없으면 null */
+    private static Boolean flag(Build build, String prefix) {
+        return build.getLogs().stream().filter(line -> line.startsWith(prefix)).findFirst()
+                .map(line -> "on".equals(line.substring(prefix.length()))).orElse(null);
     }
 
     /** 끝난 빌드에 한 줄 덧붙인다 */

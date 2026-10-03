@@ -47,6 +47,22 @@ class EdgeQueueTest {
     }
 
     @Test
+    void 읽기_사본만_끄면_관리_주소의_config에_snapshot_false만_보낸다() {
+        queue.configure("blog", null, false);
+
+        assertThat(calls).containsExactly("PUT https://lily-edge-queue.lilycloud.kr/apps/blog.lilycloud.kr/queue/config "
+                + queue.adminToken() + " {\"snapshot\":false}");
+    }
+
+    @Test
+    void 쓰기_큐와_읽기_사본을_켜면_관리_주소의_config에_모든_POST_경로와_snapshot_true를_보낸다() {
+        queue.configure("blog", List.of("/"), true);
+
+        assertThat(calls).containsExactly("PUT https://lily-edge-queue.lilycloud.kr/apps/blog.lilycloud.kr/queue/config "
+                + queue.adminToken() + " {\"paths\":[\"/\"],\"snapshot\":true}");
+    }
+
+    @Test
     void 관리_주소가_400을_주면_IllegalArgumentException() {
         reply = new EdgeQueue.Reply(400, "{\"error\":\"paths\"}");
 

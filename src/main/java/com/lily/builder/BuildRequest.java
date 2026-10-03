@@ -39,6 +39,8 @@ import java.util.Map;
  *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·클라우드 DB 프로비저닝을 하지 않는다
  * @param sourceCommit 분석 후 고정한 40자리 SHA. 비우면 branch의 최신 커밋을 사용한다
  * @param cloudProvider 하이브리드의 클라우드. AWS(기본) 또는 GCP. 온프레미스 전용은 쓰지 않는다. 만든 뒤에는 바꾸지 않는다
+ * @param edgeSnapshot 온프레미스 앱. PC 장애 때 엣지 읽기 사본(Cache API)을 쓰는가. 비우면 앱의 지금 설정을 그대로 둔다 (쓴다가 기본)
+ * @param edgeQueue    온프레미스 앱. PC 장애 때 POST 를 엣지 쓰기 큐(DO)에 쌓는가 (켜면 모든 POST). 비우면 앱의 지금 설정을 그대로 둔다
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -62,7 +64,21 @@ public record BuildRequest(
         Boolean importDatabase,
         @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode,
         @Pattern(regexp = "AWS|GCP|") String cloudProvider,
-        @Pattern(regexp = "[0-9a-f]{40}") String sourceCommit) {
+        @Pattern(regexp = "[0-9a-f]{40}") String sourceCommit,
+        Boolean edgeSnapshot,
+        Boolean edgeQueue) {
+
+    /** 엣지 설정을 정하지 않는다 (앱의 지금 설정을 그대로 둔다) */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
+                        Map<String, String> databaseEnv, Boolean importDatabase, String deploymentMode, String cloudProvider,
+                        String sourceCommit) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase, deploymentMode, cloudProvider, sourceCommit, null, null);
+    }
 
     /** 클라우드 제공자를 지정하는 기존 요청은 최신 브랜치 커밋을 사용한다. */
     public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
@@ -72,13 +88,13 @@ public record BuildRequest(
                         Map<String,String> databaseEnv, Boolean importDatabase, String deploymentMode, String cloudProvider) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
             env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-            importDatabase, deploymentMode, cloudProvider, null);
+            importDatabase, deploymentMode, cloudProvider, (String) null);
     }
 
     public BuildRequest withCommit(String commit) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath,
             livenessPath, env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl,
-            databaseEnv, importDatabase, deploymentMode, cloudProvider, commit);
+            databaseEnv, importDatabase, deploymentMode, cloudProvider, commit, edgeSnapshot, edgeQueue);
     }
 
     public static final int DEFAULT_TARGET_PORT = 8080;

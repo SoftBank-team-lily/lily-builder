@@ -55,7 +55,7 @@ GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변
 | POST | `/api/apps/{app}/schema/complete` | 롤백 창을 닫고 바로 complete. 온프레미스 앱은 에이전트에 `schema-complete` 를 보내고 202 |
 | POST | `/api/apps/{app}/stop`, `/start` | 중지(모든 슬롯 0)·다시 시작. lily-cicd 로 넘긴다. 배포 중이면 `409` |
 | DELETE | `/api/apps/{app}?database=` | 앱 삭제. `database=true` 면 DB 도 DROP. 앱 주소 CNAME(ALB)과 엣지 라우트도 지운다 |
-| GET, PUT | `/api/apps/{app}/write-queue` | 엣지 쓰기 큐. GET 은 등록 경로·상태별 건수·최근 요청·`routed`·`lastCheck`·`downSince`, PUT `{"paths":["/api/posts"]}` 는 등록 경로를 바꾼다 (빈 목록이면 끈다). 큐가 꺼져 있으면 `404` |
+| GET, PUT | `/api/apps/{app}/write-queue` | 엣지 쓰기 큐. GET 은 등록 경로·`snapshot`·상태별 건수·최근 요청·`routed`·`lastCheck`·`downSince`, PUT 은 준 값만 바꾼다: `{"queue":true}` 쓰기 큐 켜기(모든 POST)·끄기, `{"snapshot":false}` 읽기 사본 끄기, `{"paths":[...]}` 경로 직접 지정. 큐가 꺼져 있으면 `404` |
 | GET, PUT | `/api/apps/{app}/address` | 공개 주소 `{app}.{존}` 의 거점 (`CLOUD` ALB / `ONPREM` 터널 / `NONE` / `OTHER`). PUT `{"home":"cloud"}` 는 ALB 로 되돌린다 |
 
 ```json
@@ -177,6 +177,7 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
   - 쿠키·인증 없는 요청, Set-Cookie·`private`·`no-store` 없는 응답, `Vary` 는 `Accept-Encoding` 만, 허용한 query(`page`·`sort` 등)만 둔다. 쓰기는 사본으로 답하지 않는다
   - 사본은 데이터센터마다 따로이고 밀려날 수 있다. prewarm 은 builder 가 있는 서울 리전에서 연다
 - 쓰기 큐: 등록 경로의 POST 는 평소에도 앱 DO 를 거친다 (큐가 비어 있으면 PC 로 바로). PC 가 못 받으면(530·연결 실패, 엣지 오류 뒤 `GET /` 재확인도 엣지 오류) 헤더·본문을 `QUEUE_KEY` 로 AES-GCM 암호화해 DO SQLite 에 쌓고 202 `X-Lily-Queued-Id`. 결과는 `GET /__lily_edge/queued/{id}`. 자세한 설계는 `docs/엣지-쓰기-큐.md`
+- 배포 화면 체크박스: 온프레미스 배포 요청의 `edgeSnapshot`·`edgeQueue`(기본 둘 다 켜짐)를 배포가 끝난 뒤 앱 DO 설정에 넣는다. 읽기 사본을 끄면 Worker 가 사본을 저장·응답하지 않고 prewarm 도 하지 않는다. 값이 없는 요청은 앱의 지금 설정을 그대로 둔다
   - 장애를 한 번 보면 DO 가 장애 상태를 기억해 PC 확인(`GET /`)이 성공할 때까지 새 POST 를 바로 쌓는다. alarm 이 10~60초 간격으로 확인하고, 성공하면 받은 순서대로 다시 보낸다 (`Idempotency-Key`, `X-Lily-Replay`, `X-Lily-Received-At`)
   - 2xx·3xx 는 sent, 4xx 는 failed, 5xx·시간 초과는 다음 alarm 에 다시. 앱당 1,000건, 본문 1 MiB
   - 등록 경로는 앱 DO 에 둔다. builder 는 관리 주소 `lily-edge-queue.{존}`(AAAA `100::` 프록시 + Worker 라우트)으로 바꾼다. 앱을 지우면 큐도 지운다

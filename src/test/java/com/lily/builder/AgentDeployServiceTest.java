@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -185,6 +186,68 @@ class AgentDeployServiceTest {
         assertThat(build.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
         assertThat(build.getLogs()).contains("edge: failed cloudflare api 403");
         verify(prewarm, never()).warm(anyString());
+    }
+
+    /** 배포 화면의 엣지 체크박스를 고른 요청 */
+    private static BuildRequest edgeOptions(String appName, Boolean snapshot, Boolean queue) {
+        BuildRequest base = request(appName);
+        return new BuildRequest(base.repoUrl(), base.branch(), base.token(), base.rootDir(), base.appName(), base.targetPort(),
+                base.database(), base.readinessPath(), base.livenessPath(), base.env(), base.host(), base.standby(),
+                base.migrationsPath(), base.migrate(), base.canaryPath(), base.databaseMode(), base.databaseUrl(),
+                base.databaseEnv(), base.importDatabase(), base.deploymentMode(), base.cloudProvider(), null, snapshot, queue);
+    }
+
+    private EdgeQueue routedEdge(EdgePrewarm prewarm) {
+        EdgeWorker edge = mock(EdgeWorker.class);
+        EdgeQueue queue = mock(EdgeQueue.class);
+        when(edge.enabled()).thenReturn(true);
+        when(edge.attachRoute("blog")).thenReturn("edge: blog.lilycloud.kr/* -> lily-edge");
+        when(edge.publicUrl("blog")).thenReturn("https://blog.lilycloud.kr/");
+        when(queue.enabled()).thenReturn(true);
+        service.edgeWorker(edge, prewarm);
+        service.edgeQueue(queue);
+        return queue;
+    }
+
+    @Test
+    void 읽기_사본과_쓰기_큐를_켜고_배포하면_SUCCEEDED_뒤_DO_설정에_모든_POST_경로와_사본_켜기를_넣고_prewarm한다() {
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        when(prewarm.warm("https://blog.lilycloud.kr/")).thenReturn("prewarm: 1/1 pages 200 from https://blog.lilycloud.kr/");
+        EdgeQueue queue = routedEdge(prewarm);
+        Build build = service.start(KEY, edgeOptions("blog", true, true));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        verify(queue).configure("blog", List.of("/"), true);
+        assertThat(build.getLogs()).contains("edgeSnapshot=on", "edgeQueue=on", "edge: options read copy on write queue on",
+                "prewarm: 1/1 pages 200 from https://blog.lilycloud.kr/");
+    }
+
+    @Test
+    void 읽기_사본과_쓰기_큐를_끄고_배포하면_DO_설정에_빈_경로와_사본_끄기를_넣고_prewarm하지_않는다() {
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        EdgeQueue queue = routedEdge(prewarm);
+        Build build = service.start(KEY, edgeOptions("blog", false, false));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        verify(queue).configure("blog", List.of(), false);
+        verify(prewarm, never()).warm(anyString());
+        assertThat(build.getLogs()).contains("prewarm: skipped (read copy off)");
+    }
+
+    @Test
+    void 엣지_체크박스_값이_없는_배포는_DO_설정을_바꾸지_않고_지금처럼_prewarm한다() {
+        EdgePrewarm prewarm = mock(EdgePrewarm.class);
+        when(prewarm.warm("https://blog.lilycloud.kr/")).thenReturn("prewarm: 1/1 pages 200 from https://blog.lilycloud.kr/");
+        EdgeQueue queue = routedEdge(prewarm);
+        Build build = service.start(KEY, request("blog"));
+
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.lilycloud.kr");
+
+        verify(queue, never()).configure(anyString(), any(), any());
+        verify(prewarm).warm("https://blog.lilycloud.kr/");
+        assertThat(build.getLogs()).noneMatch(line -> line.startsWith("edgeSnapshot=") || line.startsWith("edgeQueue="));
     }
 
     @Test
