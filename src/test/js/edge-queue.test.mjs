@@ -431,3 +431,72 @@ test("관리_주소_DELETE는_쌓인_요청과_등록_경로와_alarm을_지운�
   assert.deepEqual(state.counts, { queued: 0, sent: 0, failed: 0 });
   assert.equal(blogQueue().alarmAt(), null);
 });
+
+test("PC_확인_요청이_엣지_텍스트_오류_502를_받으면_POST를_보내지_않고_lastCheck에_502_edge로_남긴다", async () => {
+  await submit(post("/posts", "{}"), { down: true });
+  pc = async () => new Response("error code: 1033", { status: 502, headers: { "content-type": "text/plain; charset=UTF-8" } });
+
+  await blogQueue().alarm();
+
+  assert.equal(sent.filter((r) => r.method === "POST").length, 0);
+  const state = await adminState();
+  assert.equal(state.items[0].attempts, 0);
+  assert.equal(state.lastCheck.status, 502);
+  assert.equal(state.lastCheck.edge, true);
+  assert.equal(state.lastCheck.appErrors, 0);
+});
+
+test("PC_확인_요청이_앱의_503을_받으면_POST를_보내지_않는다", async () => {
+  await submit(post("/posts", "{}"), { down: true });
+  pc = async () => Response.json({ detail: "db down" }, { status: 503 });
+
+  await blogQueue().alarm();
+
+  assert.equal(sent.filter((r) => r.method === "POST").length, 0);
+  assert.deepEqual([(await adminState()).lastCheck.edge, (await adminState()).lastCheck.appErrors], [false, 1]);
+});
+
+test("PC_확인_요청이_앱의_500을_10번_이어서_받으면_10번째_alarm에_POST를_보낸다", async () => {
+  await submit(post("/posts", "{}"), { down: true });
+  pc = async (request) => request.method === "GET" ? Response.json({}, { status: 500 }) : new Response("ok", { status: 201 });
+
+  for (let i = 1; i < 10; i++) {
+    await blogQueue().alarm();
+  }
+  assert.equal(sent.filter((r) => r.method === "POST").length, 0);
+  await blogQueue().alarm();
+
+  assert.equal(sent.filter((r) => r.method === "POST").length, 1);
+  assert.equal((await adminState()).counts.sent, 1);
+});
+
+test("PC_확인_요청이_연결에_실패하면_status_null_edge로_남기고_POST를_보내지_않는다", async () => {
+  await submit(post("/posts", "{}"), { down: true });
+  pc = async () => { throw new TypeError("connect failed"); };
+
+  await blogQueue().alarm();
+
+  assert.equal(sent.filter((r) => r.method === "POST").length, 0);
+  const { lastCheck } = await adminState();
+  assert.equal(lastCheck.status, null);
+  assert.equal(lastCheck.edge, true);
+});
+
+test("PC에_보낸_뒤_엣지_텍스트_오류_502가_오면_큐에_넣지_않고_502를_주고_PC_장애를_표시한다", async () => {
+  pc = async () => new Response("error code: 502", { status: 502, headers: { "content-type": "text/plain" } });
+
+  const { response, marked } = await submit(post("/posts", "{}"));
+
+  assert.equal(response.status, 502);
+  assert.equal(marked, true);
+  assert.equal(blogQueue().pending(), 0);
+});
+
+test("앱이_text_plain으로_돌려준_502는_엣지_오류가_아니라_그대로_준다", async () => {
+  pc = async () => new Response("upstream timeout", { status: 502, headers: { "content-type": "text/plain" } });
+
+  const { response, marked } = await submit(post("/posts", "{}"));
+
+  assert.equal(response.status, 502);
+  assert.equal(marked, false);
+});
