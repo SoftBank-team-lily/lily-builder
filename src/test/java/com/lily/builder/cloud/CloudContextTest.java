@@ -65,4 +65,31 @@ class CloudContextTest {
         assertThat(evidence.facts()).containsKeys("serviceHints","reviewItems");
         assertThat(decide(null).status()).isEqualTo("selected");
     }
+    @Test void javaAwsSdkModulesMavenCoordinatesAndCommentsAreReadLikeOtherManifests() {
+        Map<String,List<String>> gradle = new TreeMap<>();
+        CloudRepository.extract("""
+            implementation 'org.springframework.boot:spring-boot-starter-web'
+            implementation 'software.amazon.awssdk:s3'
+            implementation 'software.amazon.awssdk:sqs:2.25.0'
+            implementation 'software.amazon.awssdk:bedrockruntime'
+            implementation 'software.amazon.awssdk:s3control'
+            // TODO: maybe switch to mysql later
+            """, gradle);
+        assertThat(gradle).containsKeys("s3","aws-messaging","bedrock").doesNotContainKey("mysql");
+        assertThat(gradle.get("s3")).containsExactly("software.amazon.awssdk:s3");
+
+        Map<String,List<String>> maven = new TreeMap<>();
+        CloudRepository.extract("""
+            <dependency>
+              <groupId>software.amazon.awssdk</groupId>
+              <artifactId>s3</artifactId>
+            </dependency>
+            <!-- <dependency><groupId>mysql</groupId><artifactId>mysql-connector-java</artifactId></dependency> -->
+            """, maven);
+        assertThat(maven).containsKey("s3").doesNotContainKey("mysql");
+
+        Map<String,List<String>> python = new TreeMap<>();
+        CloudRepository.extract("# boto3 is not used\nfastapi\ngit+https://github.com/org/lib.git#egg=pandas\n", python);
+        assertThat(python).doesNotContainKey("aws-sdk").containsKeys("web","data");
+    }
 }

@@ -24,9 +24,12 @@ public class CloudRepository {
         Map.entry("bigquery", List.of("google-cloud-bigquery", "@google-cloud/bigquery", "cloud.google.com/go/bigquery")),
         Map.entry("vertex-ai", List.of("google-cloud-aiplatform", "@google-cloud/vertexai")),
         Map.entry("sagemaker", List.of("sagemaker")),
-        Map.entry("s3", List.of("@aws-sdk/client-s3", "aws-sdk-s3")),
-        Map.entry("bedrock", List.of("@aws-sdk/client-bedrock", "@aws-sdk/client-bedrock-runtime", "aws-sdk-bedrockruntime")),
-        Map.entry("aws-messaging", List.of("@aws-sdk/client-sqs", "@aws-sdk/client-sns", "aws-sdk-sqs", "aws-sdk-sns")),
+        // Java AWS SDK v2 는 서비스마다 software.amazon.awssdk:<서비스> 모듈이다
+        Map.entry("s3", List.of("@aws-sdk/client-s3", "aws-sdk-s3", "software.amazon.awssdk:s3")),
+        Map.entry("bedrock", List.of("@aws-sdk/client-bedrock", "@aws-sdk/client-bedrock-runtime", "aws-sdk-bedrockruntime",
+            "software.amazon.awssdk:bedrock", "software.amazon.awssdk:bedrockruntime")),
+        Map.entry("aws-messaging", List.of("@aws-sdk/client-sqs", "@aws-sdk/client-sns", "aws-sdk-sqs", "aws-sdk-sns",
+            "software.amazon.awssdk:sqs", "software.amazon.awssdk:sns")),
         Map.entry("gcs", List.of("google-cloud-storage", "@google-cloud/storage", "cloud.google.com/go/storage")),
         Map.entry("pubsub", List.of("google-cloud-pubsub", "@google-cloud/pubsub", "cloud.google.com/go/pubsub")),
         Map.entry("azure-sdk", List.of("azure-storage-blob", "azure-ai-ml", "@azure/storage-blob", "azure-search-documents")),
@@ -144,12 +147,23 @@ public class CloudRepository {
         // 외부 오류에 담길 수 있는 토큰·본문은 돌려주지 않는다
         catch (RuntimeException e) { throw new Unavailable(); }
     }
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
+    // 줄 전체가 주석인 것만 뺀다. 줄 중간의 #은 git+https://...#egg= 처럼 값의 일부일 수 있다
+    private static final Pattern LINE_COMMENT = Pattern.compile("(?m)^\\s*(#|//).*$");
+    private static final Pattern MAVEN_DEPENDENCY = Pattern.compile(
+        "<groupid>\\s*([^<\\s]+)\\s*</groupid>\\s*<artifactid>\\s*([^<\\s]+)\\s*</artifactid>");
+
     static void extract(String body, Map<String,List<String>> signals) {
-        String lower = body.toLowerCase(Locale.ROOT);
+        String lower = LINE_COMMENT.matcher(XML_COMMENT.matcher(body.toLowerCase(Locale.ROOT)).replaceAll(" ")).replaceAll("");
+        // pom.xml 의 groupId/artifactId 를 Gradle 과 같은 group:artifact 로 맞춰 같은 이름으로 찾는다
+        var maven = MAVEN_DEPENDENCY.matcher(lower);
+        StringBuilder coordinates = new StringBuilder();
+        while (maven.find()) coordinates.append('\n').append(maven.group(1)).append(':').append(maven.group(2));
+        String text = lower + coordinates;
         SIGNALS.forEach((category, names) -> {
             TreeSet<String> matched = new TreeSet<>(signals.getOrDefault(category, List.of()));
             for (String name : names) {
-                if (Pattern.compile("(?<![a-z0-9_-])" + Pattern.quote(name) + "(?![a-z0-9_])").matcher(lower).find()) matched.add(name);
+                if (Pattern.compile("(?<![a-z0-9_-])" + Pattern.quote(name) + "(?![a-z0-9_])").matcher(text).find()) matched.add(name);
             }
             if (!matched.isEmpty()) signals.put(category, List.copyOf(matched));
         });
