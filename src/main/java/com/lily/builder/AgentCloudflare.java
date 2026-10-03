@@ -289,7 +289,8 @@ public class AgentCloudflare {
         String wanted = body == null ? "" : body.path("content").asText();
         String target;
         if (origin && isOrigin(wanted)) {
-            target = cloudOrigin;
+            // 이 앱의 클라우드 오리진 (AWS ALB 또는 GCP 로드밸런서). 에이전트가 고른 쪽을 그대로 쓴다
+            target = normalize(wanted);
         } else {
             target = tunnelId(key) + ".cfargotunnel.com";
             require(!tunnelId(key).isBlank(), "이 에이전트의 터널이 아직 없다");
@@ -305,12 +306,15 @@ public class AgentCloudflare {
     }
 
     private boolean isOrigin(String content) {
-        String value = content == null ? "" : content.trim().toLowerCase();
-        if (value.endsWith(".")) {
-            value = value.substring(0, value.length() - 1);
-        }
+        String value = normalize(content);
         return (!cloudOrigin.isBlank() && cloudOrigin.equals(value))
                 || (!gcpOrigin.isBlank() && gcpOrigin.equals(value));
+    }
+
+    /** CNAME 비교용. 끝의 점과 대소문자를 없앤다 */
+    private static String normalize(String content) {
+        String value = content == null ? "" : content.trim().toLowerCase();
+        return value.endsWith(".") ? value.substring(0, value.length() - 1) : value;
     }
 
     private String zoneName() {
