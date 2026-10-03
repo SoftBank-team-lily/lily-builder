@@ -87,6 +87,27 @@ class AgentCloudflareTest {
     }
 
     @Test
+    void GCP_앱의_거점_전환은_ALB_가_아니라_GCP_로드밸런서를_가리킨다() {
+        AgentCloudflare withGcp = new AgentCloudflare(
+                new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"), "alb.example.net",
+                (key, app) -> KEY.equals(key) && "blog".equals(app),
+                (method, path, body) -> {
+                    calls.add(method + " " + path + (body == null ? "" : " " + body));
+                    return path.startsWith(Z + "/dns_records/") ? record : json("{}");
+                }, "gcp.lilycloud.kr");
+        String id = "0123456789abcdef0123456789abcdef";
+        record = json("{\"name\":\"blog.lilycloud.kr\",\"type\":\"CNAME\",\"content\":\"" + TUNNEL + ".cfargotunnel.com\"}");
+
+        withGcp.call(KEY, "PUT", Z + "/dns_records/" + id,
+                json("{\"type\":\"CNAME\",\"name\":\"blog.lilycloud.kr\",\"content\":\"GCP.lilycloud.kr.\",\"proxied\":true}"));
+        assertThat(calls.get(calls.size() - 1)).contains("\"content\":\"gcp.lilycloud.kr\"").doesNotContain("alb.example.net");
+
+        withGcp.call(KEY, "PUT", Z + "/dns_records/" + id,
+                json("{\"type\":\"CNAME\",\"name\":\"blog.lilycloud.kr\",\"content\":\"alb.example.net\",\"proxied\":true}"));
+        assertThat(calls.get(calls.size() - 1)).contains("\"content\":\"alb.example.net\"");
+    }
+
+    @Test
     void dnsOnlyPointsOwnedHostsAtTheAgentTunnel() {
         String body = "{\"type\":\"CNAME\",\"name\":\"blog.lilycloud.kr\",\"content\":\"" + TUNNEL + ".cfargotunnel.com\",\"proxied\":true}";
         cloudflare.call(KEY, "POST", Z + "/dns_records", json(body));
