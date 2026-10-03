@@ -17,6 +17,12 @@
 //   - 앱이 다른 주소로 응답을 만들게 하는 헤더(X-Forwarded-Host 등)가 붙은 요청은 두지 않는다 (사본 오염)
 //   - PC 를 거친 PUT/PATCH/DELETE 가 2xx 면 그 경로의 사본을 지운다 (이 데이터센터만)
 //   - 사본 저장·조회가 실패해도 원래 응답에는 영향이 없다
+//
+// 쓰기 큐(queue.js)에 등록된 앱의 POST 는 클라우드로 다시 보내지 않고 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
+
+import { queued, WriteQueue } from "./queue.js";
+
+export { WriteQueue };
 
 /** PC 가 받지 못한 뒤 이 시간 동안은 PC 를 건너뛰고 바로 클라우드로 보낸다 */
 const DOWN_MILLIS = 10_000;
@@ -68,6 +74,10 @@ export default {
       return fetch(request);
     }
     const host = url.hostname;
+    const write = await queued(request, url, env, () => isDown(host), () => markDown(host, ctx));
+    if (write !== null) {
+      return write;
+    }
     if (await isDown(host)) {
       return fallback(request, null, url, cloud, host, ctx);
     }

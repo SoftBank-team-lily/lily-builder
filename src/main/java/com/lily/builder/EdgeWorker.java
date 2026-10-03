@@ -19,7 +19,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -34,6 +36,7 @@ import java.util.UUID;
  * Worker 가 그 데이터센터의 읽기 사본(Cache API)으로 GET 에 답한다.
  * 클라우드 대기 배포가 끝난 앱에는 클라우드 주소 {@code {app}-cloud.{zone}}(ALB 프록시 CNAME)도 둔다 ({@link #attach}).
  * 거점 전환·CNAME 장애 전환({@link AgentFailover})은 그대로다. 라우트를 지우면 Worker 없이 지금과 같다.
+ * 쓰기 큐({@link EdgeQueue})가 켜져 있으면 DO 바인딩을 넣어 올리고, 관리 주소 라우트를 둔다.
  */
 @Component
 public class EdgeWorker {
@@ -43,9 +46,9 @@ public class EdgeWorker {
     static final String CLOUD_SUFFIX = "-cloud";
     static final String SCRIPT_RESOURCE = "/edge/worker.js";
 
-    /** 스크립트 업로드 (multipart). JSON 호출과 따로 둔다 */
+    /** 스크립트 업로드 (multipart). JSON 호출과 따로 둔다. modules 의 첫 항목이 main_module 이다 */
     interface Uploader {
-        void upload(String accountId, String scriptName, String source);
+        void upload(String accountId, String scriptName, String metadata, Map<String, String> modules);
     }
 
     private final PlatformProperties.Cloudflare settings;
@@ -54,34 +57,41 @@ public class EdgeWorker {
     private final String extraOrigin;
     private final AgentCloudflare.Api api;
     private final Uploader uploader;
+    private final EdgeQueue queue;
 
     @Autowired
-    public EdgeWorker(PlatformProperties props, CloudClients clouds) {
+    public EdgeWorker(PlatformProperties props, CloudClients clouds, EdgeQueue queue) {
         this(props.cloudflare(), props.edge(), props.burst().origin(),
                 new AgentCloudflare.HttpApi(props.cloudflare().apiToken()), new HttpUploader(props.cloudflare().apiToken()),
-                clouds.origin());
+                clouds.origin(), queue);
     }
 
     EdgeWorker(PlatformProperties.Cloudflare settings, PlatformProperties.Edge edge, String origin,
                AgentCloudflare.Api api, Uploader uploader) {
-        this(settings, edge, origin, api, uploader, "");
+        this(settings, edge, origin, api, uploader, "", EdgeQueue.disabled());
     }
 
     EdgeWorker(PlatformProperties.Cloudflare settings, PlatformProperties.Edge edge, String origin,
                AgentCloudflare.Api api, Uploader uploader, String extraOrigin) {
+        this(settings, edge, origin, api, uploader, extraOrigin, EdgeQueue.disabled());
+    }
+
+    EdgeWorker(PlatformProperties.Cloudflare settings, PlatformProperties.Edge edge, String origin,
+               AgentCloudflare.Api api, Uploader uploader, String extraOrigin, EdgeQueue queue) {
         this.settings = settings;
         this.edge = edge;
         this.origin = origin == null ? "" : origin;
         this.extraOrigin = extraOrigin == null ? "" : extraOrigin;
         this.api = api;
         this.uploader = uploader;
+        this.queue = queue;
     }
 
     static EdgeWorker disabled() {
         return new EdgeWorker(new PlatformProperties.Cloudflare("", "", "", ""), new PlatformProperties.Edge(false, "lily-edge"),
                 "", (method, path, body) -> {
                     throw new IllegalStateException("엣지 Worker 가 꺼져 있다");
-                }, (account, name, source) -> {
+                }, (account, name, metadata, modules) -> {
                     throw new IllegalStateException("엣지 Worker 가 꺼져 있다");
                 });
     }
@@ -97,11 +107,105 @@ public class EdgeWorker {
             return;
         }
         try {
-            uploader.upload(settings.accountId(), edge.scriptName(), script());
-            log.info("edge worker {} uploaded", edge.scriptName());
+            upload();
         } catch (RuntimeException e) {
             log.warn("edge worker upload failed: {}", e.getMessage());
         }
+        if (queue.enabled()) {
+            try {
+                queueAdmin();
+            } catch (RuntimeException e) {
+                log.warn("edge write queue admin host failed: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 쓰기 큐가 켜져 있으면 DO 바인딩을 넣어 올린다. 그게 실패하면 바인딩 없이 올린다 (PC 장애 재시도는 큐 없이도 동작한다).
+     * DO 마이그레이션은 Worker 에 없을 때만 보낸다. 있는지 확인하지 못해 보냈다가 거절되면 마이그레이션을 빼고 한 번 더 올린다
+     */
+    private void upload() {
+        Map<String, String> modules = new LinkedHashMap<>();
+        modules.put("worker.js", script());
+        modules.put(EdgeQueue.MODULE, resource(EdgeQueue.MODULE_RESOURCE));
+        if (queue.enabled()) {
+            boolean migrated = migrated();
+            try {
+                uploadWithQueue(modules, migrated);
+                return;
+            } catch (RuntimeException e) {
+                if (!migrated) {
+                    try {
+                        uploadWithQueue(modules, true);
+                        return;
+                    } catch (RuntimeException again) {
+                        // 아래에서 큐 없이 올린다
+                    }
+                }
+                log.warn("edge worker upload with write queue failed, uploading without it: {}", e.getMessage());
+            }
+        }
+        uploader.upload(settings.accountId(), edge.scriptName(), metadata().toString(), modules);
+        log.info("edge worker {} uploaded", edge.scriptName());
+    }
+
+    private void uploadWithQueue(Map<String, String> modules, boolean migrated) {
+        ObjectNode metadata = metadata();
+        queue.bind(metadata, migrated);
+        uploader.upload(settings.accountId(), edge.scriptName(), metadata.toString(), modules);
+        log.info("edge worker {} uploaded with write queue (migration {})", edge.scriptName(),
+                migrated ? "already applied" : EdgeQueue.MIGRATION_TAG);
+    }
+
+    private static ObjectNode metadata() {
+        ObjectNode metadata = MAPPER.createObjectNode();
+        metadata.put("main_module", "worker.js");
+        metadata.put("compatibility_date", "2025-09-01");
+        return metadata;
+    }
+
+    /** Worker 에 쓰기 큐 DO 마이그레이션이 이미 적용됐는가. 확인하지 못하면 false (보내 보고 거절되면 빼고 다시 올린다) */
+    private boolean migrated() {
+        try {
+            JsonNode scripts = api.call("GET", "/accounts/" + settings.accountId() + "/workers/scripts", null);
+            if (scripts != null && scripts.isArray()) {
+                for (JsonNode script : scripts) {
+                    if (edge.scriptName().equals(script.path("id").asText())) {
+                        return EdgeQueue.MIGRATION_TAG.equals(script.path("migration_tag").asText());
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            log.warn("edge worker migration tag check failed: {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /** 쓰기 큐 관리 주소. 오리진 없이 Worker 라우트만 쓰므로 프록시 AAAA 100:: 레코드를 둔다 */
+    private void queueAdmin() {
+        String host = queue.adminHost();
+        JsonNode found = api.call("GET", zone() + "/dns_records?name=" + URLEncoder.encode(host, StandardCharsets.UTF_8), null);
+        if (found == null || !found.isArray() || found.isEmpty()) {
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("type", "AAAA");
+            body.put("name", host);
+            body.put("content", "100::");
+            body.put("proxied", true);
+            body.put("ttl", 1);
+            api.call("POST", zone() + "/dns_records", body);
+        }
+        String pattern = host + "/*";
+        if (route(pattern) == null) {
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("pattern", pattern);
+            body.put("script", edge.scriptName());
+            api.call("POST", zone() + "/workers/routes", body);
+        }
+    }
+
+    /** 앱 공개 주소에 Worker 라우트가 있는가 */
+    public boolean routed(String app) {
+        return route(pattern(app)) != null;
     }
 
     /** 대기 배포에 넘길 Ingress 별칭. 꺼져 있으면 비어 있다 */
@@ -171,6 +275,14 @@ public class EdgeWorker {
 
     /** 앱을 지운 뒤. 라우트와 ALB 를 가리키는 클라우드 주소만 지운다 */
     public void detach(String app) {
+        if (queue.enabled()) {
+            try {
+                queue.clear(app);
+            } catch (RuntimeException e) {
+                // 남은 큐는 라우트가 없어 쓰이지 않는다. 앱 삭제는 계속한다
+                log.warn("edge write queue {} clear failed: {}", app, e.getMessage());
+            }
+        }
         JsonNode route = route(pattern(app));
         if (route != null) {
             api.call("DELETE", zone() + "/workers/routes/" + route.path("id").asText(), null);
@@ -234,17 +346,21 @@ public class EdgeWorker {
     }
 
     static String script() {
-        try (InputStream in = EdgeWorker.class.getResourceAsStream(SCRIPT_RESOURCE)) {
+        return resource(SCRIPT_RESOURCE);
+    }
+
+    static String resource(String path) {
+        try (InputStream in = EdgeWorker.class.getResourceAsStream(path)) {
             if (in == null) {
-                throw new IllegalStateException(SCRIPT_RESOURCE + " 이 없다");
+                throw new IllegalStateException(path + " 이 없다");
             }
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            throw new IllegalStateException(SCRIPT_RESOURCE + " 을 읽지 못했다", e);
+            throw new IllegalStateException(path + " 을 읽지 못했다", e);
         }
     }
 
-    /** PUT /accounts/{account}/workers/scripts/{name} (ES 모듈 하나) */
+    /** PUT /accounts/{account}/workers/scripts/{name} (ES 모듈 여러 개) */
     static final class HttpUploader implements Uploader {
 
         private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -255,22 +371,23 @@ public class EdgeWorker {
         }
 
         @Override
-        public void upload(String accountId, String scriptName, String source) {
+        public void upload(String accountId, String scriptName, String metadata, Map<String, String> modules) {
             String boundary = "lily-" + UUID.randomUUID();
-            String metadata = "{\"main_module\":\"worker.js\",\"compatibility_date\":\"2025-09-01\"}";
-            String body = "--" + boundary + "\r\n"
-                    + "Content-Disposition: form-data; name=\"metadata\"\r\n"
-                    + "Content-Type: application/json\r\n\r\n" + metadata + "\r\n"
-                    + "--" + boundary + "\r\n"
-                    + "Content-Disposition: form-data; name=\"worker.js\"; filename=\"worker.js\"\r\n"
-                    + "Content-Type: application/javascript+module\r\n\r\n" + source + "\r\n"
-                    + "--" + boundary + "--\r\n";
+            StringBuilder body = new StringBuilder()
+                    .append("--").append(boundary).append("\r\n")
+                    .append("Content-Disposition: form-data; name=\"metadata\"\r\n")
+                    .append("Content-Type: application/json\r\n\r\n").append(metadata).append("\r\n");
+            modules.forEach((name, source) -> body
+                    .append("--").append(boundary).append("\r\n")
+                    .append("Content-Disposition: form-data; name=\"").append(name).append("\"; filename=\"").append(name).append("\"\r\n")
+                    .append("Content-Type: application/javascript+module\r\n\r\n").append(source).append("\r\n"));
+            body.append("--").append(boundary).append("--\r\n");
             HttpRequest request = HttpRequest.newBuilder(URI.create(AgentCloudflare.API + "/accounts/" + accountId
                             + "/workers/scripts/" + scriptName))
                     .timeout(Duration.ofSeconds(30))
                     .header("Authorization", "Bearer " + token)
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                    .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                    .PUT(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
                     .build();
             try {
                 HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
