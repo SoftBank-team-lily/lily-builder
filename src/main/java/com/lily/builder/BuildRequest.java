@@ -35,8 +35,9 @@ import java.util.Map;
  *                      있으면 DB 를 만들지 않고 마이그레이션도 보내지 않는다 (스키마는 온프레미스가 맡는다)
  * @param importDatabase 온프레미스 local DB 를 띄우기 전에 같은 appName 의 클라우드 RDS 데이터를 옮긴다
  *                      (클라우드 앱을 내 PC 로 옮길 때). postgres 만
- * @param deploymentMode 배포 모드. HYBRID(기본): DB 는 RDS 이고 거점만 바뀐다.
- *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·RDS 프로비저닝을 하지 않는다
+ * @param deploymentMode 배포 모드. HYBRID(기본): 거점만 바뀐다. 클라우드 DB 는 cloudProvider 쪽이다.
+ *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·클라우드 DB 프로비저닝을 하지 않는다
+ * @param cloudProvider 하이브리드의 클라우드. AWS(기본) 또는 GCP. 온프레미스 전용은 쓰지 않는다. 만든 뒤에는 바꾸지 않는다
  */
 public record BuildRequest(
         @NotBlank @Pattern(regexp = "https://github\\.com/[\\w.-]+/[\\w.-]+?(\\.git)?/?") String repoUrl,
@@ -58,9 +59,21 @@ public record BuildRequest(
         @Size(max = 500) @Pattern(regexp = "((postgres|postgresql|mysql)://[!-~]+)?") String databaseUrl,
         Map<String, String> databaseEnv,
         Boolean importDatabase,
-        @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode) {
+        @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode,
+        @Pattern(regexp = "AWS|GCP|") String cloudProvider) {
 
     public static final int DEFAULT_TARGET_PORT = 8080;
+
+    /** 클라우드 제공자를 정하지 않는다 (AWS) */
+    public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
+                        Integer targetPort, String database, String readinessPath, String livenessPath,
+                        Map<String, String> env, String host, Boolean standby, String migrationsPath,
+                        Boolean migrate, String canaryPath, String databaseMode, String databaseUrl,
+                        Map<String, String> databaseEnv, Boolean importDatabase, String deploymentMode) {
+        this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase, deploymentMode, null);
+    }
 
     /** RDS 데이터를 옮기지 않는다 */
     public BuildRequest(String repoUrl, String branch, String token, String rootDir, String appName,
@@ -70,7 +83,7 @@ public record BuildRequest(
                         Map<String, String> databaseEnv) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv, null,
-                null);
+                null, null);
     }
 
     /** 배포 모드를 정하지 않는다 (HYBRID) */
@@ -81,7 +94,7 @@ public record BuildRequest(
                         Map<String, String> databaseEnv, Boolean importDatabase) {
         this(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase, null);
+                importDatabase, null, null);
     }
 
     /** DB 위치는 정하지 않는다 (클라우드 배포, 또는 온프레미스 기본값 cloud) */
@@ -124,14 +137,20 @@ public record BuildRequest(
     public BuildRequest withDetected(int port, String database, String readinessPath, String livenessPath) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, port, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase, deploymentMode);
+                importDatabase, deploymentMode, cloudProvider);
     }
 
     /** 빌드할 폴더를 레포에서 찾았을 때 ({@link BuildService#source}) */
     public BuildRequest withSource(String rootDir, String migrationsPath, Integer targetPort) {
         return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
                 env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
-                importDatabase, deploymentMode);
+                importDatabase, deploymentMode, cloudProvider);
+    }
+
+    public BuildRequest withCloudProvider(String cloudProvider) {
+        return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath, livenessPath,
+                env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl, databaseEnv,
+                importDatabase, deploymentMode, cloudProvider);
     }
 
     /** 클라우드 RDS 데이터를 온프레미스 local DB 로 옮긴다 */
@@ -159,6 +178,14 @@ public record BuildRequest(
 
     public boolean onPremOnly() {
         return "ONPREM_ONLY".equals(deploymentModeOrDefault());
+    }
+
+    /** 하이브리드의 클라우드. 비우거나 알 수 없는 값이면 AWS. 온프레미스 전용은 AWS (클라우드를 쓰지 않는다) */
+    public String cloudProviderOrDefault() {
+        if (onPremOnly()) {
+            return "AWS";
+        }
+        return "GCP".equals(cloudProvider) ? "GCP" : "AWS";
     }
 
     /** 호출자가 DB 접속 정보를 정해 보냈다 */

@@ -53,6 +53,8 @@ public class AgentDeployService {
     private final BuildService.BuildRunner runner;
     private final BuilderProperties props;
     private final ProvisionerClient provisioner;
+    private final CloudClients clouds;
+    private final CloudWelcome welcome;
     private final ObjectMapper json = new ObjectMapper();
     /** 진행 중인 온프레미스 빌드 id → 에이전트 key. 다른 에이전트가 보낸 상태는 받지 않는다 */
     private final Map<String, String> running = new ConcurrentHashMap<>();
@@ -67,8 +69,17 @@ public class AgentDeployService {
     public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
                               BuildService.BuildRunner runner, BuilderProperties props,
                               ProvisionerClient provisioner) {
+        this(store, github, builds, hub, runner, props, provisioner, null, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentDeployService(BuildStore store, GitHubSource github, BuildService builds, AgentHub hub,
+                              BuildService.BuildRunner runner, BuilderProperties props,
+                              ProvisionerClient provisioner, CloudClients clouds, CloudWelcome welcome) {
         this.store = store;
         this.provisioner = provisioner;
+        this.clouds = clouds;
+        this.welcome = welcome;
         this.github = github;
         this.builds = builds;
         this.hub = hub;
@@ -84,6 +95,7 @@ public class AgentDeployService {
         Build build = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch() + " target=onprem agent=" + agentKey);
         build.log("deploymentMode=" + request.deploymentModeOrDefault());
+        build.log("cloudProvider=" + request.cloudProviderOrDefault());
         store.save(build);
         running.put(build.getId(), agentKey);
         runner.run(() -> send(build, request, agentKey));
@@ -105,6 +117,16 @@ public class AgentDeployService {
 
             String database = resolved.database();
             boolean only = request.onPremOnly();
+            String provider = request.cloudProviderOrDefault();
+            if ("GCP".equals(provider)) {
+                if (!hub.supports(agentKey, "cloud-target")) {
+                    throw new IllegalStateException("내 PC 에이전트가 GCP 클라우드를 받지 못하는 판이다."
+                            + " 에이전트를 최신 이미지로 다시 실행한다");
+                }
+                if (welcome == null) {
+                    throw new IllegalStateException(CloudClients.MISSING);
+                }
+            }
             if (only && request.importsDatabase()) {
                 throw new IllegalArgumentException("온프레미스 전용은 RDS 데이터를 옮기지 않는다");
             }
@@ -139,10 +161,14 @@ public class AgentDeployService {
             // 플랫폼 DB 터널이면 에이전트는 DB 계정을 따로 받지 않는다. 터널 주소 기준 접속 정보를 잡에 싣는다
             Map<String, String> databaseEnv = null;
             boolean importing = onPremDatabase && request.importsDatabase() && !only;
-            if (!only && (importing || !onPremDatabase) && database != null && !database.isBlank()
-                    && hub.platformDatabase(agentKey)) {
+            boolean cloudDb = !only && (importing || !onPremDatabase) && database != null && !database.isBlank()
+                    && hub.platformDatabase(agentKey);
+            if ("GCP".equals(provider)) {
+                welcome.retarget(agentKey, resolved.appName(), cloudDb);
+            }
+            if (cloudDb) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
-                databaseEnv = provisioner.ensure(resolved.appName(), database, at.host(), at.port()).env();
+                databaseEnv = provisionerOf(provider).ensure(resolved.appName(), database, at.host(), at.port()).env();
                 build.log("database: " + database + " via platform tunnel " + at.host() + ":" + at.port()
                         + (importing ? " (import into my pc)" : ""));
             }
@@ -164,7 +190,7 @@ public class AgentDeployService {
                 }
                 if (databaseEnv != null) {
                     // RDS 에 pgroll 을 켠다. init 은 이벤트 트리거라 관리자 권한이 있는 provisioner 가 한다
-                    provisioner.enablePgroll(resolved.appName());
+                    provisionerOf(provider).enablePgroll(resolved.appName());
                     build.log("database: pgroll enabled on RDS");
                 }
                 build.log("source: pgroll migrations " + migrations.keySet());
@@ -470,6 +496,25 @@ public class AgentDeployService {
                 .filter(build -> agentKey.equals(agentKey(build)))
                 .max(Comparator.comparing(Build::getCreatedAt))
                 .map(Build::getAppName);
+    }
+
+    /** 이 앱의 가장 최근 빌드에 기록된 클라우드. 기록이 없으면 AWS */
+    public String cloudProvider(String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(build -> build.getLogs().stream().anyMatch(line -> line.startsWith("cloudProvider=GCP")))
+                .orElse(false) ? "GCP" : "AWS";
+    }
+
+    private ProvisionerClient provisionerOf(String provider) {
+        if (!"GCP".equals(provider)) {
+            return provisioner;
+        }
+        if (clouds == null) {
+            throw new IllegalStateException(CloudClients.MISSING_DB);
+        }
+        return clouds.provisioner();
     }
 
     /** 이 앱의 가장 최근 빌드에 기록된 배포 모드. 기록이 없으면 HYBRID */

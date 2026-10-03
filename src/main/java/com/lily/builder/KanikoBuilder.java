@@ -64,7 +64,17 @@ public class KanikoBuilder {
      * @param dockerfile 레포에 Dockerfile 이 없어 만든 내용. ConfigMap 으로 넣는다. null 이면 레포의 Dockerfile
      */
     public String build(String buildId, BuildRequest request, String tag, String commit, String dockerfile) {
-        String image = props.registry() + "/" + request.appName() + ":" + tag;
+        return build(buildId, request, tag, commit, dockerfile, null, null);
+    }
+
+    /**
+     * @param registry   이미지를 올릴 레지스트리. null 이면 빌더 기본값(ECR)
+     * @param authSecret 그 레지스트리의 dockerconfigjson 시크릿. null 이면 ECR 일 때만 ecr-pull 을 마운트한다
+     */
+    public String build(String buildId, BuildRequest request, String tag, String commit, String dockerfile,
+                        String registry, String authSecret) {
+        String image = (registry == null || registry.isBlank() ? props.registry() : registry)
+                + "/" + request.appName() + ":" + tag;
         String jobName = "build-" + buildId;
         String ns = props.namespace();
         boolean hasToken = request.token() != null && !request.token().isBlank();
@@ -83,7 +93,7 @@ public class KanikoBuilder {
                         .build()).create();
             }
             k8s.batch().v1().jobs().inNamespace(ns)
-                    .resource(job(jobName, request, image, hasToken, commit, dockerfile != null)).create();
+                    .resource(job(jobName, request, image, hasToken, commit, dockerfile != null, authSecret)).create();
             Job done = awaitFinished(ns, jobName);
             if (!succeeded(done)) {
                 throw new IllegalStateException("kaniko build failed\n" + tail(ns, jobName));
@@ -115,6 +125,15 @@ public class KanikoBuilder {
      * @param generated true 면 같은 이름의 ConfigMap 에 둔 Dockerfile 로 빌드한다 (컨텍스트 밖 절대 경로)
      */
     Job job(String name, BuildRequest request, String image, boolean hasToken, String commit, boolean generated) {
+        return job(name, request, image, hasToken, commit, generated, null);
+    }
+
+    /**
+     * @param generated true 면 같은 이름의 ConfigMap 에 둔 Dockerfile 로 빌드한다 (컨텍스트 밖 절대 경로)
+     * @param authSecret GCP Artifact Registry 처럼 노드 IAM 이 아닌 dockerconfigjson. null 이면 ECR 시크릿
+     */
+    Job job(String name, BuildRequest request, String image, boolean hasToken, String commit, boolean generated,
+            String authSecret) {
         List<String> args = new ArrayList<>(List.of(
                 "--context=" + request.gitContext(commit),
                 "--dockerfile=" + (generated ? GENERATED_DOCKERFILE : "Dockerfile"),
@@ -165,12 +184,13 @@ public class KanikoBuilder {
                     .endContainer()
                     .endSpec().endTemplate().endSpec();
         }
-        if (props.ecr()) {
+        String secretName = authSecret != null && !authSecret.isBlank() ? authSecret : REGISTRY_AUTH_SECRET;
+        if ((authSecret != null && !authSecret.isBlank()) || props.ecr()) {
             // 사용자 Dockerfile 이 실행되므로 AWS 권한이 있는 lily-server 에 두지 않는다 (worker 는 IMDS 차단).
-            // worker 는 사용자 앱과 같은 노드라 메모리 상한을 둔다
+            // worker 는 사용자 앱과 같은 노드라 메모리 상한을 둔다. GCP 는 dockerconfigjson 시크릿으로 푸시한다
             builder.editSpec().editTemplate().editSpec()
                     .addNewVolume().withName("docker-config")
-                        .withNewSecret().withSecretName(REGISTRY_AUTH_SECRET)
+                        .withNewSecret().withSecretName(secretName)
                             .addNewItem().withKey(".dockerconfigjson").withPath("config.json").endItem()
                         .endSecret()
                     .endVolume()

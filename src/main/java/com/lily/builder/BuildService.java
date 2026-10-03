@@ -51,12 +51,13 @@ public class BuildService {
     private final Map<String, Build> live = new ConcurrentHashMap<>();
     /** 취소와 다음 단계로 넘어가기를 한 번에 하나씩. 취소한 빌드가 lily-cicd 로 넘어가지 않게 한다 */
     private final Object transitions = new Object();
+    private final CloudClients clouds;
 
     @Autowired
     public BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                         EcrRepositories ecr, GitHubSource github, ConfigAdvisor config, FailureDiagnoser diagnoser,
-                        AppAddress addresses, EdgeWorker edge) {
-        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser, addresses, edge);
+                        AppAddress addresses, EdgeWorker edge, CloudClients clouds) {
+        this(store, kaniko, cicd, runner, ecr, github, new DeployFollow(cicd), config, diagnoser, addresses, edge, clouds);
     }
 
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
@@ -80,6 +81,14 @@ public class BuildService {
     BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
                  EcrRepositories ecr, GitHubSource github, DeployFollow follow,
                  ConfigAdvisor config, FailureDiagnoser diagnoser, AppAddress addresses, EdgeWorker edge) {
+        this(store, kaniko, cicd, runner, ecr, github, follow, config, diagnoser, addresses, edge, null);
+    }
+
+    BuildService(BuildStore store, KanikoBuilder kaniko, CicdClient cicd, BuildRunner runner,
+                 EcrRepositories ecr, GitHubSource github, DeployFollow follow,
+                 ConfigAdvisor config, FailureDiagnoser diagnoser, AppAddress addresses, EdgeWorker edge,
+                 CloudClients clouds) {
+        this.clouds = clouds;
         this.addresses = addresses;
         this.edge = edge;
         this.config = config;
@@ -103,6 +112,7 @@ public class BuildService {
         build.log("queued: " + request.repoUrl() + " branch=" + build.getBranch()
                 + (build.getRootDir() == null ? "" : " dir=" + build.getRootDir()));
         build.log("deploymentMode=" + request.deploymentModeOrDefault());
+        build.log("cloudProvider=" + request.cloudProviderOrDefault());
         if (note != null && !note.isBlank()) {
             build.log(note);
         }
@@ -182,7 +192,16 @@ public class BuildService {
         build.log("deploy: builder restarted, following progress");
         store.save(build);
         try {
-            DeployFollow.Outcome outcome = follow.await(build, build.getCreatedAt());
+            boolean gcp = build.getLogs().stream().anyMatch(line -> line.startsWith("cloudProvider=GCP"));
+            DeployFollow watching = follow;
+            if (gcp) {
+                if (clouds == null || !clouds.deployConfigured()) {
+                    fail(build, CloudClients.MISSING);
+                    return;
+                }
+                watching = new DeployFollow(clouds.cicd());
+            }
+            DeployFollow.Outcome outcome = watching.await(build, build.getCreatedAt());
             if (outcome.rolledBackReason() != null) {
                 rolledBack(build, outcome.rolledBackReason());
                 return;
@@ -217,11 +236,28 @@ public class BuildService {
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
                     : "source: migrations " + migrations.keySet());
-            if (ecr.ensure(request.appName())) {
+            String provider = request.cloudProviderOrDefault();
+            boolean gcp = "GCP".equals(provider);
+            CicdClient targetCicd = cicd;
+            DeployFollow watching = follow;
+            String registry = null;
+            String authSecret = null;
+            if (gcp) {
+                if (clouds == null || !clouds.deployConfigured()) {
+                    throw new IllegalStateException(CloudClients.MISSING);
+                }
+                targetCicd = clouds.cicd();
+                watching = new DeployFollow(targetCicd);
+                registry = clouds.registry();
+                authSecret = clouds.registrySecret();
+                build.log("build: registry " + registry);
+            } else if (ecr.ensure(request.appName())) {
                 build.log("build: created ecr repository " + request.appName());
             }
             advance(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
-            String image = kaniko.build(build.getId(), request, tag, commit, dockerfile);
+            String image = registry == null
+                    ? kaniko.build(build.getId(), request, tag, commit, dockerfile)
+                    : kaniko.build(build.getId(), request, tag, commit, dockerfile, registry, authSecret);
             build.image(image);
             build.log("build: pushed " + image);
 
@@ -229,9 +265,9 @@ public class BuildService {
                     + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()));
             Instant started = Instant.now();
             CicdClient.Result result;
-            try (ProgressWatch ignored = watchProgress(build)) {
+            try (ProgressWatch ignored = watchProgress(build, targetCicd)) {
                 try {
-                    result = cicd.deploy(request, image, tag, migrations,
+                    result = targetCicd.deploy(request, image, tag, migrations,
                             request.isStandby() ? edge.aliases(request.appName()) : List.of());
                 } catch (RestClientResponseException e) {
                     throw e;
@@ -239,7 +275,7 @@ public class BuildService {
                     // 응답이 없다는 것은 실패가 아니다. cicd 가 아직 배포 중일 수 있다. POST 는 다시 보내지 않는다
                     build.log("deploy: response lost, following progress");
                     store.save(build);
-                    DeployFollow.Outcome outcome = follow.await(build, started);
+                    DeployFollow.Outcome outcome = watching.await(build, started);
                     if (outcome.rolledBackReason() != null) {
                         rolledBack(build, outcome.rolledBackReason());
                         return;
@@ -256,12 +292,12 @@ public class BuildService {
                 if (servesCloud(build, request.appName())) {
                     build.log("standby: public address points to the cloud, replicas kept");
                 } else {
-                    cicd.scale(request.appName(), 0);
+                    targetCicd.scale(request.appName(), 0);
                     build.log("standby: scaled to 0");
                 }
-                edge(build, request.appName());
+                edge(build, request.appName(), provider);
             } else {
-                address(build, request.appName());
+                address(build, request.appName(), provider);
             }
             update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
         } catch (RestClientResponseException e) {
@@ -668,14 +704,14 @@ public class BuildService {
      * lily-cicd 배포 요청은 끝날 때까지 응답하지 않는다. 그동안 1초마다 진행 단계를 물어 로그에 남긴다.
      * 이번 배포를 시작한 뒤에 바뀐 단계만 남긴다.
      */
-    private ProgressWatch watchProgress(Build build) {
+    private ProgressWatch watchProgress(Build build, CicdClient client) {
         Instant since = Instant.now();
         ProgressWatch watch = new ProgressWatch();
         watch.thread = Thread.ofVirtual().name("progress-" + build.getId()).start(() -> {
             String last = null;
             while (!watch.done) {
                 try {
-                    CicdClient.Progress progress = cicd.progress(build.getAppName());
+                    CicdClient.Progress progress = client.progress(build.getAppName());
                     if (progress != null && progress.updatedAt() != null && !progress.updatedAt().isBefore(since)) {
                         String line = "progress: " + progress.stage() + " " + progress.detail();
                         if (!line.equals(last)) {
@@ -750,12 +786,13 @@ public class BuildService {
     }
 
     /** 대기 배포가 끝난 앱에 엣지 Worker 를 건다. 실패해도 배포는 성공이다 (PC 장애 때 CNAME 전환이 남는다) */
-    private void edge(Build build, String app) {
+    private void edge(Build build, String app, String provider) {
         if (!edge.enabled()) {
             return;
         }
         try {
-            build.log(edge.attach(app));
+            String origin = "GCP".equals(provider) && clouds != null ? clouds.origin() : null;
+            build.log(origin == null || origin.isBlank() ? edge.attach(app) : edge.attach(app, origin));
         } catch (RuntimeException e) {
             log.warn("edge {} failed: {}", app, e.getMessage());
             build.log("edge: failed " + e.getMessage());
@@ -763,12 +800,14 @@ public class BuildService {
     }
 
     /** 공개 주소 CNAME 을 ALB 로 둔다. 실패해도 배포는 성공이다 (Ingress 는 이미 바뀌었다) */
-    private void address(Build build, String app) {
+    private void address(Build build, String app, String provider) {
         if (!addresses.enabled()) {
             return;
         }
         try {
-            AppAddress.State state = addresses.ensureCloud(app);
+            String origin = "GCP".equals(provider) && clouds != null ? clouds.origin() : null;
+            AppAddress.State state = origin == null || origin.isBlank()
+                    ? addresses.ensureCloud(app) : addresses.ensureCloud(app, origin);
             build.log(switch (state.home()) {
                 case CLOUD -> "address: " + state.host() + " -> cloud";
                 case ONPREM -> "address: " + state.host() + " points to an on-prem tunnel, left as is";

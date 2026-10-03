@@ -52,13 +52,15 @@ public class AgentCloudflare {
     private final PlatformProperties.Cloudflare settings;
     /** 거점이 클라우드일 때의 CNAME 내용물. 비우면 터널로만 가리킨다 */
     private final String cloudOrigin;
+    private final String gcpOrigin;
     private final BiPredicate<String, String> owns;
     private final Api api;
     private final Map<String, String> tunnelIds = new ConcurrentHashMap<>();
 
     @Autowired
-    public AgentCloudflare(PlatformProperties props, AgentDeployService deploys) {
-        this(props.cloudflare(), props.burst().origin(), deploys::ownedBy, new HttpApi(props.cloudflare().apiToken()));
+    public AgentCloudflare(PlatformProperties props, AgentDeployService deploys, CloudClients clouds) {
+        this(props.cloudflare(), props.burst().origin(), deploys::ownedBy, new HttpApi(props.cloudflare().apiToken()),
+                clouds.origin());
     }
 
     AgentCloudflare(PlatformProperties.Cloudflare settings, BiPredicate<String, String> owns, Api api) {
@@ -67,8 +69,14 @@ public class AgentCloudflare {
 
     AgentCloudflare(PlatformProperties.Cloudflare settings, String cloudOrigin, BiPredicate<String, String> owns,
                     Api api) {
+        this(settings, cloudOrigin, owns, api, "");
+    }
+
+    AgentCloudflare(PlatformProperties.Cloudflare settings, String cloudOrigin, BiPredicate<String, String> owns,
+                    Api api, String gcpOrigin) {
         this.settings = settings;
         this.cloudOrigin = cloudOrigin == null ? "" : cloudOrigin;
+        this.gcpOrigin = gcpOrigin == null ? "" : gcpOrigin;
         this.owns = owns;
         this.api = api;
     }
@@ -301,7 +309,8 @@ public class AgentCloudflare {
         if (value.endsWith(".")) {
             value = value.substring(0, value.length() - 1);
         }
-        return !cloudOrigin.isBlank() && cloudOrigin.equals(value);
+        return (!cloudOrigin.isBlank() && cloudOrigin.equals(value))
+                || (!gcpOrigin.isBlank() && gcpOrigin.equals(value));
     }
 
     private String zoneName() {

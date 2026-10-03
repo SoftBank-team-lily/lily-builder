@@ -64,16 +64,19 @@ public class AgentSocket implements WebSocketConfigurer {
     private final AgentBurst burst;
     private final AgentIncidentRelay incidents;
     private final PlatformProperties.Burst burstSettings;
+    private final CloudClients clouds;
     private final ObjectMapper json = new ObjectMapper();
     /** Cloudflare 중계는 수 초 걸린다. 소켓 수신 스레드를 막지 않게 따로 돌린다 */
     private final ExecutorService relay = Executors.newVirtualThreadPerTaskExecutor();
 
     public AgentSocket(AgentTokens tokens, AgentHub hub, AgentDeployService deploys,
                        AgentCloudflare cloudflare, TunnelCertificates certificates, AgentDatabasePorts ports,
-                       AgentBurst burst, AgentIncidentRelay incidents, PlatformProperties platform) {
+                       AgentBurst burst, AgentIncidentRelay incidents, PlatformProperties platform,
+                       CloudClients clouds) {
         this.burst = burst;
         this.incidents = incidents;
         this.burstSettings = platform.burst();
+        this.clouds = clouds;
         this.tokens = tokens;
         this.hub = hub;
         this.deploys = deploys;
@@ -93,32 +96,53 @@ public class AgentSocket implements WebSocketConfigurer {
         Map<String, Object> welcome = new LinkedHashMap<>();
         welcome.put("type", "welcome");
         welcome.put("tunnelAgentId", AgentCloudflare.tunnelAgentId(key));
+        String app = deploys.latestApp(key).orElse("");
+        boolean gcp = !app.isBlank() && "GCP".equals(deploys.cloudProvider(app));
+        CloudProfiles profile = clouds.profile();
         if (hello.path("platform").asBoolean(false) && cloudflare.enabled()) {
             welcome.put("cloudflare", cloudflare.zone());
-            if (burstSettings.configured()) {
+            if (gcp && profile.burstConfigured()) {
+                Map<String, Object> cloud = new LinkedHashMap<>();
+                cloud.put("ingressHost", profile.ingressHost());
+                cloud.put("ingressPort", profile.ingressPort());
+                cloud.put("cloudOrigin", profile.origin());
+                cloud.put("app", app);
+                welcome.put("burst", cloud);
+            } else if (gcp) {
+                log.warn("agent {}: GCP burst is not configured, omitting burst", key);
+            } else if (burstSettings.configured()) {
                 Map<String, Object> cloud = new LinkedHashMap<>();
                 cloud.put("ingressHost", burstSettings.ingressHost());
                 cloud.put("ingressPort", burstSettings.ingressPort());
                 cloud.put("cloudOrigin", burstSettings.origin());
                 // 에이전트 컨테이너를 새로 만들면 마지막 앱을 잊는다. 이 앱의 CNAME 으로 거점을 복구한다
-                deploys.latestApp(key).ifPresent(app -> cloud.put("app", app));
+                if (!app.isBlank()) {
+                    cloud.put("app", app);
+                }
                 welcome.put("burst", cloud);
             }
         }
         String publicKey = hello.path("sshPublicKey").asText("");
-        if (!publicKey.isBlank() && certificates.enabled()) {
+        if (!publicKey.isBlank()) {
+            hub.sshPublicKey(key, publicKey);
+        }
+        if (gcp && !profile.tunnelConfigured()) {
+            log.warn("agent {}: GCP database tunnel is not configured", key);
+        } else if (!publicKey.isBlank() && certificates.enabled()) {
             try {
                 PlatformProperties.Tunnel tunnel = certificates.settings();
+                boolean gcpTunnel = gcp && profile.tunnelConfigured();
                 Map<String, Object> database = new LinkedHashMap<>();
-                database.put("sshHost", tunnel.sshHost());
-                database.put("sshUser", tunnel.sshUser());
-                database.put("remoteHost", tunnel.remoteHost());
-                database.put("remotePort", tunnel.remotePort());
+                database.put("sshHost", gcpTunnel ? profile.tunnelSshHost() : tunnel.sshHost());
+                database.put("sshUser", gcpTunnel ? profile.tunnelSshUser() : tunnel.sshUser());
+                database.put("remoteHost", gcpTunnel ? profile.tunnelRemoteHost() : tunnel.remoteHost());
+                database.put("remotePort", gcpTunnel ? profile.tunnelRemotePort() : tunnel.remotePort());
                 Integer reversePort = null;
                 if (ports.enabled()) {
                     try {
                         reversePort = ports.portOf(key);
-                        database.put("reverseHost", tunnel.reverseHost());
+                        database.put("reverseHost", gcpTunnel && !profile.tunnelReverseHost().isBlank()
+                                ? profile.tunnelReverseHost() : tunnel.reverseHost());
                         database.put("reversePort", reversePort);
                     } catch (RuntimeException e) {
                         // 역방향 터널 없이도 RDS 터널과 내 PC DB 는 쓴다. 클라우드 대기 배포만 못 한다

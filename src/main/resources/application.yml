@@ -61,6 +61,21 @@ lily:
       edge:
         enabled: ${PLATFORM_EDGE_ENABLED:false}
         script-name: ${PLATFORM_EDGE_SCRIPT_NAME:lily-edge}
+    # 하이브리드에서 고른 GCP 데이터 플레인. 비우면 AWS 만 동작하고, GCP 프로젝트는 배포 전에 거절한다
+    gcp:
+      cicd-url: ${GCP_CICD_URL:}
+      registry: ${GCP_REGISTRY:}
+      registry-secret: ${GCP_REGISTRY_AUTH_SECRET:gcp-pull}
+      provisioner-url: ${GCP_PROVISIONER_URL:}
+      provisioner-token: ${GCP_PROVISIONER_API_TOKEN:}
+      ingress-host: ${GCP_BURST_INGRESS_HOST:}
+      ingress-port: ${GCP_BURST_INGRESS_PORT:80}
+      cloud-origin: ${GCP_CUTOVER_ORIGIN:}
+      tunnel-ssh-host: ${GCP_TUNNEL_SSH_HOST:}
+      tunnel-ssh-user: ${GCP_TUNNEL_SSH_USER:lily-tunnel}
+      tunnel-remote-host: ${GCP_TUNNEL_REMOTE_HOST:}
+      tunnel-remote-port: ${GCP_TUNNEL_REMOTE_PORT:5432}
+      tunnel-reverse-host: ${GCP_TUNNEL_REVERSE_HOST:}
     # 배포 이력 테이블 (파티션 키 pk: String). 운영 테이블은 lily-db-provisioner/infra 가 만든다
     dynamodb:
       table: ${BUILDS_TABLE:lily-builds}
