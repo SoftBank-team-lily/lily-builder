@@ -307,6 +307,11 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
+        // 온프레미스 앱이면 에이전트가 보낸 상태 (같은 모양)
+        Optional<String> onprem = agents.schema(appName);
+        if (onprem.isPresent()) {
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(onprem.get());
+        }
         return passthrough(cicd.schema(appName));
     }
 
@@ -315,6 +320,16 @@ public class BuildController {
     public ResponseEntity<String> completeSchema(@PathVariable String appName) {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
+        }
+        try {
+            Optional<String> onprem = agents.completeSchema(appName);
+            if (onprem.isPresent()) {
+                return ResponseEntity.accepted().contentType(MediaType.APPLICATION_JSON).body(onprem.get());
+            }
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(rejected(e.getMessage()));
         }
         return passthrough(cicd.completeSchema(appName));
     }

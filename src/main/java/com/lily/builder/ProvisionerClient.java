@@ -56,6 +56,21 @@ public class ProvisionerClient {
         return new Connection(id, env == null ? Map.of() : env.env());
     }
 
+    /**
+     * 프로젝트 DB 에 pgroll 을 켠다 (관리자 계정으로 init, 프로젝트 계정에 권한). 여러 번 불러도 된다.
+     * 온프레미스 앱이 RDS 를 쓰면서 pgroll 마이그레이션을 받거나, pgroll 을 쓰는 DB 를 RDS 로 옮길 때 쓴다
+     */
+    public void enablePgroll(String projectId) {
+        if (!configured) {
+            throw new IllegalStateException("provisioner 가 설정되지 않았다 (PROVISIONER_URL, PROVISIONER_API_TOKEN)");
+        }
+        Database db = find(projectId);
+        if (db == null) {
+            throw new IllegalStateException("DB 가 없다: " + projectId);
+        }
+        http.post().uri("/api/databases/{id}/pgroll", db.id()).retrieve().toBodilessEntity();
+    }
+
     private Database find(String projectId) {
         List<Database> found = http.get()
                 .uri(b -> b.path("/api/databases").queryParam("projectId", projectId).build())

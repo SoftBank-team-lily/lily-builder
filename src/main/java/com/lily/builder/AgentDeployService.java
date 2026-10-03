@@ -1,6 +1,7 @@
 package com.lily.builder;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -136,7 +137,21 @@ public class AgentDeployService {
             // 보낸 뒤에 기록하면 에이전트가 먼저 보낸 BUILDING 을 덮을 수 있다. 보내기 전에 남긴다
             build.log("agent: send to " + hub.agentId(agentKey));
             store.save(build);
-            Map<String, String> migrations = github.sqlMigrations(resolved, commit);
+            // PostgreSQL 은 db/pgroll 이 있으면 pgroll 파일을 보낸다 (에이전트가 무중단으로 적용한다). MySQL 은 Flyway SQL 만
+            Map<String, String> migrations = "postgres".equals(database)
+                    ? github.migrations(resolved, commit) : github.sqlMigrations(resolved, commit);
+            if (pgroll(migrations)) {
+                if (!hub.supports(agentKey, "pgroll")) {
+                    throw new IllegalStateException("내 PC 에이전트가 pgroll 마이그레이션을 받지 못하는 판이다."
+                            + " 에이전트를 최신 이미지로 다시 실행한다");
+                }
+                if (databaseEnv != null) {
+                    // RDS 에 pgroll 을 켠다. init 은 이벤트 트리거라 관리자 권한이 있는 provisioner 가 한다
+                    provisioner.enablePgroll(resolved.appName());
+                    build.log("database: pgroll enabled on RDS");
+                }
+                build.log("source: pgroll migrations " + migrations.keySet());
+            }
             Map<String, Object> job = job(build.getId(), resolved, database, dockerfile, migrations, resolved.canaryPath());
             if (databaseEnv != null) {
                 job.put("databaseEnv", databaseEnv);
@@ -160,6 +175,66 @@ public class AgentDeployService {
      * 이 앱의 최근 성공이 온프레미스 배포면 그 에이전트의 직전 슬롯으로 되돌린다.
      * @return 롤백 결과 JSON. 최근 성공이 클라우드면 empty (호출자가 lily-cicd 로 넘긴다)
      */
+    private static boolean pgroll(Map<String, String> migrations) {
+        return migrations != null && migrations.keySet().stream()
+                .anyMatch(name -> name.endsWith(".yaml") || name.endsWith(".yml") || name.endsWith(".json"));
+    }
+
+    /**
+     * 온프레미스 앱의 스키마 이력. 에이전트가 3초마다 보내는 상태(burst-state)의 schema 를 돌려준다.
+     * lily-cicd GET /api/deployments/{app}/schema 와 같은 모양이다. 온프레미스 앱이 아니면 빈 값
+     */
+    public Optional<String> schema(String app) {
+        String key = agentKeyOf(app);
+        if (key == null) {
+            return Optional.empty();
+        }
+        JsonNode state = hub.lastState(key);
+        try {
+            if (state != null && app.equals(state.path("app").asText("")) && state.has("schema")) {
+                return Optional.of(json.writeValueAsString(state.get("schema")));
+            }
+            Map<String, Object> empty = new java.util.LinkedHashMap<>();
+            empty.put("appName", app);
+            empty.put("engine", null);
+            empty.put("currentVersion", null);
+            empty.put("window", null);
+            empty.put("slots", java.util.List.of());
+            empty.put("history", java.util.List.of());
+            empty.put("message", "내 PC 에이전트가 아직 스키마 상태를 보내지 않았다");
+            return Optional.of(json.writeValueAsString(empty));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** 온프레미스 앱의 pgroll 롤백 창을 바로 닫으라고 에이전트에 보낸다. 온프레미스 앱이 아니면 빈 값 */
+    public Optional<String> completeSchema(String app) {
+        String key = agentKeyOf(app);
+        if (key == null) {
+            return Optional.empty();
+        }
+        if (!hub.connected(key)) {
+            throw new IllegalStateException("온프레미스 에이전트가 연결돼 있지 않다");
+        }
+        try {
+            hub.send(key, json.writeValueAsString(Map.of("type", "schema-complete", "app", app)));
+            return Optional.of(json.writeValueAsString(Map.of("status", "ACCEPTED", "appName", app,
+                    "message", "내 PC 에이전트에 complete 를 보냈다. 상태는 몇 초 안에 바뀐다")));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** 마지막으로 성공한 배포가 온프레미스면 그 에이전트 키 */
+    private String agentKeyOf(String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()) && build.getStatus() == Build.Status.SUCCEEDED)
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(AgentDeployService::agentKey)
+                .orElse(null);
+    }
+
     public Optional<String> rollback(String app) {
         Optional<Build> latest = store.findAll().stream()
                 .filter(build -> app.equals(build.getAppName()) && build.getStatus() == Build.Status.SUCCEEDED)
@@ -182,7 +257,9 @@ public class AgentDeployService {
             String line = done.get(props.buildTimeoutSeconds(), TimeUnit.SECONDS);
             return Optional.of(json.writeValueAsString(Map.of(
                     "status", "ROLLED_BACK",
-                    "schema", "unchanged",
+                    // 에이전트가 pgroll 롤백 창 안이면 스키마도 되돌린다 (마지막 줄의 schema=reverted|partial)
+                    "schema", line != null && line.contains("schema=reverted") ? "reverted"
+                            : line != null && line.contains("schema=partial") ? "partial" : "unchanged",
                     "message", line == null ? "" : line)));
         } catch (TimeoutException e) {
             throw new IllegalStateException("온프레미스 롤백 응답이 제한 시간 안에 오지 않았다");
