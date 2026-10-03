@@ -79,6 +79,7 @@ lily:
 
   # AWS/GCP 배포 정책 API. 후보 데이터와 worker 주소가 설정된 클라우드만 선택한다.
   cloud:
+    state-table: ${CLOUD_STATE_TABLE:}
     api-token: ${CLOUD_API_TOKEN:}
     catalog-url: ${CLOUD_CATALOG_URL:}
     catalog-token: ${CLOUD_CATALOG_TOKEN:}

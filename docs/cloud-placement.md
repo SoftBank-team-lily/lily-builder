@@ -11,9 +11,10 @@
 5. 실행 직전에 관측값을 다시 확인하고 선택한 worker의 기존 `/api/builds`로 전달한다.
 6. 같은 provider의 worker에서 상태를 조회한다.
 
-같은 질문·같은 상태의 JEV 답은 lily-jev `CachedJev`로 정해 둔 시간(기본 900초) 동안 다시 쓴다.
-그래서 미리보기(`/repository`)와 실제 배포(`/builds`)가 같은 근거에서 같은 결론을 낸다.
-모델 입력에는 관측 시각을 넣지 않는다(신선도는 규칙이 확인한다). 같은 근거를 다시 수집해도 같은 답을 쓴다.
+JEV 캐시는 반복/동시 호출 비용을 줄이는 용도다. 승인된 선택은 DynamoDB의 `planId`에 별도로 저장한다.
+미리보기와 실행 사이에 서버가 재시작되거나 다른 replica가 요청을 받아도 저장된 정책·커밋·provider를 사용한다.
+실행 시 JEV를 다시 호출하지 않으며, 선택된 후보의 최신 관측값이 필수 조건을 만족하는지만 다시 검사한다.
+계획은 15분 유효하다. 만료되거나 배포 설정이 달라지면 새 미리보기를 요청한다.
 
 현재 GCP 환경은 없다. **GCP worker·실제 가격/관측 데이터 수집기·프론트 호출은 별도 연결이 필요하다.**
 이 브랜치는 GKE 리소스를 생성하지 않으며 기존 `/api/builds` 요청을 자동으로 이 경로로 바꾸지 않는다.
@@ -85,10 +86,12 @@ Groq의 코드 수정 기능도 이 API와 별개다. JEV는 저장소 특성과
 |---|---|---|
 | POST | `/api/cloud/plans` | policy만 받아 관측값으로 선택. 저장소 분석·배포 없음 |
 | POST | `/api/cloud/repository` | `{policy, build}`를 받아 저장소 분석과 선택 결과 반환. 배포 없음 |
-| POST | `/api/cloud/builds` | `{policy, build}`를 받아 분석·선택·재확인·빌드 시작 |
+| POST | `/api/cloud/builds` | `{planId, requestId, build}`로 저장된 계획 재확인·빌드 시작 |
+| GET | `/api/cloud/requests/{requestId}` | 영속 실행 기록 및 worker 종료 상태 확인 |
+| POST | `/api/cloud/requests/{requestId}/reconcile` | 운영자 전용. 유실된 접수 응답의 buildId 복구 |
 | GET | `/api/cloud/builds/{aws\|gcp}/{id}` | 선택한 실행기의 상태 조회 |
 
-`/repository`, `/builds` 요청 예시 (한도와 profile은 운영 환경에 맞춰 설정):
+`/repository` 미리보기 요청 예시 (한도와 profile은 운영 환경에 맞춰 설정):
 
 ```json
 {
@@ -113,16 +116,47 @@ Groq의 코드 수정 기능도 이 API와 별개다. JEV는 저장소 특성과
 `/plans`에는 위 `policy` 객체 자체를 전달한다. 비용·지연 시간 상한, profile, 허용 지역은 필수다.
 private 저장소는 `build.token`으로 전달한다. 모델에는 보내지 않고 저장소 읽기와 선택된 worker의 빌드에만 사용한다.
 
-배포 응답은 202 `{decision, repository, build, statusPath}`다. 저장소 분석 실패는 422,
-선택 보류는 409다.
+### 미리보기 → 실행 계약
 
-- worker가 4xx로 거절하면 502 `dispatch_rejected`, `retryable:true`다. 접수되지 않은 것이 확실하다.
-- 그 밖의 worker 문제(5xx·시간 초과)는 502 `dispatch_unconfirmed`, `retryable:false`다.
-  응답이 끊겨도 worker에 이미 접수되었을 수 있으므로 **자동 POST 재시도·다른 클라우드 재전송을 하지 않는다.**
-- 같은 앱 이름으로 10분 안에 보낸 배포가 있으면 worker를 부르지 않고 409 `build_already_started`와
-  먼저 보낸 배포의 `statusPath`를 돌려준다. 거절(`dispatch_rejected`)된 배포만 바로 다시 보낼 수 있다.
-- 이 중복 방지는 builder 프로세스 메모리에만 있다. 재시작이나 여러 replica 사이의 반복 POST는
-  frontend의 배포 기록이 막아야 한다. worker 이력 API는 전체 이력을 로그와 함께 돌려줘 배포마다 조회하지 않는다.
+선택 가능한 미리보기 응답은 `{planId, expiresAt, repository, decision}`이다. 보류/manifest 미지원에는 planId를 발급하지 않는다.
+`POST /api/cloud/plans`는 기존의 정책 계산 전용 API이며 실행 가능한 planId를 발급하지 않는다.
+실행 요청의 `build`는 미리보기와 같은 값이어야 한다. GitHub 토큰은 교체할 수 있으며 실행은 분석한 SHA에 고정된다.
+
+```json
+{
+  "planId": "미리보기에서 받은 UUID",
+  "requestId": "새 배포마다 한 번 생성한 UUID",
+  "build": {
+    "repoUrl": "https://github.com/SoftBank-team-lily/lily-blog-sample",
+    "branch": "main",
+    "appName": "sample",
+    "database": "postgres"
+  }
+}
+```
+
+- 기존 `{policy, build}`만 보내는 `/api/cloud/builds` 요청은 이제 400이다. 이 실험 API 호출자는 새 계약으로 변경해야 한다.
+- 환경변수/폴더/포트/브랜치/기타 빌드 설정 변경은 409 `plan_request_mismatch`, 만료는 `plan_expired`다.
+- GitHub 토큰·환경변수 원문은 계획/요청 테이블에 저장하지 않는다. build 설정의 HMAC만 저장한다.
+  HMAC 키는 CLOUD_API_TOKEN이므로 토큰 교체 후에는 새 미리보기를 받아야 한다.
+- 신규 실행은 202 `{requestId, planId, decision, repository, build, statusPath, ...}`를 반환한다.
+- 같은 requestId/planId 재전송은 기존 buildId를 반환(200)하며 worker POST를 반복하지 않는다.
+  같은 requestId에 다른 planId를 쓰면 `request_id_conflict`다. 같은 ID 재전송의 build 본문으로 기존 실행을 수정하지 않는다.
+- 같은 앱의 이전 실행이 진행 중이면 새 requestId도 409 `build_in_progress`다.
+- 이전 worker 상태가 SUCCEEDED/FAILED/ROLLED_BACK이면 새 requestId의 배포를 즉시 허용한다. 10분 대기가 없다.
+- 최초 접수 이후 provider 변경은 `provider_change_requires_migration`으로 막는다. 새로운 미리보기에서 기존 provider를 명시한다.
+- worker가 명확히 거절한 요청은 REJECTED로 남긴다. 수정 후 새로운 requestId로 다시 요청한다.
+- 시간 초과·응답 유실·접수 후 DB 저장 실패는 DISPATCHING 상태를 보존한다. 자동 만료·다른 provider 재시도는 없다.
+- 테이블/권한/연결 장애는 503 `cloud_state_unavailable`이다. 영속 기록 없이 worker를 시작하는 우회 경로는 없다.
+
+### 접수 응답 유실 복구
+
+운영자가 worker 이력에서 실제 요청의 buildId를 확인한 후
+`POST /api/cloud/requests/{requestId}/reconcile`에 `{ "buildId": "확인한 빌드 ID" }`를 보낸다.
+worker의 appName·commit·createdAt(요청 기록 시각 이후)을 대조한 뒤 연결한다. 이후 `/requests/{requestId}`로 상태를 갱신한다.
+동일한 앱/커밋으로 과거에 만든 빌드가 아닌 해당 실행의 ID인지 운영자가 확인해야 한다. 두 서버의 시각 동기화가 필요하다.
+worker 접수 자체가 없었다면 API가 자동으로 다시 보내지 않는다. 진행 중 작업이 없는지 확인한 후 운영자가 상태를 정리해야 한다.
+원격 POST와 DynamoDB는 하나의 트랜잭션이 아니므로 이 불확실한 상태를 완전히 없애려면 worker 자체의 요청 ID 처리가 추가로 필요하다.
 
 상태 응답은 id/appName/status/url/stage/stageName/createdAt/updatedAt/commit만 반환한다.
 전체 로그·AI 수정 진행 이벤트·앱 삭제/롤백/DB 이전은 이 프록시에 아직 연결하지 않았다.
@@ -195,6 +229,7 @@ catalog의 해당 기능은 네트워크·권한·서비스 연결이 확인된 
 
 | 변수 | 설정 위치/용도 |
 |---|---|
+| `CLOUD_STATE_TABLE` | 계획/요청/앱 상태용 별도 DynamoDB 테이블. 미설정이면 계획 저장·실행 503 |
 | `CLOUD_API_TOKEN` | 선택 API 인증용 서버 비밀값, 최소 32자. 프론트의 서버 코드에서만 사용 |
 | `JEV_API_KEY` | 저장소 연관성·최종 후보 선택. 없으면 규칙 기반 연관성·선택 |
 | `CLOUD_JEV_MODEL` | JEV 모델 이름. 비우면 lily-jev 기본값 `jev-latest`(버전 미고정) |
@@ -211,6 +246,16 @@ catalog의 해당 기능은 네트워크·권한·서비스 연결이 확인된 
 worker URL은 브라우저 입력으로 받지 않는다. worker는 자체 `/api/builds`를 처리하는 builder이며,
 선택 API를 다시 호출하는 URL을 넣으면 안 된다. 운영 네트워크 접근 제어와 HTTPS/서비스 인증을 적용한다.
 선택 API 토큰은 기존 worker의 `/api/builds`를 보호하지 않으므로 worker 앞단 접근 제어는 따로 필요하다.
+
+## 상태 테이블 준비
+
+- 테이블 파티션 키는 `pk`(String), 정렬 키는 없다. `PLAN#uuid`, `REQUEST#uuid`, `APP#appName` 항목을 사용한다.
+- 기존 `lily-builds` 테이블과 분리한다. 기존 이력 조회가 전체 테이블을 scan하기 때문이다.
+- region/로컬 endpoint는 기존 `lily.builder.dynamodb` 설정을 공유한다. 운영에서는 IAM 역할 인증을 사용한다.
+- 테이블을 자동 생성하지 않는다. 인프라에서 테이블과 해당 테이블의 GetItem/PutItem/TransactWriteItems 권한을 준비한다.
+- `expiresAt` TTL은 계획에만 적용할 수 있다. API에서도 만료를 검사하므로 TTL 삭제 지연과 무관하다.
+- 요청/앱 항목은 자동 삭제하지 않는다. 중복 방지와 provider 유지 근거이므로 임의 TTL을 걸지 않는다.
+- 같은 앱 이름은 플랫폼 전체에서 유일해야 한다. frontend 서버가 프로젝트 소유권과 planId 연결을 검증해야 한다.
 
 ## Catalog 계약
 
@@ -255,10 +300,11 @@ provider당 실행기는 한 지역을 지원한다. GPU/BigQuery 연결 가능 
 5. 실제 관측/가격 수집기를 연결하고 확인된 기능만 catalog에 게시한다. `available`은 실행기 상태를 반영해야 한다.
 6. frontend 서버가 사용자 로그인·프로젝트 소유권을 확인한 뒤 이 내부 API를 호출한다.
 7. 사용자에게 repository 신호·분석 한계·decision 후보/제외 이유를 보여 준다.
-8. 최초 배포 결과의 provider/region/build ID/commit/decision/evidenceId를 프로젝트 DB에 저장하고,
+8. 미리보기의 planId/만료 시각과 실행용 requestId를 프로젝트 소유권에 연결해 저장한다. 재전송 시 같은 requestId를 사용한다.
+   최초 배포 결과의 provider/region/build ID/commit/decision/evidenceId를 프로젝트 DB에 저장하고,
    상태 조회도 선택된 provider로 보낸다. 기존 앱의 재배포는 저장된 provider에 고정한다.
 
-현재 controller는 사용자별 소유권이나 기존 앱 존재 여부를 저장/검증하지 않는다. 따라서 frontend 연결 시
+controller는 이 API로 기록된 앱 상태를 확인하지만 사용자별 소유권과 기존 경로로 배포된 앱은 알지 못한다. frontend 연결 시
 소유권 검사와 최초 배포 여부 검사가 필요하다. ONPREM_ONLY·standby·DB import 요청은 이 API에서 거절한다.
 기존 앱/DB의 AWS↔GCP 이동은 데이터 복제·전환·롤백 절차를 갖춘 별도 작업으로 구현해야 한다.
 

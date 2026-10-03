@@ -22,6 +22,17 @@ class CloudApiTest {
             java.util.Map.of("web",List.of("next")),"portable","rules",null,List.of()));
         return repository;
     }
+    static CloudController controller(CloudService service, CloudWorkers workers, CloudRepository repository) {
+        var state=new MemoryCloudState();
+        var plans=new CloudPlans(state,props("","http://worker"),JSON,Clock.fixed(CloudPolicyTest.NOW,ZoneOffset.UTC));
+        return new CloudController(service,workers,repository,new CloudDispatches(state,workers,service,plans),plans);
+    }
+    static void approve(org.springframework.test.web.servlet.MockMvc mvc, com.fasterxml.jackson.databind.node.ObjectNode body) throws Exception {
+        var response=mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString()))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        body.put("planId",JSON.readTree(response).path("planId").asText());
+        body.put("requestId",java.util.UUID.randomUUID().toString());
+    }
     static CloudProperties props(String catalog, String worker) {
         return new CloudProperties(TOKEN,catalog,"",300,"","",0.8,900,new CloudProperties.Worker(worker,"","ap-northeast-2"),
             new CloudProperties.Worker(worker,"","asia-northeast3"));
@@ -55,7 +66,7 @@ class CloudApiTest {
     @Test void authenticatesAndValidatesBeforeCallingModel() throws Exception {
         var service = mock(CloudService.class);
         var workers = mock(CloudWorkers.class);
-        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository(),new CloudDispatches()))
+        var mvc = MockMvcBuilders.standaloneSetup(controller(service,workers,repository()))
             .addFilters(new CloudTokenFilter(props("", ""))).build();
         mvc.perform(post("/api/cloud/plans").servletPath("/api/cloud/plans").contentType("application/json").content("{}"))
             .andExpect(status().isUnauthorized());
@@ -82,16 +93,16 @@ class CloudApiTest {
         var workers = mock(CloudWorkers.class);
         var repository = mock(CloudRepository.class);
         when(repository.inspect(any())).thenThrow(new CloudRepository.Unavailable());
-        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository,new CloudDispatches())).build();
+        var mvc = MockMvcBuilders.standaloneSetup(controller(service,workers,repository)).build();
         var body = JSON.createObjectNode();
         body.set("policy",JSON.valueToTree(CloudPolicyTest.request("balanced")));
         body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
-        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
+        mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString()))
             .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("repository_analysis_unavailable"));
         // 배포할 폴더를 정하지 못하면 화면이 폴더를 고르게 할 수 있도록 이유를 따로 준다
         reset(repository);
         when(repository.inspect(any())).thenThrow(new CloudRepository.Unavailable("build_folder_unresolved"));
-        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
+        mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString()))
             .andExpect(status().isUnprocessableEntity()).andExpect(jsonPath("$.error").value("build_folder_unresolved"));
         verifyNoInteractions(service,workers);
     }
@@ -99,17 +110,17 @@ class CloudApiTest {
         var service = mock(CloudService.class);
         var workers = mock(CloudWorkers.class);
         when(service.plan(any(),anyMap())).thenReturn(CloudPolicy.held("no_eligible_cloud",List.of(),List.of(),CloudPolicyTest.NOW));
-        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository(),new CloudDispatches())).build();
+        var mvc = MockMvcBuilders.standaloneSetup(controller(service,workers,repository())).build();
         var body = JSON.createObjectNode();
         var policy = JSON.valueToTree(CloudPolicyTest.request("balanced"));
         ((com.fasterxml.jackson.databind.node.ObjectNode)policy).set("context",JSON.readTree("{\"dataProvider\":\"gcp\",\"keepDataLocal\":true}"));
         body.set("policy",policy);
         body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
-        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isConflict());
+        mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString())).andExpect(status().isOk());
         verify(service).plan(argThat(r -> r.context() != null && "gcp".equals(r.context().dataProvider())
             && Boolean.TRUE.equals(r.context().keepDataLocal())),anyMap());
         ((com.fasterxml.jackson.databind.node.ObjectNode)policy.path("context")).put("dataProvider","unrecognized");
-        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isBadRequest());
+        mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString())).andExpect(status().isBadRequest());
         verifyNoInteractions(workers);
     }
     @Test void readsCatalogAndRoutesSelectedGcpBuildThenPollsSameProvider() throws Exception {
@@ -122,10 +133,11 @@ class CloudApiTest {
             worker.enqueue(new MockResponse().setBody("{\"id\":\"abc123\",\"status\":\"SUCCEEDED\"}"));
             var p = props(catalog.url("/snapshot").toString(),worker.url("/").toString());
             var service = new CloudService(new CloudCatalog(p,JSON),p,new CloudPolicy(Jev.disabled()),Clock.fixed(CloudPolicyTest.NOW,ZoneOffset.UTC));
-            var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,new CloudWorkers(p,JSON),repository(),new CloudDispatches())).build();
+            var mvc = MockMvcBuilders.standaloneSetup(controller(service,new CloudWorkers(p,JSON),repository())).build();
             var body = JSON.createObjectNode();
             body.set("policy",JSON.valueToTree(CloudPolicyTest.request("cost")));
             body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\",\"database\":\"postgres\"}"));
+            approve(mvc,body);
             mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
                 .andExpect(status().isAccepted()).andExpect(jsonPath("$.decision.provider").value("gcp"))
                 .andExpect(jsonPath("$.statusPath").value("/api/cloud/builds/gcp/abc123"))
@@ -152,17 +164,19 @@ class CloudApiTest {
             var snapshot = JSON.writeValueAsString(java.util.Map.of("candidates",CloudPolicyTest.candidates()));
             for (int i = 0; i < 4; i++) catalog.enqueue(new MockResponse().setBody(snapshot));
             worker.enqueue(new MockResponse().setResponseCode(202).setBody("{\"id\":\"abc123\",\"status\":\"QUEUED\"}"));
+            worker.enqueue(new MockResponse().setBody("{\"id\":\"abc123\",\"status\":\"QUEUED\"}"));
             var p = props(catalog.url("/snapshot").toString(),worker.url("/").toString());
             var service = new CloudService(new CloudCatalog(p,JSON),p,new CloudPolicy(Jev.disabled()),Clock.fixed(CloudPolicyTest.NOW,ZoneOffset.UTC));
-            var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,new CloudWorkers(p,JSON),repository(),new CloudDispatches())).build();
+            var mvc = MockMvcBuilders.standaloneSetup(controller(service,new CloudWorkers(p,JSON),repository())).build();
             var body = JSON.createObjectNode();
             body.set("policy",JSON.valueToTree(CloudPolicyTest.request("cost")));
             body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\",\"database\":\"postgres\"}"));
+            approve(mvc,body);
             mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isAccepted());
             mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString()))
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("build_already_started"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.buildId").value("abc123"))
                 .andExpect(jsonPath("$.statusPath").value("/api/cloud/builds/gcp/abc123"));
-            assertThat(worker.getRequestCount()).isEqualTo(1);
+            assertThat(worker.getRequestCount()).isEqualTo(2);
         }
     }
     @Test void onlyARejectedDispatchCanBeSentAgain() throws Exception {
@@ -172,29 +186,16 @@ class CloudApiTest {
             var request = JSON.readValue("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}",com.lily.builder.BuildRequest.class);
             assertThatThrownBy(() -> workers.start("gcp",request)).hasMessage("dispatch_rejected");
         }
-        var clock = new java.util.concurrent.atomic.AtomicReference<>(CloudPolicyTest.NOW);
-        var dispatches = new CloudDispatches(new Clock() {
-            @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
-            @Override public Clock withZone(java.time.ZoneId zone) { return this; }
-            @Override public java.time.Instant instant() { return clock.get(); }
-        });
-        assertThat(dispatches.claim("sample","aws")).isEmpty();
-        assertThat(dispatches.claim("sample","aws")).isPresent();
-        dispatches.release("sample");
-        assertThat(dispatches.claim("sample","aws")).isEmpty();
-        // 접수 여부를 모르는 배포도 시간이 지나면 다시 보낼 수 있다
-        clock.set(CloudPolicyTest.NOW.plus(CloudDispatches.WINDOW));
-        assertThat(dispatches.claim("sample","aws")).isEmpty();
     }
     @Test void heldPlanNeverStartsAWorker() throws Exception {
         var service = mock(CloudService.class);
         var workers = mock(CloudWorkers.class);
         when(service.plan(any(),anyMap())).thenReturn(CloudPolicy.held("no_eligible_cloud",List.of(),List.of(),CloudPolicyTest.NOW));
-        var mvc = MockMvcBuilders.standaloneSetup(new CloudController(service,workers,repository(),new CloudDispatches())).build();
+        var mvc = MockMvcBuilders.standaloneSetup(controller(service,workers,repository())).build();
         var body = JSON.createObjectNode();
         body.set("policy",JSON.valueToTree(CloudPolicyTest.request("cost")));
         body.set("build",JSON.readTree("{\"repoUrl\":\"https://github.com/owner/sample\",\"appName\":\"sample\"}"));
-        mvc.perform(post("/api/cloud/builds").contentType("application/json").content(body.toString())).andExpect(status().isConflict());
+        mvc.perform(post("/api/cloud/repository").contentType("application/json").content(body.toString())).andExpect(status().isOk());
         verifyNoInteractions(workers);
     }
     @Test void redirectsNeverForwardWorkerTokens() throws Exception {
