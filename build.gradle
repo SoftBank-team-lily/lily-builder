@@ -41,4 +41,11 @@ dependencies {
 
 tasks.named('test') { useJUnitPlatform() }
 
+// 엣지 Worker(src/main/resources/edge/worker.js) 테스트. Node 22 이상이 필요해서 test 에는 묶지 않는다
+tasks.register('edgeTest', Exec) {
+    group = 'verification'
+    description = 'lily-edge Worker 스크립트 테스트 (node --test)'
+    commandLine 'node', '--test', 'src/test/js/*.test.mjs'
+}
+
 tasks.named('bootJar') { archiveFileName = 'app.jar' }

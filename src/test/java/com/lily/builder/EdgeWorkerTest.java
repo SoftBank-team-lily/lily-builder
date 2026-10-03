@@ -81,6 +81,31 @@ class EdgeWorkerTest {
     }
 
     @Test
+    void 온프레미스_배포_앱에는_공개_주소_라우트만_걸고_클라우드_주소_레코드는_만들지_않는다() {
+        String line = edge.attachRoute("blog");
+
+        assertThat(calls).anyMatch(call -> call.startsWith("POST " + Z + "/workers/routes ")
+                && call.contains("\"pattern\":\"blog.lilycloud.kr/*\"")
+                && call.contains("\"script\":\"lily-edge\""));
+        assertThat(calls).noneMatch(call -> call.contains("/dns_records"));
+        assertThat(line).isEqualTo("edge: blog.lilycloud.kr/* -> lily-edge");
+    }
+
+    @Test
+    void 온프레미스_배포_앱에_라우트가_이미_있으면_다시_만들지_않는다() {
+        routes = json("[{\"id\":\"w1\",\"pattern\":\"blog.lilycloud.kr/*\",\"script\":\"lily-edge\"}]");
+
+        edge.attachRoute("blog");
+
+        assertThat(calls).noneMatch(call -> call.startsWith("POST"));
+    }
+
+    @Test
+    void 공개_주소는_앱_이름과_존으로_만든다() {
+        assertThat(edge.publicUrl("Blog")).isEqualTo("https://blog.lilycloud.kr/");
+    }
+
+    @Test
     void 기동할_때_스크립트를_올린다() {
         edge.publish();
 
