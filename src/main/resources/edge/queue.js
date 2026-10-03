@@ -5,8 +5,8 @@
 //   - 등록 경로의 POST 는 평소에도 DO 를 거친다. DO 가 요청을 하나씩 처리하므로 재전송 중에 들어온 POST 도 큐 뒤에 붙는다
 //   - 큐가 비어 있고 장애 상태가 아니면 DO 가 바로 PC 로 보내고 PC 응답을 그대로 돌려준다
 //   - PC 가 받지 못했으면(530·연결 실패, 또는 이 데이터센터가 PC 를 장애로 표시) 큐에 넣고 202 와 X-Lily-Queued-Id 를 돌려준다
-//   - PC 에 보낸 뒤 엣지 오류(502 등)가 나면 바로 GET / 로 다시 확인한다. 530(터널에 연결 없음)이면 PC 가 받지 못했으니 쌓고,
-//     확인도 모호하면 PC 가 받았을 수 있어 쌓지 않고 오류를 그대로 돌려준다
+//   - PC 에 보낸 뒤 엣지 오류(502 등)가 나면 바로 GET / 로 다시 확인한다. 확인도 엣지 오류면 PC 에 닿지 않으니 쌓고,
+//     PC 가 응답하면 이번 요청만의 오류라 그대로 돌려준다 (PC 가 처리한 순간 죽은 경우의 중복은 Idempotency-Key 로 거른다)
 //   - 장애를 한 번 보면 DO 가 장애 상태를 기억한다. PC 확인이 성공할 때까지 새 POST 는 PC 에 보내지 않고 쌓는다
 //     (Worker 의 장애 표시는 DOWN_MILLIS 뒤 풀리지만 DO 의 장애 상태는 확인이 성공해야 풀린다)
 //   - 재전송: alarm 이 PC 에 닿는지 확인하고 순번대로 보낸다. 2xx·4xx 는 끝, 5xx·엣지 오류·시간 초과는 멈추고 다시 예약한다
@@ -201,19 +201,15 @@ export class WriteQueue {
       return this.enqueue(target, headers, body, true);
     }
     if (await edgeFailed(response)) {
-      // 엣지의 502 등은 PC 가 받은 뒤 끊겼을 수도 있다. 바로 다시 확인해서 터널에 연결이 없으면(530) PC 가 받지 못한 것이다
+      // 엣지의 502 등. 바로 GET / 로 다시 확인해서 PC 가 응답하면 이번 요청만의 오류라 그대로 돌려준다.
+      // 확인도 엣지 오류면 지금 PC 에 닿지 않는다: 쌓는다. 터널이 끊긴 직후 1분쯤은 Cloudflare 가 530 대신 502 를 준다 (E2E).
+      // PC 가 이 요청을 처리한 바로 그때 죽었다면 재전송이 중복이 될 수 있다. 재전송의 Idempotency-Key 로 앱이 거른다
       const check = await this.probe(origin);
       if (!check.edge) {
         return response;
       }
       await this.markDown(origin);
-      if (check.status === 530) {
-        return this.enqueue(target, headers, body, true);
-      }
-      // 확인도 모호하다. 두 번 처리되지 않게 오류를 그대로 돌려준다 (다음 POST 부터는 쌓는다)
-      const out = new Headers(response.headers);
-      out.set(DOWN_HEADER, "1");
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
+      return this.enqueue(target, headers, body, true);
     }
     return response;
   }
