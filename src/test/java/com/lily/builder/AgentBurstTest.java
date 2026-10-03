@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -37,6 +38,20 @@ class AgentBurstTest {
                 JSON.readTree("{\"engine\":\"postgres\",\"host\":\"172.17.0.1\",\"port\":15432}"));
 
         assertThat(result.path("env").path("DATABASE_URL").asText()).contains("172.17.0.1:15432");
+    }
+
+    @Test
+    void pgroll_요청이면_RDS_접속_정보를_주고_provisioner로_pgroll을_켠다() throws Exception {
+        when(deploys.ownedBy(KEY, "blog")).thenReturn(true);
+        when(provisioner.ensure("blog", "postgres", "172.17.0.1", 15432)).thenReturn(
+                new ProvisionerClient.Connection("db-1", Map.of("DATABASE_URL", "postgresql://blog:p@172.17.0.1:15432/blog")));
+
+        burst.call(KEY, "POST", "/api/burst/apps/blog/database",
+                JSON.readTree("{\"engine\":\"postgres\",\"host\":\"172.17.0.1\",\"port\":15432,\"pgroll\":true}"));
+        burst.call(KEY, "POST", "/api/burst/apps/blog/database",
+                JSON.readTree("{\"engine\":\"postgres\",\"host\":\"172.17.0.1\",\"port\":15432}"));
+
+        verify(provisioner, times(1)).enablePgroll("blog");
     }
 
     @Test

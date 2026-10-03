@@ -197,6 +197,60 @@ class AgentDeployServiceTest {
     }
 
     @Test
+    void 에이전트가_pgroll_롤백_창_안에서_스키마까지_되돌리면_schema_reverted로_알린다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        doAnswer(invocation -> {
+            JsonNode body = new ObjectMapper().readTree(invocation.getArgument(1, String.class));
+            if ("rollback".equals(body.path("type").asText())) {
+                service.agentStatus(KEY, body.path("id").asText(), "SUCCEEDED", "rollback: slot=blue schema=reverted", "");
+            }
+            return null;
+        }).when(hub).send(eq(KEY), anyString());
+
+        String response = service.rollback("blog-1b62c0").orElseThrow();
+
+        assertThat(new ObjectMapper().readTree(response).path("schema").asText()).isEqualTo("reverted");
+    }
+
+    @Test
+    void PostgreSQL_앱의_pgroll_파일은_pgroll을_받는_에이전트에만_보낸다() throws Exception {
+        when(github.migrations(any(), eq(COMMIT))).thenReturn(Map.of("01_create_posts.yaml", "operations: []"));
+        when(hub.supports(KEY, "pgroll")).thenReturn(false);
+
+        Build rejected = service.start(KEY, request("blog-1b62c0"));
+
+        assertThat(rejected.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(rejected.getLogs()).anyMatch(line -> line.contains("pgroll 마이그레이션을 받지 못하는 판"));
+        verify(hub, never()).send(anyString(), anyString());
+
+        when(hub.supports(KEY, "pgroll")).thenReturn(true);
+        service.start(KEY, request("blog-2c73d1"));
+
+        ArgumentCaptor<String> sent = ArgumentCaptor.forClass(String.class);
+        verify(hub).send(eq(KEY), sent.capture());
+        JsonNode job = new ObjectMapper().readTree(sent.getValue());
+        assertThat(job.path("migrations").has("01_create_posts.yaml")).isTrue();
+    }
+
+    @Test
+    void 온프레미스_앱의_스키마_이력은_에이전트가_보낸_상태를_그대로_돌려주고_complete는_에이전트에_보낸다() throws Exception {
+        Build build = service.start(KEY, request("blog-1b62c0"));
+        service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");
+        when(hub.lastState(KEY)).thenReturn(new ObjectMapper().readTree("""
+                {"type":"burst-state","app":"blog-1b62c0","schema":{"appName":"blog-1b62c0","engine":"pgroll",
+                 "currentVersion":"02_add_slug","window":{"migration":"02_add_slug"},"history":[]}}"""));
+
+        JsonNode schema = new ObjectMapper().readTree(service.schema("blog-1b62c0").orElseThrow());
+        service.completeSchema("blog-1b62c0").orElseThrow();
+
+        assertThat(schema.path("engine").asText()).isEqualTo("pgroll");
+        assertThat(schema.path("window").path("migration").asText()).isEqualTo("02_add_slug");
+        verify(hub).send(KEY, "{\"type\":\"schema-complete\",\"app\":\"blog-1b62c0\"}");
+        assertThat(service.schema("cloud-only-app")).isEmpty();
+    }
+
+    @Test
     void 온프레미스_앱을_지우면_그_에이전트에_database_옵션과_함께_remove를_보내고_removed를_돌려준다() throws Exception {
         Build build = service.start(KEY, request("blog-1b62c0"));
         service.agentStatus(KEY, build.getId(), "SUCCEEDED", "done", "https://blog.example");

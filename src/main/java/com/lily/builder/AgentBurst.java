@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  * GET  /api/burst/builds/{id}          대기 배포 진행
  * GET  /api/burst/apps/{app}           레플리카·Ready 수
  * PUT  /api/burst/apps/{app}/replicas  {"replicas":0~5}
- * POST /api/burst/apps/{app}/database  {"engine","host","port"} → 같은 RDS DB 를 에이전트 터널 주소 기준 접속 정보로 (거점 전환 DB 이전)
+ * POST /api/burst/apps/{app}/database  {"engine","host","port","pgroll"?} → 같은 RDS DB 를 에이전트 터널 주소 기준 접속 정보로 (거점 전환 DB 이전). pgroll 이면 RDS 에 pgroll 도 켠다
  * </pre>
  */
 @Component
@@ -80,7 +80,13 @@ public class AgentBurst {
                 require(engine.equals("postgres") || engine.equals("mysql"), "engine 은 postgres 또는 mysql");
                 require(HOST.matcher(host).matches(), "host 형식이 아니다");
                 require(port >= 1 && port <= 65535, "port 는 1~65535");
-                return json.valueToTree(provisioner.ensure(name, engine, host, port));
+                ProvisionerClient.Connection connection = provisioner.ensure(name, engine, host, port);
+                if (body.path("pgroll").asBoolean(false)) {
+                    // pgroll init 은 이벤트 트리거라 RDS 관리자 권한이 필요하다. 에이전트 대신 provisioner 로 켠다
+                    require("postgres".equals(engine), "pgroll 은 postgres 만");
+                    provisioner.enablePgroll(name);
+                }
+                return json.valueToTree(connection);
             }
             if ("/standby".equals(action) && "POST".equals(method)) {
                 BuildRequest request = request(body);
