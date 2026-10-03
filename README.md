@@ -55,6 +55,7 @@ GCP 리소스 생성과 프론트 연결은 별도 작업이다. [API·환경변
 | POST | `/api/apps/{app}/schema/complete` | 롤백 창을 닫고 바로 complete. 온프레미스 앱은 에이전트에 `schema-complete` 를 보내고 202 |
 | POST | `/api/apps/{app}/stop`, `/start` | 중지(모든 슬롯 0)·다시 시작. lily-cicd 로 넘긴다. 배포 중이면 `409` |
 | DELETE | `/api/apps/{app}?database=` | 앱 삭제. `database=true` 면 DB 도 DROP. 앱 주소 CNAME(ALB)과 엣지 라우트도 지운다 |
+| GET, PUT | `/api/apps/{app}/write-queue` | 엣지 쓰기 큐. GET 은 등록 경로·상태별 건수·최근 요청·`routed`·`lastCheck`·`downSince`, PUT `{"paths":["/api/posts"]}` 는 등록 경로를 바꾼다 (빈 목록이면 끈다). 큐가 꺼져 있으면 `404` |
 | GET, PUT | `/api/apps/{app}/address` | 공개 주소 `{app}.{존}` 의 거점 (`CLOUD` ALB / `ONPREM` 터널 / `NONE` / `OTHER`). PUT `{"home":"cloud"}` 는 ALB 로 되돌린다 |
 
 ```json
@@ -163,6 +164,7 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 |---|---|---|
 | 엣지 Worker 재시도 | `EdgeWorker`, `src/main/resources/edge/worker.js`. 대기 배포가 끝난 앱에 `{app}-cloud.{존}`(ALB 프록시 CNAME)을 둔다 | 요청 단위로 바로 넘긴다. 전환 순간 가장 느린 응답 약 1.6~1.8초 |
 | 엣지 읽기 사본 | 같은 Worker. 온프레미스 배포가 끝난 모든 앱에 라우트 `{app}.{존}/*` 를 걸고(`EdgeWorker.attachRoute`) 주요 페이지를 열어 둔다(`EdgePrewarm`) | 클라우드도 못 받는 GET/HEAD 를 그 데이터센터의 마지막 공개 응답으로 200 |
+| 엣지 쓰기 큐 | 같은 Worker + Durable Object (`edge/queue.js`, `EdgeQueue`). 앱이 등록한 경로의 POST 를 앱마다 하나인 DO 에 쌓는다 | PC 가 못 받는 POST 를 202 로 받아 두고, PC 가 돌아오면 받은 순서대로 다시 보낸다 |
 | CNAME 전환 (예비) | `AgentFailover`. 에이전트가 `FAILOVER_GRACE_SECONDS` 동안 끊겨 있으면 클라우드 레플리카를 올리고 CNAME 을 ALB 로 | 유예 60초 + DNS 반영 |
 
 - 재시도: 530·연결 실패는 모든 메서드, 엣지 오류 페이지·1.5초 무응답은 GET/HEAD/OPTIONS 만 (PC 가 받았을 수 있는 POST 를 두 번 처리하지 않는다)
@@ -174,7 +176,12 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 - 읽기 사본: PC 가 공개 GET 에 200 을 주면 Worker 가 그 응답을 Cache API 에 7일 둔다. PC 가 받지 못한 GET/HEAD 를 클라우드도 처리하지 못하면(대기 Pod 없음, DB 가 PC 에 있어 5xx) 사본으로 200(`X-Lily-Edge: snapshot`, `X-Lily-Snapshot-At`), 사본이 없으면 503 `Retry-After: 30`. 사본이 있으면 클라우드를 3초까지만 기다린다 (DB 가 PC 에 있는 대기 Pod 는 PC 가 꺼지면 무응답)
   - 쿠키·인증 없는 요청, Set-Cookie·`private`·`no-store` 없는 응답, `Vary` 는 `Accept-Encoding` 만, 허용한 query(`page`·`sort` 등)만 둔다. 쓰기는 사본으로 답하지 않는다
   - 사본은 데이터센터마다 따로이고 밀려날 수 있다. prewarm 은 builder 가 있는 서울 리전에서 연다
-- Worker 테스트: `./gradlew edgeTest` (Node 22 이상, `node --test src/test/js/*.test.mjs`)
+- 쓰기 큐: 등록 경로의 POST 는 평소에도 앱 DO 를 거친다 (큐가 비어 있으면 PC 로 바로). PC 가 못 받으면(530·연결 실패, 엣지 오류 뒤 `GET /` 재확인도 엣지 오류) 헤더·본문을 `QUEUE_KEY` 로 AES-GCM 암호화해 DO SQLite 에 쌓고 202 `X-Lily-Queued-Id`. 결과는 `GET /__lily_edge/queued/{id}`. 자세한 설계는 `docs/엣지-쓰기-큐.md`
+  - 장애를 한 번 보면 DO 가 장애 상태를 기억해 PC 확인(`GET /`)이 성공할 때까지 새 POST 를 바로 쌓는다. alarm 이 10~60초 간격으로 확인하고, 성공하면 받은 순서대로 다시 보낸다 (`Idempotency-Key`, `X-Lily-Replay`, `X-Lily-Received-At`)
+  - 2xx·3xx 는 sent, 4xx 는 failed, 5xx·시간 초과는 다음 alarm 에 다시. 앱당 1,000건, 본문 1 MiB
+  - 등록 경로는 앱 DO 에 둔다. builder 는 관리 주소 `lily-edge-queue.{존}`(AAAA `100::` 프록시 + Worker 라우트)으로 바꾼다. 앱을 지우면 큐도 지운다
+  - DO 를 쓰려면 Cloudflare 계정에 workers.dev 서브도메인이 있어야 한다. 큐 바인딩 업로드가 거절되면 바인딩 없이 올라가 재시도·읽기 사본은 그대로 동작한다
+- Worker 테스트: `./gradlew edgeTest` (Node 22 이상, 쓰기 큐 테스트는 `node:sqlite` 때문에 Node 24 이상. `node --test src/test/js/*.test.mjs`)
 
 ## 설정
 
@@ -187,6 +194,7 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 | `BUILD_TIMEOUT_SECONDS` | `900` | 빌드 최대 대기 |
 | `PLATFORM_EDGE_ENABLED` | `false` | PC 장애 때 엣지 Worker 가 요청을 클라우드로 다시 보낸다. 플랫폼 Cloudflare 토큰에 Workers Scripts:Edit(계정), Workers Routes:Edit(존) 권한이 있어야 한다 |
 | `PLATFORM_EDGE_SCRIPT_NAME` | `lily-edge` | Cloudflare 의 Worker 이름. builder 가 기동할 때 올린다 |
+| `PLATFORM_EDGE_QUEUE_KEY` | (없음) | 엣지 쓰기 큐 키 (base64 32바이트, Secret `lily-edge-queue`). 쌓아 둔 헤더·본문 암호화와 관리 주소 토큰에 쓴다. 비우면 큐를 끈다. 바꾸면 쌓여 있던 요청을 풀지 못한다 |
 | `FAILOVER_GRACE_SECONDS` | `60` | 에이전트가 이만큼 끊겨 있으면 CNAME 을 ALB 로 바꾼다. 0 이면 끈다 |
 | `FAILOVER_REPLICAS` | `2` | 그때 올릴 클라우드 레플리카 |
 | `BURST_API_TOKEN` | (없음) | `/api/burst` 토큰 (Secret `lily-burst`). 비우면 버스팅 API 를 끈다 |
