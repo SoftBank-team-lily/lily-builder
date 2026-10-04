@@ -10,3 +10,6 @@ bin/
 
 # 로컬 API 키
 .env.local
+.env
+.env.*
+!.env.example

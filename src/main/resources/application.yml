@@ -116,3 +116,7 @@ lily:
       url: ${CLOUD_GCP_URL:}
       token: ${CLOUD_GCP_TOKEN:}
       region: ${CLOUD_GCP_REGION:}
+  # 관측 근거 분석용 내부 API. 토큰이 비어 있으면 /api/diagnoses 는 503.
+  diagnosis:
+    api-token: ${DIAGNOSIS_API_TOKEN:}
+    jev-api-key: ${JEV_API_KEY:}
