@@ -329,4 +329,17 @@ class AppMigrationTest {
         verify(aws, never()).remove(anyString(), anyBoolean());
         assertThat(migration.status(APP)).isEmpty();
     }
+
+    @Test
+    void 옮긴_적_있는_앱마다_가장_최근_기록을_한_번에_돌려준다() {
+        assertThat(migration.latestAll()).isEmpty();
+
+        migration.start(APP, request().withCloudProvider("GCP"));
+
+        assertThat(migration.latestAll()).singleElement().satisfies(view -> {
+            assertThat(view.appName()).isEqualTo(APP);
+            assertThat(view.state()).isEqualTo("HOLD");
+            assertThat(view.to()).isEqualTo("GCP");
+        });
+    }
 }
