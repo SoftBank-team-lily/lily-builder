@@ -57,12 +57,13 @@ public class AppMigration {
     static final String FINALIZED = "migrate: finalized";
     static final String ROLLED_BACK = "migrate: rolled back";
     static final String TARGET_DB = "migrate: target db ";
+    static final String SOURCE_DB = "migrate: source db ";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<Build.Status> RUNNING = Set.of(Build.Status.QUEUED, Build.Status.BUILDING,
             Build.Status.DEPLOYING);
 
     /** STANDBY: 내 PC 앱의 옛 대기 배포 정리. ROLLBACK: HOLD 되돌리기. 둘은 {@link #undo} 대상이 아니다 */
-    public enum Step { PREPARE, DATABASE, FREEZE, COPY, DEPLOY, SWITCH, STANDBY, ROLLBACK }
+    public enum Step { PREPARE, DATABASE, FREEZE, COPY, DEPLOY, SWITCH, STANDBY, ROLLBACK, PAUSE }
 
     /** 공개 주소를 한 번 불러 상태 코드를 돌려준다. 연결이 안 되면 -1 */
     @FunctionalInterface
@@ -85,15 +86,21 @@ public class AppMigration {
     private final Duration waitStep;
     /** 주소를 바꾼 뒤 옛 쪽을 내리거나 지우기 전에 기다린다. Cloudflare 엣지마다 반영이 수십 초 늦다 */
     private final Duration switchGrace;
+    /** 내 PC 앱의 쓰기 멈춤(pause)과 에이전트 터널 되돌리기. 테스트에서 넣는다 */
+    AgentHub hub;
+    CloudWelcome welcome;
     /** 지금 옮기고 있는 앱. 같은 앱을 두 번 옮기지 않는다 */
     private final Set<String> moving = ConcurrentHashMap.newKeySet();
 
     @Autowired
     public AppMigration(BuildStore store, BuildService builds, AgentDeployService deploys, CicdClient cicd,
                         ProvisionerClient provisioner, CloudClients clouds, AppAddress addresses, DatabaseCopy copy,
-                        TunnelCertificates certificates, BuildService.BuildRunner runner) {
+                        TunnelCertificates certificates, BuildService.BuildRunner runner, AgentHub hub,
+                        CloudWelcome welcome) {
         this(store, builds, deploys, cicd, provisioner, clouds, addresses, copy, certificates, runner,
                 AppMigration::httpStatus, Duration.ofSeconds(90), Duration.ofSeconds(3), Duration.ofSeconds(90));
+        this.hub = hub;
+        this.welcome = welcome;
     }
 
     AppMigration(BuildStore store, BuildService builds, AgentDeployService deploys, CicdClient cicd,
@@ -378,11 +385,11 @@ public class AppMigration {
                 .filter(b -> b.getStatus() == Build.Status.SUCCEEDED)
                 .max(Comparator.comparing(Build::getCreatedAt))
                 .orElseThrow(() -> new IllegalStateException(app + " 은 내 PC 배포 기록이 없다"));
-        if (agentBuild.getLogs().stream().anyMatch(l -> l.startsWith("database: ") && l.contains(" via platform tunnel "))) {
-            throw new IllegalStateException("DB 를 클라우드(RDS 터널)에 둔 내 PC 앱은 아직 옮기지 않는다 (DB 를 옮겨야 한다)");
-        }
         String key = deploys.agentOf(app)
                 .orElseThrow(() -> new IllegalStateException(app + " 을 배포한 에이전트를 찾지 못했다"));
+        if (agentBuild.getLogs().stream().anyMatch(l -> l.startsWith("database: ") && l.contains(" via platform tunnel "))) {
+            return startHybridDatabase(app, request, from, to, key, agentBuild);
+        }
 
         Build record = new Build(UUID.randomUUID().toString().substring(0, 8), request);
         record.log(RECORD + "from=" + from + " to=" + to + " hybrid");
@@ -416,6 +423,173 @@ public class AppMigration {
     }
 
     /**
+     * DB 를 클라우드(RDS 터널)에 둔 내 PC 앱을 옮긴다. 내 PC 앱이 지금 쓰는 DB 를 옮겨야 해서 쓰기를 잠깐 멈춘다.
+     * <ol>
+     *   <li>DATABASE: 새 클라우드에 빈 DB</li>
+     *   <li>PAUSE: 에이전트에 쓰기 멈춤(pause) 을 보내고 공개 주소가 503 인지 본다. 여기서부터 앱이 응답하지 않는다</li>
+     *   <li>COPY: 옛 DB → 새 DB ({@link DatabaseCopy})</li>
+     *   <li>SWITCH: 앱의 클라우드를 바꾼다 (이후 에이전트 DB 터널·대기 배포가 새 클라우드로)</li>
+     *   <li>DEPLOY: builder 가 내 PC 로 다시 배포한다. cloud-target 이 에이전트 터널을 새 DB 로 바꾸고 새 슬롯이 새 DB 로 뜬다</li>
+     *   <li>쓰기를 다시 열고, STANDBY: 옛 클라우드 대기 배포를 지운다 (옛 DB 는 보관, 정리하면 지운다)</li>
+     * </ol>
+     * 실패하면 앱 클라우드와 에이전트 터널을 옛 DB 로 되돌리고 쓰기를 다시 열고 새 DB 를 지운다. 옛 슬롯은 그대로 받는다.
+     */
+    Build startHybridDatabase(String app, BuildRequest request, String from, String to, String key, Build agentBuild) {
+        if (hub == null || !hub.supports(key, "pause")) {
+            throw new IllegalStateException("내 PC 에이전트가 쓰기 멈춤(pause)을 모르는 판이다. 에이전트를 최신 이미지로 다시 실행한다");
+        }
+        if (agentBuild.getLogs().stream().noneMatch(l -> l.startsWith("database: postgres via platform tunnel "))) {
+            throw new IllegalStateException("PostgreSQL 만 옮긴다");
+        }
+        if (agentBuild.getLogs().stream().anyMatch(l -> l.startsWith("source: pgroll migrations"))) {
+            throw new IllegalStateException("pgroll 로 관리하는 DB 는 아직 옮기지 않는다");
+        }
+        CloudProfiles gcp = clouds == null ? null : clouds.profile();
+        if (gcp == null || !gcp.provisionerConfigured() || !gcp.tunnelConfigured() || !certificates.enabled()) {
+            throw new IllegalStateException("Cloud SQL 로 가는 연결이 없다 (GCP_PROVISIONER_URL, GCP_TUNNEL_SSH_HOST, GCP_TUNNEL_REMOTE_HOST, 터널 CA)");
+        }
+        if (provisioner(to).engine(app).isPresent()) {
+            throw new IllegalStateException(to + " 에 이미 " + app + " DB 가 있다");
+        }
+        if (provisioner(from).engine(app).isEmpty()) {
+            throw new IllegalStateException(from + " 에 " + app + " DB 가 없다");
+        }
+        Build record = new Build(UUID.randomUUID().toString().substring(0, 8), request);
+        record.log(RECORD + "from=" + from + " to=" + to + " hybrid database");
+        record.log("deploymentMode=HYBRID");
+        record.log("cloudProvider=" + from);
+        record.log(AgentBurst.STANDBY_MARK + key);
+        record.log("migrate: database postgres");
+        record.status(Build.Status.DEPLOYING, "migrate: started");
+        store.save(record);
+        Plan plan = new Plan(app, from, to, "postgres");
+        moving.add(app);
+        try {
+            runner.run(() -> {
+                try {
+                    runHybridDatabase(record, request, plan, key);
+                } finally {
+                    moving.remove(app);
+                }
+            });
+        } catch (RuntimeException e) {
+            moving.remove(app);
+            throw e;
+        }
+        return record;
+    }
+
+    void runHybridDatabase(Build record, BuildRequest request, Plan plan, String key) {
+        String app = plan.app();
+        Set<Step> started = java.util.EnumSet.noneOf(Step.class);
+        Step step = null;
+        Instant paused = null;
+        try {
+            step = step(record, Step.DATABASE, started);
+            String sourceId = provisioner(plan.from()).existing(app, null, null)
+                    .orElseThrow(() -> new IllegalStateException(plan.from() + " 에 " + app + " DB 가 없다")).databaseId();
+            String targetId = provisioner(plan.to())
+                    .ensure(app, plan.database(), "127.0.0.1", DatabaseCopy.LOCAL_PORT).databaseId();
+            if (targetId.equals(sourceId)) {
+                throw new IllegalStateException(plan.to() + " provisioner 가 " + plan.from() + " DB 기록을 돌려줬다 (기록 테이블 공유)");
+            }
+            record.log(SOURCE_DB + sourceId);
+            record.log(TARGET_DB + targetId);
+            String sourceUrl = databaseUrl(provisioner(plan.from()), app, "GCP".equals(plan.from()));
+            String targetUrl = databaseUrl(provisioner(plan.to()), app, "GCP".equals(plan.to()));
+
+            step = step(record, Step.PAUSE, started);
+            paused = Instant.now();
+            pause(key, app, true);
+            awaitPaused(app);
+
+            step = step(record, Step.COPY, started);
+            String result = copy.copy(record.getId(), sourceUrl, targetUrl, tunnel(record.getId()));
+            result.lines().filter(line -> line.startsWith("copy:")).forEach(line -> record.log("migrate: " + line));
+
+            step = step(record, Step.SWITCH, started);
+            record.log("cloudProvider=" + plan.to());
+            store.save(record);
+
+            step = step(record, Step.DEPLOY, started);
+            await(deploys.start(key, request.withCloudProvider(plan.to())), "내 PC 배포");
+
+            pause(key, app, false);
+            long downtime = Duration.between(paused, Instant.now()).toMillis();
+
+            step = step(record, Step.STANDBY, started);
+            Step cleanup = step;
+            try {
+                CicdClient.Passthrough removed = cicd(plan.from()).remove(app, false);
+                record.log("migrate: " + plan.from() + " 대기 배포 정리 " + removed.status());
+            } catch (RuntimeException e) {
+                // 옛 대기 배포는 트래픽을 받지 않는다. 정리에 실패해도 옮기기는 끝났다
+                record.log("migrate: " + cleanup + " " + plan.from() + " 대기 배포 정리 실패: " + e.getMessage());
+            }
+            record.log("migrate: downtime " + downtime + "ms");
+            record.log(COMMITTED);
+            record.status(Build.Status.SUCCEEDED, "migrate: hold (" + plan.from() + " DB 보관, 정리하면 지운다)");
+            store.save(record);
+            log.info("hybrid database migration committed: app={} {} -> {} downtime={}ms", app, plan.from(), plan.to(), downtime);
+        } catch (RuntimeException e) {
+            log.warn("hybrid database migration failed: app={} step={} message={}", app, step, e.getMessage());
+            record.log("migrate: failed at " + step + ": " + e.getMessage());
+            hybridUndo(record, plan, started);
+            record.status(Build.Status.FAILED, "failed: " + e.getMessage());
+            store.save(record);
+        }
+    }
+
+    /** 내 PC 앱 옮기기를 되돌린다: 앱 클라우드와 에이전트 터널을 옛 DB 로, 쓰기를 다시 열고, 새 DB 를 지운다 */
+    private void hybridUndo(Build record, Plan plan, Set<Step> started) {
+        String app = plan.app();
+        String key = record.getLogs().stream().filter(l -> l.startsWith(AgentBurst.STANDBY_MARK)).findFirst()
+                .map(l -> l.substring(AgentBurst.STANDBY_MARK.length())).orElse(null);
+        if (started.contains(Step.SWITCH)) {
+            record.log("cloudProvider=" + plan.from());
+            store.save(record);
+            if (key != null && welcome != null) {
+                quietly(record, "에이전트 터널 되돌리기", () -> {
+                    if ("GCP".equals(plan.from())) {
+                        welcome.retarget(key, app, true);
+                    } else {
+                        welcome.retargetAws(key, app);
+                    }
+                });
+            }
+        }
+        if (started.contains(Step.PAUSE) && key != null) {
+            quietly(record, "쓰기 다시 열기", () -> pause(key, app, false));
+        }
+        record.getLogs().stream().filter(l -> l.startsWith(TARGET_DB)).findFirst()
+                .map(l -> l.substring(TARGET_DB.length()))
+                .ifPresent(id -> quietly(record, plan.to() + " DB 지우기", () -> provisioner(plan.to()).deleteById(id)));
+    }
+
+    private void pause(String key, String app, boolean paused) {
+        try {
+            hub.send(key, JSON.writeValueAsString(Map.of("type", "pause", "app", app, "paused", paused)));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("쓰기 멈춤을 보내지 못했다");
+        }
+    }
+
+    /** 공개 주소가 503 (에이전트 프록시 점검) 이 될 때까지. 안 되면 옛 DB 에 쓰기가 계속될 수 있어 멈춘다 */
+    private void awaitPaused(String app) {
+        String url = "https://" + addresses.host(app) + "/";
+        long deadline = System.nanoTime() + verifyTimeout.toNanos();
+        int last = -1;
+        while (System.nanoTime() < deadline) {
+            last = probe.status(url);
+            if (last == 503) {
+                return;
+            }
+            sleep(waitStep);
+        }
+        throw new IllegalStateException("내 PC 앱 쓰기가 멈추지 않았다: " + url + " (마지막 " + last + ")");
+    }
+
+    /**
      * HOLD 를 되돌린다: 원본을 다시 올리고 주소를 원본으로 바꾼 뒤 (반영을 기다려) 새 쪽 앱과 DB 를 지운다.
      * 옮긴 뒤 새 쪽에 쓴 데이터는 버린다 (원본 DB 는 옮길 때의 상태다). 반영 대기로 1~2분 걸려서 뒤에서 하고,
      * 진행은 {@link #status} 로 본다 (RUNNING, 단계 ROLLBACK)
@@ -423,6 +597,9 @@ public class AppMigration {
     public Build rollback(String app) {
         Build record = holding(app);
         Plan plan = planOf(record);
+        if (isHybrid(record)) {
+            throw new IllegalStateException("내 PC 앱은 옮긴 뒤 새 DB 에 바로 쓰므로 되돌리지 않는다. 반대 방향으로 다시 옮긴다 (먼저 정리)");
+        }
         if (!moving.add(app)) {
             throw new IllegalStateException(app + " 은 이미 옮기는 중이다");
         }
@@ -474,6 +651,18 @@ public class AppMigration {
     public Build finalizeMigration(String app) {
         Build record = holding(app);
         Plan plan = planOf(record);
+        if (isHybrid(record)) {
+            // 내 PC 앱은 옛 클러스터에 대기 배포가 이미 없다. 남은 옛 DB 만 지운다
+            String sourceId = record.getLogs().stream().filter(l -> l.startsWith(SOURCE_DB)).findFirst()
+                    .map(l -> l.substring(SOURCE_DB.length())).orElse(null);
+            if (sourceId != null) {
+                provisioner(plan.from()).deleteById(sourceId);
+                record.log("migrate: " + plan.from() + " DB 정리 " + sourceId);
+            }
+            record.log(FINALIZED);
+            store.save(record);
+            return record;
+        }
         CicdClient.Passthrough removed = cicd(plan.from()).remove(app, plan.database() != null);
         if (removed.status() != 200 && removed.status() != 404) {
             throw new IllegalStateException(plan.from() + " 앱을 지우지 못했다: " + removed.status() + " " + removed.body());
@@ -531,7 +720,7 @@ public class AppMigration {
                     .reduce((a, b) -> b).map(l -> l.substring(STEP.length())).orElse("");
             Long downtime = record.getLogs().stream().filter(l -> l.startsWith("migrate: downtime "))
                     .map(l -> Long.parseLong(l.replaceAll("\\D+", ""))).findFirst().orElse(null);
-            boolean hybrid = record.getLogs().stream().anyMatch(l -> l.startsWith(RECORD) && l.endsWith(" hybrid"));
+            boolean hybrid = isHybrid(record);
             return new View(app, record.getId(), plan.from(), plan.to(), state, step, downtime, hybrid,
                     record.getCreatedAt(), record.getUpdatedAt(), record.getLogs());
         });
@@ -599,7 +788,11 @@ public class AppMigration {
                     .forEach(l -> started.add(Step.valueOf(l.substring(STEP.length()))));
             log.warn("migration interrupted: app={} steps={}", plan.app(), started);
             record.log("migrate: builder restarted after " + started + ", undoing");
-            undo(record, plan, started);
+            if (isHybrid(record)) {
+                hybridUndo(record, plan, started);
+            } else {
+                undo(record, plan, started);
+            }
             record.status(Build.Status.FAILED, "failed: builder 가 옮기는 도중에 다시 시작했다");
             store.save(record);
         }
@@ -615,6 +808,10 @@ public class AppMigration {
 
     private boolean isHolding(Build record) {
         return record.getStatus() == Build.Status.SUCCEEDED && !record.getLogs().contains(FINALIZED);
+    }
+
+    static boolean isHybrid(Build record) {
+        return record.getLogs().stream().anyMatch(l -> l.startsWith(RECORD) && l.contains(" hybrid"));
     }
 
     static boolean isRecord(Build build) {
