@@ -316,7 +316,7 @@ class AppMigrationTest {
     }
 
     @Test
-    void 내_PC_앱은_거점이_클라우드거나_에이전트가_끊겼거나_DB_가_RDS_터널이면_옮기지_않는다() {
+    void 내_PC_앱은_거점이_클라우드거나_에이전트가_끊겼거나_RDS_터널_DB_인데_쓰기_멈춤을_모르면_옮기지_않는다() {
         agentApp("database: postgres on agent (my pc)", "CLOUD", true);
         assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("거점");
 
@@ -324,7 +324,8 @@ class AppMigrationTest {
         assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("연결");
 
         agentApp("database: postgres via platform tunnel 172.17.0.1:15432", "ONPREM", true);
-        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("RDS 터널");
+        // RDS 터널 DB 는 DB 를 옮기는 경로로 간다. 쓰기 멈춤을 모르는 에이전트(hub 없음)면 거절한다
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("pause");
 
         verify(aws, never()).remove(anyString(), anyBoolean());
         assertThat(migration.status(APP)).isEmpty();
@@ -341,5 +342,92 @@ class AppMigrationTest {
             assertThat(view.state()).isEqualTo("HOLD");
             assertThat(view.to()).isEqualTo("GCP");
         });
+    }
+
+    private final AgentHub hub = mock(AgentHub.class);
+    private final CloudWelcome welcome = mock(CloudWelcome.class);
+
+    /** RDS 터널 DB 를 쓰는 내 PC 앱. 에이전트는 pause 를 안다 */
+    private void tunnelApp(Build.Status redeploy) {
+        agentApp("database: postgres via platform tunnel 172.17.0.1:15432", "ONPREM", true);
+        migration.hub = hub;
+        migration.welcome = welcome;
+        when(hub.supports("abcdefabcdef", "pause")).thenReturn(true);
+        when(deploys.start(eq("abcdefabcdef"), any())).thenAnswer(call -> {
+            Build build = new Build(UUID.randomUUID().toString().substring(0, 8), (BuildRequest) call.getArgument(1));
+            build.log("queued: x target=onprem agent=abcdefabcdef");
+            build.status(redeploy, "done");
+            store.save(build);
+            return build;
+        });
+        publicStatus.set(503);
+    }
+
+    private static String paused(boolean on) {
+        return org.mockito.ArgumentMatchers.argThat(json -> json != null && json.contains("\"type\":\"pause\"")
+                && json.contains("\"paused\":" + on));
+    }
+
+    @Test
+    void 내_PC_앱의_RDS_터널_DB_는_쓰기를_멈추고_복사한_뒤_새_클라우드로_다시_배포하고_쓰기를_연다() {
+        tunnelApp(Build.Status.SUCCEEDED);
+
+        Build record = migration.start(APP, request().withCloudProvider("GCP"));
+
+        InOrder order = inOrder(hub, copy, deploys, aws);
+        order.verify(hub).send(eq("abcdefabcdef"), paused(true));
+        order.verify(copy).copy(eq(record.getId()), eq(RDS_URL), eq(CLOUDSQL_URL), any());
+        order.verify(deploys).start(eq("abcdefabcdef"), org.mockito.ArgumentMatchers.argThat(r -> "GCP".equals(r.cloudProvider())));
+        order.verify(hub).send(eq("abcdefabcdef"), paused(false));
+        order.verify(aws).remove(APP, false);
+        Build saved = store.find(record.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(AgentDeployService.lastCloudProvider(saved)).isEqualTo("GCP");
+        assertThat(migration.status(APP).orElseThrow().state()).isEqualTo("HOLD");
+        verify(gcpDb, never()).deleteById(anyString());
+        verify(addresses, never()).pointCloud(anyString(), any());
+        assertThatThrownBy(() -> migration.rollback(APP)).isInstanceOf(IllegalStateException.class);
+
+        migration.finalizeMigration(APP);
+        verify(awsDb).deleteById("a");
+        assertThat(migration.status(APP).orElseThrow().state()).isEqualTo("FINALIZED");
+    }
+
+    @Test
+    void 내_PC_다시_배포가_실패하면_클라우드와_에이전트_터널을_옛_DB_로_되돌리고_쓰기를_열고_새_DB_를_지운다() {
+        tunnelApp(Build.Status.FAILED);
+
+        Build record = migration.start(APP, request().withCloudProvider("GCP"));
+
+        verify(welcome).retargetAws("abcdefabcdef", APP);
+        verify(hub).send(eq("abcdefabcdef"), paused(false));
+        verify(gcpDb).deleteById("g");
+        verify(aws, never()).remove(anyString(), anyBoolean());
+        Build saved = store.find(record.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(AgentDeployService.lastCloudProvider(saved)).isEqualTo("AWS");
+    }
+
+    @Test
+    void 내_PC_앱_쓰기가_멈추지_않으면_복사하지_않고_되돌린다() {
+        tunnelApp(Build.Status.SUCCEEDED);
+        publicStatus.set(200);
+
+        migration.start(APP, request().withCloudProvider("GCP"));
+
+        verify(copy, never()).copy(anyString(), anyString(), anyString(), any());
+        verify(deploys, never()).start(anyString(), any());
+        verify(hub).send(eq("abcdefabcdef"), paused(false));
+        verify(gcpDb).deleteById("g");
+        verify(welcome, never()).retargetAws(anyString(), anyString());
+    }
+
+    @Test
+    void 쓰기_멈춤을_모르는_에이전트면_내_PC_앱_DB_를_옮기지_않는다() {
+        tunnelApp(Build.Status.SUCCEEDED);
+        when(hub.supports("abcdefabcdef", "pause")).thenReturn(false);
+
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("pause");
+        verify(hub, never()).send(anyString(), anyString());
     }
 }
