@@ -184,6 +184,56 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
   - DO 를 쓰려면 Cloudflare 계정에 workers.dev 서브도메인이 있어야 한다. 큐 바인딩 업로드가 거절되면 바인딩 없이 올라가 재시도·읽기 사본은 그대로 동작한다
 - Worker 테스트: `./gradlew edgeTest` (Node 22 이상, 쓰기 큐 테스트는 `node:sqlite` 때문에 Node 24 이상. `node --test src/test/js/*.test.mjs`)
 
+## GCP 와 멀티클라우드 (AWS + GCP)
+
+프로젝트의 `cloudProvider` 로 배포할 클라우드를 정한다. 만든 뒤에는 바꾸지 않는다.
+
+| 값 | 클러스터 | 이미지 | DB | 공개 주소 CNAME |
+|---|---|---|---|---|
+| `AWS` (기본) | AWS k3s (`CICD_URL`) | ECR | RDS | ALB (`PLATFORM_CUTOVER_ORIGIN`) |
+| `GCP` | GCP k3s (`GCP_CICD_URL`) | Artifact Registry (`GCP_REGISTRY`) | Cloud SQL | GCP LB (`GCP_CUTOVER_ORIGIN`) |
+| `MULTI` | 둘 다 | 둘 다 | Cloud SQL 하나 | Worker 가 비율대로 나눈다 |
+
+### 앱의 클라우드 판정과 관리 호출
+
+- 앱의 클라우드는 그 앱의 가장 최근 빌드 로그 `cloudProvider=`·`multiCloud=true` 로 정한다 (`AgentDeployService.cloudProvider`·`multiCloud`). 기록이 없으면 AWS
+- 롤백·내리기·올리기·삭제·릴리스·스키마 이력·schema complete·주소 되돌리기(`PUT /address`)는 `CloudRouting` 이 그 앱의 클라우드 lily-cicd 와 CNAME 으로 보낸다. GCP 가 연결되지 않은 GCP 앱은 AWS 로 보내지 않고 503
+- 내 PC 앱을 GCP 로 배포하면 에이전트에 `cloud-target` 을 보내 버스트 대상(GCP Ingress)과 DB 터널(정방향 Cloud SQL, 역방향 GCP 배스천)을 바꾼다. 내 PC DB 모드여도 터널을 같이 보낸다 (`CloudWelcome`). 에이전트는 열린 터널을 닫고 같은 로컬 포트로 새 대상에 다시 연다 (lily-on-premise)
+- 거점 전환 CNAME 은 에이전트가 고른 오리진(ALB 또는 GCP LB)을 그대로 쓴다 (`AgentCloudflare`)
+
+### 멀티클라우드 배포 (`cloudProvider: MULTI`)
+
+클라우드 전용 앱을 GCP 와 AWS 에 같이 띄운다. DB 는 GCP Cloud SQL 하나이고, AWS 쪽 Pod 는 AWS 클러스터의 DB 릴레이로 붙는다.
+
+```
+빌드 1번      Kaniko --destination 두 개 (Artifact Registry + ECR, 인증은 빌드마다 합친 Secret)
+GCP 먼저      lily-cicd(GCP) 일반 배포: DB 생성, 마이그레이션·pgroll, canary. 별칭 {app}-gcp.{존}
+AWS 다음      lily-cicd(AWS) 마이그레이션 없이. GCP provisioner 접속 정보의 호스트만 db-relay-gcp 로 바꿔 databaseEnv + followPgroll. 별칭 {app}-aws.{존}
+주소          {app}-gcp → GCP LB, {app}-aws → ALB, {app} → GCP LB (Worker 가 없을 때의 기본값). Worker 라우트 + 앱 DO 설정 split(처음 50)
+```
+
+- AWS 배포가 실패하면 GCP 를 되돌린다 (이전 릴리스가 있으면 rollback, 첫 릴리스면 앱만 지우고 DB 는 남긴다). 둘 다 바뀌거나 둘 다 그대로
+- 관리 호출: 롤백은 AWS 앱 → GCP(스키마 포함), 내리기 AWS → GCP, 올리기 GCP → AWS, 삭제는 AWS 앱(DB 없이) → GCP(DB 포함), 릴리스는 GCP 응답에 `aws` 를 붙인다. 스키마 이력·complete 는 GCP 만
+- AWS 쪽은 스키마 버전을 기록하지 않는다. 그래서 AWS 롤백은 앱만 되돌리고, pgroll start·complete·rollback 은 GCP lily-cicd 가 한다
+- 거절: 내 PC 앱, MySQL, 다른 클라우드로 옮기기, 이름이 `{app}-aws`·`{app}-gcp` 인 앱이 이미 있을 때. 반대로 멀티클라우드 앱 `X` 가 있으면 `X-aws`·`X-gcp` 이름의 새 배포를 빌드 전에 거절한다 (Ingress 호스트가 겹치고, 지우면 별칭 주소를 지운다)
+- builder 가 배포 도중 다시 뜨면 멀티클라우드 빌드는 이어받지 않고 실패로 닫는다. 다시 배포하면 두 쪽이 같은 버전이 된다
+- 고정 세션(sticky)이 없다. 세션을 메모리에 두는 앱은 맞지 않는다
+
+| Method | Path | 설명 |
+|---|---|---|
+| GET | `/api/apps/{app}/traffic` | `gcpPercent` 와 클라우드별 `replicas`·`readyReplicas`. 멀티클라우드가 아니면 404 |
+| PUT | `/api/apps/{app}/traffic` | `{"gcpPercent": 0~100}`. 나머지가 AWS. Worker isolate 마다 30초 안에 반영 |
+
+엣지 Worker (`worker.js` 의 `multi`):
+
+- 요청마다 비율로 `{app}-gcp` 또는 `{app}-aws` 를 고르고 `X-Lily-Cloud: gcp|aws` 를 붙인다
+- 고른 쪽이 받지 못하면 반대쪽으로 한 번 더 보낸다. 연결 실패·530 은 모든 메서드, 엣지 오류 페이지와 오리진의 502/503/504(Pod 가 없는 Ingress 등)는 GET/HEAD/OPTIONS 만. POST 등은 두 번 처리될 수 있어 그대로 돌려준다
+- 받지 못한 쪽은 10초 건너뛴다. split 이 없는 앱(내 PC 앱)은 지금처럼 PC 로 보낸다
+
+DB 릴레이 (`DatabaseRelay`): 릴레이 키를 처음 한 번 만들고, key ID `relay-gcp` 인 24시간 인증서를 6시간마다 다시 서명해 Secret `lily-builds/db-relay-gcp` 에 둔다. 릴레이 Deployment·Service·NetworkPolicy 는 lily-db-provisioner `deploy/k3s/cluster/db-relay-gcp.yaml`.
+
+E2E (2026-10-04, 운영): 비율 50·80·100·0 분배와 AWS ingress 로그 대조, 두 클라우드가 같은 Cloud SQL 을 읽고 씀, pgroll 02 배포 중 쓰기 60/60, 롤백, 내리기·올리기, 한쪽 앱 Pod 0 과 한쪽 클라우드 접속 불가(별칭 CNAME 을 없는 대상으로) 때 GET 전부 반대쪽 처리, 삭제 후 두 클러스터·Cloud SQL·CNAME 3개 정리.
+
 ## 설정
 
 | 환경변수 | 기본값 | 설명 |
@@ -208,6 +258,11 @@ PC 장애  {app}.{존} → Worker → 530·연결 실패·엣지 오류 페이�
 | `PLATFORM_TUNNEL_REVERSE_HOST` / `_REVERSE_PORT_FROM` / `_TO` | (없음) / `20000` / `20999` | 역방향 터널을 열 배스천 사설 IP와 포트 범위. 비우면 끈다 |
 | `PLATFORM_BURST_INGRESS_HOST` / `_PORT` | (없음) / `80` | 에이전트가 넘친 요청을 보낼 클러스터 Ingress |
 | `PLATFORM_CUTOVER_ORIGIN` | (없음) | 거점이 클라우드일 때 앱 CNAME 이 가리킬 ALB. 비우면 거점 전환을 하지 않는다 |
+| `GCP_CICD_URL` / `GCP_REGISTRY` / `GCP_REGISTRY_AUTH_SECRET` | (없음) / (없음) / `gcp-pull` | GCP lily-cicd 와 Artifact Registry, Kaniko 가 쓸 dockerconfigjson Secret (`lily-builds`). 비우면 GCP 배포를 거절한다 |
+| `GCP_PROVISIONER_URL` / `GCP_PROVISIONER_API_TOKEN` | (없음) | GCP lily-db-provisioner (Cloud SQL) |
+| `GCP_BURST_INGRESS_HOST` / `_PORT` / `GCP_CUTOVER_ORIGIN` | (없음) / `80` / (없음) | GCP 앱의 버스팅 Ingress, 거점·장애 전환과 멀티클라우드 별칭이 가리킬 GCP LB |
+| `GCP_TUNNEL_SSH_HOST` / `_SSH_USER` / `_REMOTE_HOST` / `_REMOTE_PORT` / `_REVERSE_HOST` | - / `lily-tunnel` / - / `5432` / - | GCP 배스천, Cloud SQL 사설 주소, 역방향 터널을 열 사설 IP. 에이전트 터널과 DB 릴레이가 쓴다 |
+| `lily.builder.gcp.relay-host` / `relay-port` | `db-relay-gcp.lily-builds.svc.cluster.local` / `5432` | 멀티클라우드 AWS 쪽 Pod 가 붙을 DB 릴레이 |
 | `BUILDS_TABLE` / `DYNAMODB_ENDPOINT` / `AWS_REGION` / `DYNAMODB_CREATE_TABLE` | `lily-builds` / (AWS) / `ap-northeast-2` / `false` | 배포 이력 |
 | `REMEDIATE_ENABLED` / `JEV_API_KEY` / `GROQ_API_KEY` / `REMEDIATE_FRONTEND_URL` / `REMEDIATE_TOKEN` | `false` / - | 로그 사고 diff 초안 (`POST /api/remediate/drafts`) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | (없음) | 설정 분류·실패 진단 `AiAdvisor` (Secret `lily-ai`). 없으면 규칙만 쓴다 |
