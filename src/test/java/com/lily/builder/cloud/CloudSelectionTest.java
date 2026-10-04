@@ -61,4 +61,61 @@ class CloudSelectionTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.error").value("cloud_disabled"));
     }
+
+    private static CloudRepository.Evidence evidence(String affinity, List<String> files) {
+        return new CloudRepository.Evidence("a".repeat(40), "", files, Map.of("web", List.of("fastapi")),
+                affinity, "rules", null, List.of());
+    }
+    private static final Jev MUST_NOT_ASK = new Jev() {
+        public Optional<Answer> ask(Map<String, ?> state, com.lily.jev.Question question) { throw new AssertionError("JEV 를 부르면 안 된다"); }
+    };
+
+    @Test void singleCandidateIsSelectedWithoutAskingJev() {
+        var result = CloudSelection.decide(evidence("unknown", List.of("requirements.txt")), java.util.Set.of("gcp"), MUST_NOT_ASK, .8);
+        assertThat(result.status()).isEqualTo("selected");
+        assertThat(result.provider()).isEqualTo("GCP");
+        assertThat(result.reason()).isEqualTo("single_candidate");
+        assertThat(result.confidence()).isNull();
+    }
+
+    @Test void portableRepositoryGoesToAwsWithoutAskingJev() {
+        var result = CloudSelection.decide(evidence("portable", List.of("requirements.txt")), java.util.Set.of("aws", "gcp"), MUST_NOT_ASK, .8);
+        assertThat(result.provider()).isEqualTo("AWS");
+        assertThat(result.reason()).isEqualTo("portable_default");
+    }
+
+    @Test void holdFromJevFallsBackToDefaultInsteadOfBlockingTheFirstDeploy() {
+        Jev holding = (state, question) -> Optional.of(new Answer("hold", null, 0.9));
+        var result = CloudSelection.decide(evidence("unknown", List.of("requirements.txt")), java.util.Set.of("aws", "gcp"), holding, .8);
+        assertThat(result.status()).isEqualTo("selected");
+        assertThat(result.provider()).isEqualTo("AWS");
+        assertThat(result.reason()).isEqualTo("fallback_default");
+    }
+
+    @Test void lowConfidenceOrNoAnswerFallsBackToDefault() {
+        Jev unsure = (state, question) -> Optional.of(new Answer("gcp", null, 0.5));
+        assertThat(CloudSelection.decide(evidence("unknown", List.of("pom.xml")), java.util.Set.of("aws", "gcp"), unsure, .8).provider()).isEqualTo("AWS");
+        assertThat(CloudSelection.decide(evidence("unknown", List.of("pom.xml")), java.util.Set.of("aws", "gcp"), Jev.disabled(), .8).reason()).isEqualTo("fallback_default");
+        Jev silent = (state, question) -> Optional.empty();
+        assertThat(CloudSelection.decide(evidence("unknown", List.of("pom.xml")), java.util.Set.of("aws", "gcp"), silent, .8).provider()).isEqualTo("AWS");
+    }
+
+    @Test void repositoryLeaningToGcpKeepsGcpWhenJevCannotDecide() {
+        var result = CloudSelection.decide(evidence("gcp", List.of("requirements.txt")), java.util.Set.of("aws", "gcp"), Jev.disabled(), .8);
+        assertThat(result.provider()).isEqualTo("GCP");
+        assertThat(result.reason()).isEqualTo("fallback_default");
+    }
+
+    @Test void confidentJevAnswerStillWins() {
+        Jev confident = (state, question) -> Optional.of(new Answer("gcp", null, 0.92));
+        var result = CloudSelection.decide(evidence("unknown", List.of("requirements.txt")), java.util.Set.of("aws", "gcp"), confident, .8);
+        assertThat(result.provider()).isEqualTo("GCP");
+        assertThat(result.reason()).isEqualTo("repository_jev");
+        assertThat(result.confidence()).isEqualTo(0.92);
+    }
+
+    @Test void missingManifestOrWorkersStillHold() {
+        assertThat(CloudSelection.decide(evidence("portable", List.of()), java.util.Set.of("aws"), MUST_NOT_ASK, .8).reason()).isEqualTo("repository_evidence_missing");
+        assertThat(CloudSelection.decide(evidence("portable", List.of("pom.xml")), java.util.Set.of(), MUST_NOT_ASK, .8).reason()).isEqualTo("cloud_workers_unconfigured");
+    }
 }
