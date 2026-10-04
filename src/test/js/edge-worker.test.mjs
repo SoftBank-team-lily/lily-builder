@@ -447,3 +447,26 @@ test("split 이 없는 앱은 지금처럼 PC 오리진으로 보낸다", async 
   assert.equal(response.body, "pc");
   assert.equal(response.headers.get("x-lily-cloud"), null);
 });
+
+test("한쪽 클러스터가 앱 Pod 없이 503을 주면 GET은 반대쪽으로 보내고 POST는 그대로 돌려주며 그쪽을 건너뛴다", async () => {
+  let awsCalls = 0;
+  cloudOf("multi-f", "aws", () => {
+    awsCalls++;
+    return new Response("<html>503 Service Temporarily Unavailable</html>", { status: 503, headers: { "content-type": "text/html" } });
+  });
+  cloudOf("multi-f", "gcp", () => new Response("from gcp"));
+
+  const get = await withRandom(0.9, () => send(`https://multi-f.${ZONE}/`, {}, multiEnv(50)));
+  assert.equal(get.status, 200);
+  assert.equal(get.body, "from gcp");
+  const next = await withRandom(0.9, () => send(`https://multi-f.${ZONE}/`, {}, multiEnv(50)));
+  assert.equal(next.headers.get("x-lily-cloud"), "gcp");
+  assert.equal(awsCalls, 1);
+
+  cloudOf("multi-g", "aws", () => new Response("busy", { status: 503 }));
+  cloudOf("multi-g", "gcp", () => new Response("from gcp", { status: 201 }));
+  const post = await withRandom(0.9, () => send(`https://multi-g.${ZONE}/api/posts`,
+    { method: "POST", body: "x", headers: { "content-length": "1" } }, multiEnv(50)));
+  assert.equal(post.status, 503);
+  assert.equal(post.headers.get("x-lily-cloud"), "aws");
+});

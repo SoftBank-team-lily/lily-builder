@@ -22,8 +22,9 @@
 // 쓰기 큐(queue.js)에 등록된 앱의 POST 는 클라우드로 다시 보내지 않고 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
 //
 // 멀티클라우드 앱(앱 DO 설정 split = GCP 로 보내는 비율 0~100): PC 가 없다. 요청마다 비율로 {app}-gcp.{zone} 또는
-// {app}-aws.{zone} 을 고르고, 고른 쪽이 받지 못하면 PC 와 같은 규칙으로 반대쪽에 다시 보낸다
-// (연결 실패·530 은 모든 메서드, 엣지 오류 페이지는 GET/HEAD/OPTIONS 만). 받지 못한 쪽은 DOWN_MILLIS 동안 건너뛴다.
+// {app}-aws.{zone} 을 고르고, 고른 쪽이 받지 못하면 반대쪽에 다시 보낸다. 연결 실패·530 은 모든 메서드,
+// 엣지 오류 페이지와 오리진의 502/503/504(클러스터는 살아 있는데 앱 Pod 가 없다 등)는 GET/HEAD/OPTIONS 만.
+// 받지 못한 쪽은 DOWN_MILLIS 동안 건너뛴다.
 // 고정 세션(sticky)은 없다. 무상태 앱을 전제로 한다. 응답에 X-Lily-Cloud: gcp|aws 를 붙인다.
 
 import { queued, snapshotOn, splitOf, WriteQueue } from "./queue.js";
@@ -42,6 +43,8 @@ const CLOUD_SUFFIX = "-cloud";
 /** 엣지가 오리진에 닿지 못했을 때 내는 상태 코드. 본문이 Cloudflare 오류 페이지일 때만 PC 장애로 본다 */
 const EDGE_ERRORS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
+/** 멀티클라우드에서 그 클라우드가 앱을 못 띄운 것으로 보는 오리진 응답 (Ingress 의 upstream 없음·끊김) */
+const GATEWAY_ERRORS = new Set([502, 503, 504]);
 /** PC 장애 때 읽기 사본으로 답하는 메서드 */
 const READS = new Set(["GET", "HEAD"]);
 /** 성공하면 그 경로의 읽기 사본을 지우는 메서드 */
@@ -351,7 +354,7 @@ async function multi(request, url, split, ctx) {
     markDown(cloudKey(host, order[0]), ctx);
     return other(request, url, order[1], body, ctx);
   }
-  if (!(await edgeFailed(response))) {
+  if (!GATEWAY_ERRORS.has(response.status) && !(await edgeFailed(response))) {
     return tagged(response, order[0]);
   }
   markDown(cloudKey(host, order[0]), ctx);
@@ -365,7 +368,7 @@ async function multi(request, url, split, ctx) {
 async function other(request, url, cloud, body, ctx) {
   try {
     const response = await fetch(toAlias(request, url, cloud, body));
-    if (await edgeFailed(response)) {
+    if (GATEWAY_ERRORS.has(response.status) || (await edgeFailed(response))) {
       markDown(cloudKey(url.hostname, cloud), ctx);
     }
     return tagged(response, cloud);
