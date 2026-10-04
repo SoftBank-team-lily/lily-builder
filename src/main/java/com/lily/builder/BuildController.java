@@ -235,7 +235,8 @@ public class BuildController {
                 return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body("{\"status\":\"REMOVED\"}");
             }
         }
-        if (clouds.multi(appName)) {
+        boolean multi = clouds.multi(appName);
+        if (multi) {
             // AWS 는 GCP DB 를 빌려 쓴다. AWS 앱만 지우고 DB 는 GCP 쪽에서 지운다
             CicdClient.Passthrough aws = clouds.awsCicd().remove(appName, false);
             if (aws.status() != 200 && aws.status() != 404) {
@@ -256,7 +257,7 @@ public class BuildController {
         }
         if (removed.status() == 200 && edge.enabled()) {
             try {
-                edge.detach(appName);
+                edge.detach(appName, multi);
             } catch (RuntimeException e) {
                 // 남은 라우트는 PC 장애 때 없는 클라우드 앱으로 보낼 뿐이다. 앱 삭제는 성공이다
             }

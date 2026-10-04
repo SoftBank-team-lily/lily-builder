@@ -87,7 +87,7 @@ class MultiCloudRoutingTest {
         ResponseEntity<String> response = controller.remove("blog", true);
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
-        verify(edge).detach("blog");
+        verify(edge).detach("blog", true);
         aws.verify();
         gcp.verify();
     }

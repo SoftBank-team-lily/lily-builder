@@ -65,6 +65,15 @@ class EdgeWorkerTest {
     }
 
     @Test
+    void 멀티클라우드가_아닌_앱을_지우면_이름이_겹치는_다른_앱의_aws_gcp_주소는_조회도_삭제도_하지_않는다() {
+        records = json("[{\"id\":\"r1\",\"type\":\"CNAME\",\"content\":\"alb.example.net\",\"proxied\":true}]");
+
+        edge.detach("blog");
+
+        assertThat(calls).noneMatch(call -> call.contains("blog-aws.lilycloud.kr") || call.contains("blog-gcp.lilycloud.kr"));
+    }
+
+    @Test
     void 앱을_지우면_라우트와_ALB_를_가리키는_클라우드_주소를_지운다() {
         records = json("[{\"id\":\"r1\",\"type\":\"CNAME\",\"content\":\"alb.example.net\",\"proxied\":true}]");
         routes = json("[{\"id\":\"w1\",\"pattern\":\"blog.lilycloud.kr/*\",\"script\":\"lily-edge\"}]");

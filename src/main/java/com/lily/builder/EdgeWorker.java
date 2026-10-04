@@ -323,6 +323,14 @@ public class EdgeWorker {
 
     /** 앱을 지운 뒤. 라우트와 ALB 를 가리키는 클라우드 주소만 지운다 */
     public void detach(String app) {
+        detach(app, false);
+    }
+
+    /**
+     * @param multi 멀티클라우드 앱이다. 그때만 {app}-aws·{app}-gcp 별칭도 지운다
+     *              (멀티클라우드가 아닌 앱이 지우면 이름이 {app}-aws 인 다른 앱의 공개 주소를 지울 수 있다)
+     */
+    public void detach(String app, boolean multi) {
         if (queue.enabled()) {
             try {
                 queue.clear(app);
@@ -335,7 +343,10 @@ public class EdgeWorker {
         if (route != null) {
             api.call("DELETE", zone() + "/workers/routes/" + route.path("id").asText(), null);
         }
-        for (String host : List.of(cloudHost(app), multiHost(app, "aws"), multiHost(app, "gcp"))) {
+        List<String> hosts = multi
+                ? List.of(cloudHost(app), multiHost(app, "aws"), multiHost(app, "gcp"))
+                : List.of(cloudHost(app));
+        for (String host : hosts) {
             JsonNode record = record(host);
             String content = record == null ? "" : normalize(record.path("content").asText(""));
             if (record != null && (origin.equals(content) || (!extraOrigin.isBlank() && extraOrigin.equals(content)))) {

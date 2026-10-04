@@ -422,6 +422,11 @@ public class BuildService {
         if (!edge.multiReady()) {
             throw new IllegalStateException("멀티클라우드에는 엣지 Worker, 쓰기 큐 DO, GCP 오리진이 필요하다");
         }
+        // 별칭 {app}-aws·{app}-gcp 가 다른 앱의 공개 주소와 겹치면 그 앱의 주소를 가져다 쓰거나 지울 수 있다
+        List<String> aliases = List.of(app + "-aws", app + "-gcp");
+        if (store.findAll().stream().anyMatch(other -> aliases.contains(other.getAppName()))) {
+            throw new IllegalStateException("이름이 " + app + "-aws 나 " + app + "-gcp 인 앱이 있어 멀티클라우드 별칭이 겹친다");
+        }
         CicdClient gcp = clouds.cicd();
         if (ecr.ensure(app)) {
             build.log("build: created ecr repository " + app);
