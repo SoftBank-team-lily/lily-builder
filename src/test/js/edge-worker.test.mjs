@@ -344,3 +344,106 @@ test("읽기_사본을_켠_앱은_쓰기_큐_바인딩이_있어도_지금처럼
   assert.equal(down.status, 200);
   assert.equal(down.headers.get("x-lily-edge"), "snapshot");
 });
+
+// ---- 멀티클라우드 앱 (앱 DO 설정 split = GCP 로 보내는 비율) ----
+
+/** 앱 DO 의 설정만 돌려주는 가짜 QUEUE 바인딩. split 이 null 이면 멀티클라우드가 아니다 */
+function multiEnv(split) {
+  return {
+    QUEUE_KEY: Buffer.alloc(32, 7).toString("base64"),
+    QUEUE: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: async () => Response.json({ paths: [], snapshot: true, split }) }),
+    },
+  };
+}
+
+function cloudOf(app, cloud, handler) {
+  origins.set(`${app}-${cloud}.${ZONE}`, handler);
+}
+
+function withRandom(value, run) {
+  const original = Math.random;
+  Math.random = () => value;
+  return run().finally(() => {
+    Math.random = original;
+  });
+}
+
+const cdnError = () => new Response("<html>error <a href='/cdn-cgi/l/'>cf</a></html>",
+  { status: 502, headers: { "content-type": "text/html" } });
+
+test("멀티클라우드 앱은 비율대로 {app}-gcp 와 {app}-aws 로 나누고 X-Lily-Cloud 를 붙인다", async () => {
+  const seen = [];
+  cloudOf("multi-a", "gcp", (request) => {
+    seen.push(["gcp", request.headers.get("x-lily-original-host")]);
+    return new Response("from gcp");
+  });
+  cloudOf("multi-a", "aws", () => new Response("from aws"));
+
+  const toGcp = await withRandom(0.29, () => send(`https://multi-a.${ZONE}/posts`, {}, multiEnv(30)));
+  const toAws = await withRandom(0.31, () => send(`https://multi-a.${ZONE}/posts`, {}, multiEnv(30)));
+
+  assert.equal(toGcp.body, "from gcp");
+  assert.equal(toGcp.headers.get("x-lily-cloud"), "gcp");
+  assert.equal(toAws.body, "from aws");
+  assert.equal(toAws.headers.get("x-lily-cloud"), "aws");
+  assert.deepEqual(seen, [["gcp", `multi-a.${ZONE}`]]);
+});
+
+test("고른 클라우드에 연결하지 못하면 POST 도 반대쪽으로 보내고, 다음 요청은 그쪽을 건너뛴다", async () => {
+  let gcpCalls = 0;
+  cloudOf("multi-b", "gcp", () => {
+    gcpCalls++;
+    throw new TypeError("fetch failed: connection refused");
+  });
+  cloudOf("multi-b", "aws", async (request) => new Response("aws got " + (await request.text()), { status: 201 }));
+
+  const first = await withRandom(0, () => send(`https://multi-b.${ZONE}/api/posts`,
+    { method: "POST", body: "hello", headers: { "content-length": "5" } }, multiEnv(100)));
+  const second = await withRandom(0, () => send(`https://multi-b.${ZONE}/api/posts`, {}, multiEnv(100)));
+
+  assert.equal(first.status, 201);
+  assert.equal(first.body, "aws got hello");
+  assert.equal(first.headers.get("x-lily-cloud"), "aws");
+  assert.equal(second.headers.get("x-lily-cloud"), "aws");
+  assert.equal(gcpCalls, 1);
+});
+
+test("엣지 오류 페이지는 GET 만 반대쪽으로 다시 보내고 POST 는 그대로 돌려준다", async () => {
+  cloudOf("multi-c", "gcp", cdnError);
+  cloudOf("multi-c", "aws", () => new Response("from aws"));
+
+  const get = await withRandom(0, () => send(`https://multi-c.${ZONE}/`, {}, multiEnv(100)));
+  assert.equal(get.body, "from aws");
+
+  cloudOf("multi-d", "gcp", cdnError);
+  cloudOf("multi-d", "aws", () => new Response("from aws"));
+  const post = await withRandom(0, () => send(`https://multi-d.${ZONE}/api/posts`,
+    { method: "POST", body: "x", headers: { "content-length": "1" } }, multiEnv(100)));
+  assert.equal(post.status, 502);
+  assert.equal(post.headers.get("x-lily-cloud"), "gcp");
+});
+
+test("두 클라우드 모두 받지 못하면 503", async () => {
+  cloudOf("multi-e", "gcp", () => {
+    throw new TypeError("down");
+  });
+  cloudOf("multi-e", "aws", () => {
+    throw new TypeError("down");
+  });
+
+  const response = await withRandom(0.5, () => send(`https://multi-e.${ZONE}/`, {}, multiEnv(50)));
+
+  assert.equal(response.status, 503);
+});
+
+test("split 이 없는 앱은 지금처럼 PC 오리진으로 보낸다", async () => {
+  pcServes("single-a", () => html("pc"));
+  cloudOf("single-a", "gcp", () => new Response("should not"));
+
+  const response = await send(`https://single-a.${ZONE}/`, {}, multiEnv(null));
+
+  assert.equal(response.body, "pc");
+  assert.equal(response.headers.get("x-lily-cloud"), null);
+});

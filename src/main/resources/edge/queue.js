@@ -144,10 +144,10 @@ export class WriteQueue {
       return this.status(decodeURIComponent(url.pathname.slice("/status/".length)));
     }
     if (url.pathname === "/config" && request.method === "GET") {
-      return Response.json({ paths: this.paths(), snapshot: this.snapshot() });
+      return Response.json({ paths: this.paths(), snapshot: this.snapshot(), split: this.split() });
     }
     if (url.pathname === "/admin/config" && request.method === "PUT") {
-      const { paths, snapshot } = await request.json();
+      const { paths, snapshot, split } = await request.json();
       if (paths !== undefined) {
         this.sql.exec("INSERT INTO config (name, value) VALUES ('paths', ?) "
           + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(paths));
@@ -155,6 +155,12 @@ export class WriteQueue {
       if (snapshot !== undefined) {
         this.sql.exec("INSERT INTO config (name, value) VALUES ('snapshot', ?) "
           + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(snapshot));
+      }
+      if (split === null) {
+        this.sql.exec("DELETE FROM config WHERE name = 'split'");
+      } else if (split !== undefined) {
+        this.sql.exec("INSERT INTO config (name, value) VALUES ('split', ?) "
+          + "ON CONFLICT(name) DO UPDATE SET value = excluded.value", JSON.stringify(split));
       }
       return this.state();
     }
@@ -389,6 +395,12 @@ export class WriteQueue {
     return row === undefined ? true : JSON.parse(row.value) !== false;
   }
 
+  /** 멀티클라우드 앱이 GCP 로 보내는 비율(0~100). 멀티클라우드가 아니면 null */
+  split() {
+    const row = this.sql.exec("SELECT value FROM config WHERE name = 'split'").toArray()[0];
+    return row === undefined ? null : JSON.parse(row.value);
+  }
+
   /** 관리 화면: 등록 경로, 상태별 건수, 최근 요청 (헤더·본문은 보이지 않는다) */
   state() {
     const counts = { queued: 0, sent: 0, failed: 0 };
@@ -409,7 +421,7 @@ export class WriteQueue {
     const check = this.lastCheck();
     const lastCheck = check.at === null ? null : { ...check, at: new Date(check.at).toISOString() };
     const since = this.downSince();
-    return Response.json({ paths: this.paths(), snapshot: this.snapshot(), counts, items, lastCheck,
+    return Response.json({ paths: this.paths(), snapshot: this.snapshot(), split: this.split(), counts, items, lastCheck,
       downSince: since === null ? null : new Date(since).toISOString() });
   }
 
@@ -436,8 +448,9 @@ export class WriteQueue {
  * builder 가 부르는 관리 주소. Authorization: Bearer {QUEUE_KEY 에서 만든 관리 토큰}
  *
  *   GET    /apps/{host}/queue          등록 경로, 읽기 사본 사용 여부, 상태별 건수, 최근 요청
- *   PUT    /apps/{host}/queue/config   {"paths": ["/posts", ...], "snapshot": true} 준 값만 바꾼다.
- *                                      paths 가 빈 목록이면 쓰기 큐를 끈다 (쌓인 요청은 계속 보낸다), snapshot false 면 읽기 사본을 끈다
+ *   PUT    /apps/{host}/queue/config   {"paths": ["/posts", ...], "snapshot": true, "gcpPercent": 50} 준 값만 바꾼다.
+ *                                      paths 가 빈 목록이면 쓰기 큐를 끈다 (쌓인 요청은 계속 보낸다), snapshot false 면 읽기 사본을 끈다.
+ *                                      gcpPercent(0~100)가 있으면 멀티클라우드 앱이다 (worker.js 가 {app}-gcp·{app}-aws 로 나눈다). null 이면 끈다
  *   DELETE /apps/{host}/queue          쌓인 요청과 설정을 지운다 (앱 삭제)
  */
 async function admin(request, url, env) {
@@ -465,8 +478,15 @@ async function admin(request, url, env) {
       }
       change.snapshot = input.snapshot;
     }
+    if (input?.gcpPercent !== undefined) {
+      const percent = input.gcpPercent;
+      if (percent !== null && !(Number.isInteger(percent) && percent >= 0 && percent <= 100)) {
+        return Response.json({ error: "gcpPercent must be an integer 0..100 or null" }, { status: 400 });
+      }
+      change.split = percent;
+    }
     if (Object.keys(change).length === 0) {
-      return Response.json({ error: "give paths or snapshot" }, { status: 400 });
+      return Response.json({ error: "give paths, snapshot or gcpPercent" }, { status: 400 });
     }
     const response = await queue.fetch("https://queue/admin/config", {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(change),
@@ -474,7 +494,8 @@ async function admin(request, url, env) {
     // 이 isolate 는 바로 새 값을 쓴다. 다른 isolate 는 CONFIG_MILLIS 안에 DO 에서 다시 읽는다
     const saved = await response.clone().json().catch(() => null);
     if (saved !== null) {
-      configs.set(host, { paths: saved.paths ?? [], snapshot: saved.snapshot !== false, until: Date.now() + CONFIG_MILLIS });
+      configs.set(host, { paths: saved.paths ?? [], snapshot: saved.snapshot !== false, split: saved.split ?? null,
+        until: Date.now() + CONFIG_MILLIS });
     } else {
       configs.delete(host);
     }
@@ -512,7 +533,7 @@ function matches(paths, pathname) {
   return paths.some((path) => pathname === path || pathname.startsWith(path.endsWith("/") ? path : path + "/"));
 }
 
-/** host → { paths, snapshot, until } */
+/** host → { paths, snapshot, split, until } */
 const configs = new Map();
 
 /**
@@ -527,11 +548,13 @@ async function configOf(env, host) {
   try {
     const response = await queueOf(env, host).fetch("https://queue/config");
     const value = await response.json();
-    const config = { paths: value.paths ?? [], snapshot: value.snapshot !== false, until: Date.now() + CONFIG_MILLIS };
+    const config = { paths: value.paths ?? [], snapshot: value.snapshot !== false, split: value.split ?? null,
+      until: Date.now() + CONFIG_MILLIS };
     configs.set(host, config);
     return config;
   } catch (e) {
-    const config = { paths: [], snapshot: true, until: Date.now() + 5_000 };
+    // 멀티클라우드 비율은 마지막으로 읽은 값을 그대로 쓴다 (DO 가 잠깐 안 닿는다고 한쪽 클라우드로 몰지 않는다)
+    const config = { paths: [], snapshot: true, split: known?.split ?? null, until: Date.now() + 5_000 };
     configs.set(host, config);
     return config;
   }
@@ -547,6 +570,14 @@ export async function snapshotOn(env, host) {
     return true;
   }
   return (await configOf(env, host)).snapshot;
+}
+
+/** worker.js 가 요청마다 부른다. 멀티클라우드 앱이면 GCP 로 보내는 비율(0~100), 아니면 null */
+export async function splitOf(env, host) {
+  if (!env.QUEUE || !env.QUEUE_KEY) {
+    return null;
+  }
+  return (await configOf(env, host)).split;
 }
 
 function queueOf(env, host) {

@@ -20,8 +20,13 @@
 //   - 배포 화면에서 "장애 중 읽기 사본"을 끈 앱(앱 DO 설정 snapshot=false)은 저장도 응답도 하지 않는다
 //
 // 쓰기 큐(queue.js)에 등록된 앱의 POST 는 클라우드로 다시 보내지 않고 Durable Object 에 쌓았다가 PC 가 돌아오면 다시 보낸다.
+//
+// 멀티클라우드 앱(앱 DO 설정 split = GCP 로 보내는 비율 0~100): PC 가 없다. 요청마다 비율로 {app}-gcp.{zone} 또는
+// {app}-aws.{zone} 을 고르고, 고른 쪽이 받지 못하면 PC 와 같은 규칙으로 반대쪽에 다시 보낸다
+// (연결 실패·530 은 모든 메서드, 엣지 오류 페이지는 GET/HEAD/OPTIONS 만). 받지 못한 쪽은 DOWN_MILLIS 동안 건너뛴다.
+// 고정 세션(sticky)은 없다. 무상태 앱을 전제로 한다. 응답에 X-Lily-Cloud: gcp|aws 를 붙인다.
 
-import { queued, snapshotOn, WriteQueue } from "./queue.js";
+import { queued, snapshotOn, splitOf, WriteQueue } from "./queue.js";
 
 export { WriteQueue };
 
@@ -75,6 +80,10 @@ export default {
       return fetch(request);
     }
     const host = url.hostname;
+    const split = await splitOf(env, host);
+    if (split !== null) {
+      return multi(request, url, split, ctx);
+    }
     const write = await queued(request, url, env, () => isDown(host), () => markDown(host, ctx));
     if (write !== null) {
       return write;
@@ -314,6 +323,77 @@ async function edgeFailed(response) {
   }
   const text = await response.clone().text();
   return text.includes("/cdn-cgi/");
+}
+
+/**
+ * 멀티클라우드 앱. split 은 GCP 로 보내는 비율(0~100). 한쪽이 받지 못하면 반대쪽으로 한 번 더 보낸다
+ */
+async function multi(request, url, split, ctx) {
+  const host = url.hostname;
+  const order = Math.random() * 100 < split ? ["gcp", "aws"] : ["aws", "gcp"];
+  if ((await isDown(cloudKey(host, order[0]))) && !(await isDown(cloudKey(host, order[1])))) {
+    order.reverse();
+  }
+  const body = await replayableBody(request);
+  if (body === undefined) {
+    // 다시 보낼 수 없는 요청 (큰 본문, 길이 모르는 스트림). 고른 쪽으로만 보낸다
+    try {
+      return tagged(await fetch(toAlias(request, url, order[0], request.body)), order[0]);
+    } catch (e) {
+      markDown(cloudKey(host, order[0]), ctx);
+      return unavailable();
+    }
+  }
+  let response;
+  try {
+    response = await fetch(toAlias(request, url, order[0], body));
+  } catch (e) {
+    markDown(cloudKey(host, order[0]), ctx);
+    return other(request, url, order[1], body, ctx);
+  }
+  if (!(await edgeFailed(response))) {
+    return tagged(response, order[0]);
+  }
+  markDown(cloudKey(host, order[0]), ctx);
+  if (response.status !== 530 && !SAFE.has(request.method)) {
+    // 고른 쪽이 받았을 수 있다. 두 번 처리되지 않게 그대로 돌려준다 (다음 요청부터는 반대쪽으로)
+    return tagged(response, order[0]);
+  }
+  return other(request, url, order[1], body, ctx);
+}
+
+async function other(request, url, cloud, body, ctx) {
+  try {
+    const response = await fetch(toAlias(request, url, cloud, body));
+    if (await edgeFailed(response)) {
+      markDown(cloudKey(url.hostname, cloud), ctx);
+    }
+    return tagged(response, cloud);
+  } catch (e) {
+    markDown(cloudKey(url.hostname, cloud), ctx);
+    return unavailable();
+  }
+}
+
+/** {app}.{zone} → {app}-{cloud}.{zone}. 그 클라우드 Ingress 가 이 호스트를 별칭으로 받는다 */
+function toAlias(request, url, cloud, body) {
+  const target = new URL(url);
+  const dot = url.hostname.indexOf(".");
+  target.hostname = url.hostname.slice(0, dot) + "-" + cloud + url.hostname.slice(dot);
+  const forwarded = rebuild(request, target, body);
+  forwarded.headers.set("X-Lily-Original-Host", url.hostname);
+  return forwarded;
+}
+
+function tagged(response, cloud) {
+  const headers = new Headers(response.headers);
+  headers.set("X-Lily-Cloud", cloud);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers, webSocket: response.webSocket });
+}
+
+/** 클라우드별 장애 표시 키. 존 안의 호스트여야 Cache API 에 둘 수 있다 */
+function cloudKey(host, cloud) {
+  return cloud + "." + host;
 }
 
 /** {app}.{zone} → {app}-cloud.{zone}. 이미 클라우드 주소면 null */

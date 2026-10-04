@@ -226,17 +226,64 @@ public class EdgeWorker {
     public String attach(String app, String cloudOrigin) {
         String target = cloudOrigin == null || cloudOrigin.isBlank() ? origin : cloudOrigin;
         String cloud = cloudHost(app);
-        JsonNode record = record(cloud);
+        ensureCname(cloud, target);
+        String pattern = ensureRoute(app);
+        return "edge: " + pattern + " -> " + edge.scriptName() + ", fallback " + cloud;
+    }
+
+    /** 멀티클라우드 앱을 받을 수 있다: Worker 와 앱별 설정(비율)을 둘 쓰기 큐 DO, GCP 오리진이 모두 있다 */
+    public boolean multiReady() {
+        return enabled() && queue.enabled() && !extraOrigin.isBlank();
+    }
+
+    /** 멀티클라우드 앱의 클라우드별 Ingress 별칭 {app}-aws.{zone}·{app}-gcp.{zone} */
+    public String multiHost(String app, String cloud) {
+        return label(app) + "-" + cloud + "." + normalize(settings.zoneName());
+    }
+
+    /**
+     * 멀티클라우드 앱. {app}-aws → ALB, {app}-gcp → GCP 로드밸런서 CNAME 을 두고 공개 주소에 Worker 라우트를 건다.
+     * 비율은 처음 걸 때만 정한다 (이미 있으면 화면에서 바꾼 값을 그대로 둔다)
+     *
+     * @return 화면 로그에 남길 한 줄
+     */
+    public String attachMulti(String app, int initialGcpPercent) {
+        if (!multiReady()) {
+            throw new IllegalStateException("멀티클라우드에는 엣지 Worker, 쓰기 큐 DO, GCP 오리진이 필요하다");
+        }
+        ensureCname(multiHost(app, "aws"), origin);
+        ensureCname(multiHost(app, "gcp"), extraOrigin);
+        String pattern = ensureRoute(app);
+        if (!queue.state(app).path("split").isInt()) {
+            queue.split(app, initialGcpPercent);
+        }
+        return "edge: " + pattern + " -> " + edge.scriptName() + ", split " + multiHost(app, "gcp")
+                + " / " + multiHost(app, "aws");
+    }
+
+    /** @param gcpPercent 0~100 */
+    public JsonNode split(String app, int gcpPercent) {
+        return queue.split(app, gcpPercent);
+    }
+
+    /** 멀티클라우드 앱의 GCP 비율. 멀티클라우드가 아니면 null */
+    public Integer splitOf(String app) {
+        JsonNode split = queue.state(app).path("split");
+        return split.isInt() ? split.asInt() : null;
+    }
+
+    private void ensureCname(String host, String target) {
+        JsonNode record = record(host);
         String content = record == null ? "" : normalize(record.path("content").asText(""));
         // 다른 클라우드 오리진(ALB·GCP)이면 앱을 다른 클라우드로 옮긴 것이다. 새 오리진으로 바꾼다. 그 밖의 레코드는 건드리지 않는다
         boolean knownOrigin = content.equals(origin) || (!extraOrigin.isBlank() && content.equals(extraOrigin));
         if (record != null && !target.equals(content) && !knownOrigin) {
-            throw new IllegalStateException(cloud + " 은 다른 곳을 가리킨다");
+            throw new IllegalStateException(host + " 은 다른 곳을 가리킨다");
         }
         if (record == null || !record.path("proxied").asBoolean(false) || !target.equals(content)) {
             ObjectNode body = MAPPER.createObjectNode();
             body.put("type", "CNAME");
-            body.put("name", cloud);
+            body.put("name", host);
             body.put("content", target);
             body.put("proxied", true);
             body.put("ttl", 1);
@@ -246,8 +293,6 @@ public class EdgeWorker {
                 api.call("PUT", zone() + "/dns_records/" + record.path("id").asText(), body);
             }
         }
-        String pattern = ensureRoute(app);
-        return "edge: " + pattern + " -> " + edge.scriptName() + ", fallback " + cloud;
     }
 
     /**
@@ -290,11 +335,12 @@ public class EdgeWorker {
         if (route != null) {
             api.call("DELETE", zone() + "/workers/routes/" + route.path("id").asText(), null);
         }
-        String cloud = cloudHost(app);
-        JsonNode record = record(cloud);
-        String content = record == null ? "" : normalize(record.path("content").asText(""));
-        if (record != null && (origin.equals(content) || (!extraOrigin.isBlank() && extraOrigin.equals(content)))) {
-            api.call("DELETE", zone() + "/dns_records/" + record.path("id").asText(), null);
+        for (String host : List.of(cloudHost(app), multiHost(app, "aws"), multiHost(app, "gcp"))) {
+            JsonNode record = record(host);
+            String content = record == null ? "" : normalize(record.path("content").asText(""));
+            if (record != null && (origin.equals(content) || (!extraOrigin.isBlank() && extraOrigin.equals(content)))) {
+                api.call("DELETE", zone() + "/dns_records/" + record.path("id").asText(), null);
+            }
         }
     }
 
