@@ -268,6 +268,13 @@ public class BuildService {
         // 실패하면 어디까지 왔는지로 원인을 본다
         Attempt attempt = new Attempt(request);
         try {
+            String owner = multiAliasOwner(request.appName());
+            if (owner != null) {
+                // 멀티클라우드 앱 {owner} 의 Ingress 가 이 호스트를 별칭으로 쓴다. 배포는 Ingress 에서 거절되고,
+                // 지우면 그 앱의 별칭 주소를 지운다
+                throw new IllegalStateException("이름이 멀티클라우드 앱 " + owner + " 의 별칭(" + request.appName()
+                        + ")과 겹친다. 다른 이름으로 배포한다");
+            }
             String commit = prepared != null && prepared.commit() != null
                     ? prepared.commit() : github.resolveCommit(request);
             attempt.commit = commit;
@@ -391,6 +398,17 @@ public class BuildService {
             }
             failDiagnosed(build, attempt, e.getMessage());
         }
+    }
+
+    /** {app}-aws·{app}-gcp 이름이고 {app} 이 멀티클라우드 앱이면 그 {app}. 아니면 null */
+    String multiAliasOwner(String app) {
+        if (app == null || !(app.endsWith("-aws") || app.endsWith("-gcp"))) {
+            return null;
+        }
+        String owner = app.substring(0, app.length() - 4);
+        return store.findAll().stream()
+                .anyMatch(build -> owner.equals(build.getAppName()) && build.getLogs().contains(MULTI_CLOUD))
+                ? owner : null;
     }
 
     /** 멀티클라우드 빌드 표시. 앱의 클라우드 판정({@link AgentDeployService#multiCloud})이 본다 */

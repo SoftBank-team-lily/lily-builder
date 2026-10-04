@@ -147,6 +147,20 @@ class MultiCloudDeployTest {
     }
 
     @Test
+    void 멀티클라우드_앱이_있으면_그_별칭과_같은_이름의_앱은_빌드하지_않고_거절한다() {
+        Build multi = new Build("m1", multi("postgres"));
+        multi.log(BuildService.MULTI_CLOUD);
+        store.save(multi);
+
+        Build build = service.start(new BuildRequest("https://github.com/org/repo", null, null, null, "blog-aws",
+                8000, null, null, null, Map.of()));
+
+        assertThat(build.getStatus()).isEqualTo(Build.Status.FAILED);
+        assertThat(build.getLogs()).anyMatch(line -> line.contains("멀티클라우드 앱 blog"));
+        verify(kaniko, never()).build(anyString(), any(), anyString(), any(), any());
+    }
+
+    @Test
     void MySQL은_빌드하지_않고_거절한다() {
         Build build = service.start(multi("mysql"));
 
