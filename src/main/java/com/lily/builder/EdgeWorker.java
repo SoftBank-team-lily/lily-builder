@@ -227,10 +227,13 @@ public class EdgeWorker {
         String target = cloudOrigin == null || cloudOrigin.isBlank() ? origin : cloudOrigin;
         String cloud = cloudHost(app);
         JsonNode record = record(cloud);
-        if (record != null && !target.equals(normalize(record.path("content").asText("")))) {
+        String content = record == null ? "" : normalize(record.path("content").asText(""));
+        // 다른 클라우드 오리진(ALB·GCP)이면 앱을 다른 클라우드로 옮긴 것이다. 새 오리진으로 바꾼다. 그 밖의 레코드는 건드리지 않는다
+        boolean knownOrigin = content.equals(origin) || (!extraOrigin.isBlank() && content.equals(extraOrigin));
+        if (record != null && !target.equals(content) && !knownOrigin) {
             throw new IllegalStateException(cloud + " 은 다른 곳을 가리킨다");
         }
-        if (record == null || !record.path("proxied").asBoolean(false)) {
+        if (record == null || !record.path("proxied").asBoolean(false) || !target.equals(content)) {
             ObjectNode body = MAPPER.createObjectNode();
             body.put("type", "CNAME");
             body.put("name", cloud);

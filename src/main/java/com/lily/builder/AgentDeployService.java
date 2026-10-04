@@ -487,6 +487,11 @@ public class AgentDeployService {
     public record AgentRemoval(String agent, String status, String message) {
     }
 
+    /** 이 앱을 마지막으로 다룬 에이전트 key (가장 최근 성공 빌드 기준) */
+    public Optional<String> agentOf(String app) {
+        return agentFor(app);
+    }
+
     private Optional<String> agentFor(String app) {
         Optional<Build> latest = store.findAll().stream()
                 .filter(build -> app.equals(build.getAppName()) && build.getStatus() == Build.Status.SUCCEEDED)
