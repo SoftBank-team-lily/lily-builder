@@ -232,4 +232,25 @@ class EdgeWorkerTest {
             throw new IllegalStateException(e);
         }
     }
+
+    @Test
+    void 앱을_다른_클라우드로_옮겼으면_클라우드_주소를_새_오리진으로_바꾼다() {
+        EdgeWorker withGcp = new EdgeWorker(
+                new PlatformProperties.Cloudflare("token", "acc", "zone", "lilycloud.kr"),
+                new PlatformProperties.Edge(true, "lily-edge"), "alb.example.net",
+                (method, path, body) -> {
+                    calls.add(method + " " + path + (body == null ? "" : " " + body));
+                    if (path.startsWith(Z + "/dns_records?name=")) {
+                        return records;
+                    }
+                    return path.equals(Z + "/workers/routes") && "GET".equals(method) ? routes : json("{}");
+                },
+                (account, name, metadata, modules) -> uploads.add(account + "/" + name), "gcp.lilycloud.kr");
+        records = json("[{\"id\":\"r1\",\"type\":\"CNAME\",\"content\":\"alb.example.net\",\"proxied\":true}]");
+
+        withGcp.attach("blog", "gcp.lilycloud.kr");
+
+        assertThat(calls).anyMatch(call -> call.startsWith("PUT " + Z + "/dns_records/r1 ")
+                && call.contains("\"content\":\"gcp.lilycloud.kr\""));
+    }
 }

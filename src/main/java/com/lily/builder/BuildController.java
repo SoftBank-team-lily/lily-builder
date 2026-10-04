@@ -41,6 +41,8 @@ public class BuildController {
     private final OnPremAppRemoval onPrem;
     /** 다른 클라우드로 옮기는 중인 앱의 배포·롤백·내리기를 막는다. 테스트 생성자에서는 null */
     private final AppMigration migration;
+    /** AWS 클러스터 앱에 GCP 앱 상태를 더한 목록. 테스트 생성자에서는 null (AWS 만) */
+    private final AllApps allApps;
     private final ObjectMapper json = new ObjectMapper();
 
     BuildController(BuildService service, ClusterApps clusterApps, CicdClient cicd, AgentDeployService agents,
@@ -50,12 +52,14 @@ public class BuildController {
 
     public BuildController(BuildService service, ClusterApps clusterApps, CloudRouting clouds, AgentDeployService agents,
                            AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem) {
-        this(service, clusterApps, clouds, agents, addresses, edge, onPrem, null);
+        this(service, clusterApps, clouds, agents, addresses, edge, onPrem, null, null);
     }
 
     @Autowired
     public BuildController(BuildService service, ClusterApps clusterApps, CloudRouting clouds, AgentDeployService agents,
-                           AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem, AppMigration migration) {
+                           AppAddress addresses, EdgeWorker edge, OnPremAppRemoval onPrem, AppMigration migration,
+                           AllApps allApps) {
+        this.allApps = allApps;
         this.migration = migration;
         this.onPrem = onPrem;
         this.edge = edge;
@@ -131,7 +135,7 @@ public class BuildController {
     /** 지금 k3s 에 떠 있는 앱 (클러스터 기준) */
     @GetMapping("/api/apps")
     public List<ClusterApps.RunningApp> apps() {
-        return clusterApps.list();
+        return allApps == null ? clusterApps.list() : allApps.list();
     }
 
     /**

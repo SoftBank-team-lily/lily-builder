@@ -139,8 +139,10 @@ class AppMigrationTest {
         when(gcp.release(APP)).thenReturn(ok("{\"activeSlot\":null,\"slots\":[]}"));
         Build agent = new Build("agent001", request());
         agent.log("queued: x target=onprem agent=abcdefabcdef");
+        agent.status(Build.Status.SUCCEEDED, "done");
         store.save(agent);
-        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("내 PC");
+        // 내 PC 로 배포한 적 있는 앱은 하이브리드 경로로 간다. 에이전트를 찾지 못하면 거절한다
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("에이전트");
 
         verify(aws, never()).stop(anyString());
         assertThat(migration.inProgress(APP)).isFalse();
@@ -278,5 +280,53 @@ class AppMigrationTest {
         Build saved = store.find(record.getId()).orElseThrow();
         assertThat(saved.getStatus()).isEqualTo(Build.Status.FAILED);
         assertThat(saved.getLogs()).anyMatch(l -> l.contains("기록 테이블 공유"));
+    }
+
+    private void agentApp(String database, String home, boolean connected) {
+        Build agent = new Build("agent001", request());
+        agent.log("queued: x target=onprem agent=abcdefabcdef");
+        agent.log(database);
+        agent.status(Build.Status.SUCCEEDED, "done");
+        store.save(agent);
+        com.fasterxml.jackson.databind.node.ObjectNode state = new com.fasterxml.jackson.databind.ObjectMapper()
+                .createObjectNode().put("home", home);
+        when(deploys.burstState(APP)).thenReturn(Optional.of(new AgentHub.Burst(connected, true, state, Map.of(), APP)));
+        when(deploys.agentOf(APP)).thenReturn(Optional.of("abcdefabcdef"));
+    }
+
+    @Test
+    void 내_PC_앱은_옛_대기_배포만_지우고_클라우드를_바꾸며_PC_앱과_주소와_DB_는_건드리지_않는다() {
+        agentApp("database: postgres on agent (my pc)", "ONPREM", true);
+
+        Build record = migration.start(APP, request().withCloudProvider("GCP"));
+
+        verify(aws).remove(APP, false);
+        verify(aws, never()).stop(anyString());
+        verify(addresses, never()).pointCloud(anyString(), any());
+        verify(copy, never()).copy(anyString(), anyString(), anyString(), any());
+        verify(builds, never()).prepareImage(any(), anyString());
+        assertThat(record.getStatus()).isEqualTo(Build.Status.SUCCEEDED);
+        assertThat(AgentDeployService.lastCloudProvider(record)).isEqualTo("GCP");
+        // 에이전트 쪽 조회가 계속 같은 에이전트를 찾게 key 를 남긴다
+        assertThat(record.getLogs()).contains(AgentBurst.STANDBY_MARK + "abcdefabcdef");
+        AppMigration.View view = migration.status(APP).orElseThrow();
+        assertThat(view.state()).isEqualTo("FINALIZED");
+        assertThat(view.hybrid()).isTrue();
+        assertThat(migration.inProgress(APP)).isFalse();
+    }
+
+    @Test
+    void 내_PC_앱은_거점이_클라우드거나_에이전트가_끊겼거나_DB_가_RDS_터널이면_옮기지_않는다() {
+        agentApp("database: postgres on agent (my pc)", "CLOUD", true);
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("거점");
+
+        agentApp("database: postgres on agent (my pc)", "ONPREM", false);
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("연결");
+
+        agentApp("database: postgres via platform tunnel 172.17.0.1:15432", "ONPREM", true);
+        assertThatThrownBy(() -> migration.start(APP, request().withCloudProvider("GCP"))).hasMessageContaining("RDS 터널");
+
+        verify(aws, never()).remove(anyString(), anyBoolean());
+        assertThat(migration.status(APP)).isEmpty();
     }
 }

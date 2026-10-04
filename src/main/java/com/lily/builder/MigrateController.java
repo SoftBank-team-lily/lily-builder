@@ -46,13 +46,13 @@ public class MigrateController {
 
     /** 원본으로 되돌린다. 옮긴 뒤 새 클라우드에 쓴 데이터는 버리므로 {@code discardTargetWrites=true} 가 있어야 한다 */
     @PostMapping("/rollback")
-    public AppMigration.View rollback(@PathVariable String appName, @RequestBody(required = false) RollbackRequest request) {
+    public ResponseEntity<AppMigration.View> rollback(@PathVariable String appName, @RequestBody(required = false) RollbackRequest request) {
         name(appName);
         if (request == null || !Boolean.TRUE.equals(request.discardTargetWrites())) {
             throw new IllegalArgumentException("옮긴 뒤 새 클라우드에 쓴 데이터는 버린다. discardTargetWrites=true 로 확인한다");
         }
         migration.rollback(appName);
-        return migration.status(appName).orElseThrow();
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(migration.status(appName).orElseThrow());
     }
 
     public record RollbackRequest(Boolean discardTargetWrites) {
