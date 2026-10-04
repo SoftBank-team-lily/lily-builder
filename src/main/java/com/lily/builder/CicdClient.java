@@ -104,6 +104,17 @@ public class CicdClient {
     }
 
     /** 직전 릴리스로 앱과 스키마를 되돌린다. lily-cicd 의 상태 코드와 본문을 그대로 돌려준다 (200, 409, 400, 500) */
+    /** 대기 슬롯의 DB 접속 정보를 바꾸고 Pod 를 다시 띄운다 (PC 장애 때 클라우드 사본으로) */
+    public AppStatus switchDatabase(String appName, Map<String, String> env) {
+        return http.put().uri("/api/apps/{app}/database", appName)
+                .body(Map.of("env", env)).retrieve().body(AppStatus.class);
+    }
+
+    /** {@link #switchDatabase} 전의 DB 로 되돌린다. 바꾼 적이 없으면 그대로 */
+    public AppStatus restoreDatabase(String appName) {
+        return http.delete().uri("/api/apps/{app}/database", appName).retrieve().body(AppStatus.class);
+    }
+
     public Passthrough rollback(String appName, boolean appOnly) {
         return exchange(http.post().uri("/api/deployments/{app}/rollback", appName).body(Map.of("appOnly", appOnly)));
     }
