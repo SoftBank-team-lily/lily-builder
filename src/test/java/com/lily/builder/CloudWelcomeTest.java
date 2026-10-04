@@ -77,4 +77,27 @@ class CloudWelcomeTest {
                 .hasMessage(CloudWelcome.MISSING_TUNNEL);
         verify(hub, never()).send(anyString(), anyString());
     }
+
+    @Test
+    void AWS_앱을_배포하면_에이전트의_버스트와_역방향_터널을_AWS_값으로_되돌린다() throws Exception {
+        PlatformProperties platform = mock(PlatformProperties.class);
+        when(platform.burst()).thenReturn(new PlatformProperties.Burst("43.200.152.53", 80, "alb.example.net"));
+        when(hub.sshPublicKey(KEY)).thenReturn("ssh-ed25519 AAAA lily-agent");
+        when(certificates.enabled()).thenReturn(true);
+        when(certificates.settings()).thenReturn(new PlatformProperties.Tunnel("43.200.152.53", "lily-tunnel",
+                "rds.example", 5432, "ca", 24, "172.31.10.248", 20000, 20999));
+        when(ports.enabled()).thenReturn(true);
+        when(ports.portOf(KEY)).thenReturn(20003);
+        when(certificates.sign(KEY, "ssh-ed25519 AAAA lily-agent", 20003)).thenReturn("cert");
+        CloudWelcome welcome = new CloudWelcome(hub, certificates, ports, new CloudClients(new CloudProfiles(
+                "", "", "gcp-pull", "", "", "", 80, "", "", "lily-tunnel", "", 5432, "")), platform);
+
+        assertThat(welcome.retargetAws(KEY, "blog")).isTrue();
+
+        JsonNode message = sent();
+        assertThat(message.path("burst").path("ingressHost").asText()).isEqualTo("43.200.152.53");
+        assertThat(message.path("burst").path("cloudOrigin").asText()).isEqualTo("alb.example.net");
+        assertThat(message.path("database").path("remoteHost").asText()).isEqualTo("rds.example");
+        assertThat(message.path("database").path("reverseHost").asText()).isEqualTo("172.31.10.248");
+    }
 }

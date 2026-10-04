@@ -173,6 +173,15 @@ public class AgentDeployService {
                     && hub.platformDatabase(agentKey);
             if ("GCP".equals(provider)) {
                 welcome.retarget(agentKey, resolved.appName(), cloudDb);
+            } else if (!only && welcome != null && hub.supports(agentKey, "cloud-target")) {
+                // 이 에이전트가 전에 GCP 를 봤으면 AWS 로 되돌린다 (같은 값이면 에이전트는 바꾸지 않는다)
+                try {
+                    if (welcome.retargetAws(agentKey, resolved.appName())) {
+                        build.log("cloud: agent targets AWS");
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("aws retarget failed: key={} app={} message={}", agentKey, resolved.appName(), e.getMessage());
+                }
             }
             if (cloudDb) {
                 AgentHub.Tunnel at = hub.tunnel(agentKey);
