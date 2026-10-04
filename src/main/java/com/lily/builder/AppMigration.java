@@ -37,6 +37,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * 어느 단계에서 실패하든 원본을 다시 올리고 주소를 되돌린 뒤 새 쪽을 지운다. 끝나면 HOLD: 원본은 replicas 0 과
  * DB 를 그대로 두고, 사용자가 되돌리거나({@link #rollback}) 정리한다({@link #finalizeMigration}).
  *
+ * <p>내 PC(하이브리드) 앱은 클라우드에 대기 Pod 만 있다 ({@link #startHybrid}). 옛 클라우드의 대기 배포를 지우고 앱의 클라우드를
+ * 바꾸면, 다음 내 PC 배포가 에이전트의 버스트·터널 대상을 바꾸고(cloud-target) 새 클라우드에 대기 Pod 를 만든다.
+ *
  * <p>상태는 배포 이력 저장소에 빌드 한 건(옮기기 기록)으로 남긴다. 기록은 옮기기 전 클라우드를
  * {@code cloudProvider=} 로 적고, 전환을 마치면 새 클라우드를 덧붙인다 ({@link AgentDeployService#cloudProvider} 는 마지막 줄을 본다).
  * 옮기는 중에 만든 빌드에는 {@link #PART} 를 남겨 앱의 클라우드 판정에서 뺀다.
@@ -58,7 +61,8 @@ public class AppMigration {
     private static final Set<Build.Status> RUNNING = Set.of(Build.Status.QUEUED, Build.Status.BUILDING,
             Build.Status.DEPLOYING);
 
-    public enum Step { PREPARE, DATABASE, FREEZE, COPY, DEPLOY, SWITCH }
+    /** STANDBY: 내 PC 앱의 옛 대기 배포 정리. ROLLBACK: HOLD 되돌리기. 둘은 {@link #undo} 대상이 아니다 */
+    public enum Step { PREPARE, DATABASE, FREEZE, COPY, DEPLOY, SWITCH, STANDBY, ROLLBACK }
 
     /** 공개 주소를 한 번 불러 상태 코드를 돌려준다. 연결이 안 되면 -1 */
     @FunctionalInterface
@@ -135,6 +139,13 @@ public class AppMigration {
         if (!moving.add(app)) {
             throw new IllegalStateException(app + " 은 이미 옮기는 중이다");
         }
+        if (hybrid(app)) {
+            try {
+                return startHybrid(app, request, from, to);
+            } finally {
+                moving.remove(app);
+            }
+        }
         try {
             Plan plan = check(app, from, to);
             Build record = new Build(UUID.randomUUID().toString().substring(0, 8), request);
@@ -175,10 +186,6 @@ public class AppMigration {
         List<Build> history = store.findAll().stream().filter(b -> app.equals(b.getAppName())).toList();
         if (history.isEmpty()) {
             throw new IllegalStateException(app + " 의 배포 기록이 없다");
-        }
-        if (history.stream().anyMatch(b -> AgentDeployService.onPrem(b)
-                || b.getLogs().stream().anyMatch(l -> l.startsWith(AgentBurst.STANDBY_MARK)))) {
-            throw new IllegalStateException("내 PC(하이브리드) 앱은 아직 옮기지 않는다. 거점을 내 PC 로 옮긴 뒤 다시 배포한다");
         }
         if (history.stream().anyMatch(b -> RUNNING.contains(b.getStatus()))) {
             throw new IllegalStateException(app + " 은 배포가 진행 중이다");
@@ -321,9 +328,94 @@ public class AppMigration {
                 .ifPresent(id -> quietly(record, plan.to() + " DB 지우기", () -> provisioner(plan.to()).deleteById(id)));
     }
 
+    /** 내 PC(에이전트)로 배포한 적 있는 앱 */
+    private boolean hybrid(String app) {
+        return store.findAll().stream().filter(b -> app.equals(b.getAppName()))
+                .anyMatch(b -> AgentDeployService.onPrem(b)
+                        || b.getLogs().stream().anyMatch(l -> l.startsWith(AgentBurst.STANDBY_MARK)));
+    }
+
     /**
-     * HOLD 를 되돌린다: 원본을 다시 올리고 주소를 원본으로 바꾼 뒤 새 쪽 앱과 DB 를 지운다.
-     * 옮긴 뒤 새 쪽에 쓴 데이터는 버린다 (원본 DB 는 옮길 때의 상태다).
+     * 내 PC(하이브리드) 앱의 클라우드를 바꾼다. 앱은 계속 PC 가 받으므로 멈추지 않는다.
+     * <ol>
+     *   <li>확인: 에이전트가 붙어 있고, 거점이 PC 이고, DB 가 PC(local) 또는 사용자 DB(external) 이거나 없다
+     *       (클라우드 DB 터널은 DB 를 옮겨야 해서 아직 거절한다)</li>
+     *   <li>옛 클라우드의 대기 배포를 지운다 (DB 는 건드리지 않는다. local·external 은 클러스터 DB 가 없다)</li>
+     *   <li>앱의 클라우드를 바꾼다. 이후 버스팅·장애 전환·대기 배포 요청이 새 클라우드로 간다</li>
+     * </ol>
+     * 끝나면 화면이 내 PC 로 다시 배포한다. 그 배포가 에이전트에 cloud-target 을 보내고, 배포가 끝나면 에이전트가 새 클라우드에
+     * 대기 Pod 를 요청한다. 그 사이 몇 분은 넘침과 PC 장애 때 클라우드 전환이 없다 (엣지 읽기 사본은 그대로).
+     * 기록에는 에이전트 key 를 남겨 에이전트 쪽 조회({@link AgentDeployService#ownedBy} 등)가 그대로 이 에이전트를 찾게 한다.
+     */
+    Build startHybrid(String app, BuildRequest request, String from, String to) {
+        if (!addresses.enabled()) {
+            throw new IllegalStateException("공개 주소(Cloudflare 존)가 설정되지 않았다");
+        }
+        if ("GCP".equals(to) || "GCP".equals(from)) {
+            CloudProfiles gcp = clouds == null ? null : clouds.profile();
+            if (gcp == null || !gcp.deployConfigured() || !gcp.burstConfigured()) {
+                throw new IllegalStateException("GCP 가 연결되지 않았다 (GCP_CICD_URL, GCP_REGISTRY, GCP_BURST_INGRESS_HOST, GCP_CUTOVER_ORIGIN)");
+            }
+        }
+        List<Build> history = store.findAll().stream().filter(b -> app.equals(b.getAppName())).toList();
+        if (history.stream().anyMatch(b -> RUNNING.contains(b.getStatus()))) {
+            throw new IllegalStateException(app + " 은 배포가 진행 중이다");
+        }
+        AgentHub.Burst burst = deploys.burstState(app)
+                .orElseThrow(() -> new IllegalStateException(app + " 을 배포한 에이전트를 찾지 못했다"));
+        if (!burst.connected()) {
+            throw new IllegalStateException("내 PC 에이전트가 연결돼 있지 않다. 옮긴 뒤 내 PC 로 다시 배포해야 해서 에이전트가 필요하다");
+        }
+        String home = burst.state() == null ? "" : burst.state().path("home").asText("");
+        if (!"ONPREM".equalsIgnoreCase(home)) {
+            throw new IllegalStateException("거점이 내 PC 일 때만 옮긴다 (지금: " + (home.isBlank() ? "모름" : home)
+                    + "). 거점을 내 PC 로 옮긴 뒤 다시 시도한다");
+        }
+        Build agentBuild = history.stream().filter(AgentDeployService::onPrem)
+                .filter(b -> b.getStatus() == Build.Status.SUCCEEDED)
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .orElseThrow(() -> new IllegalStateException(app + " 은 내 PC 배포 기록이 없다"));
+        if (agentBuild.getLogs().stream().anyMatch(l -> l.startsWith("database: ") && l.contains(" via platform tunnel "))) {
+            throw new IllegalStateException("DB 를 클라우드(RDS 터널)에 둔 내 PC 앱은 아직 옮기지 않는다 (DB 를 옮겨야 한다)");
+        }
+        String key = deploys.agentOf(app)
+                .orElseThrow(() -> new IllegalStateException(app + " 을 배포한 에이전트를 찾지 못했다"));
+
+        Build record = new Build(UUID.randomUUID().toString().substring(0, 8), request);
+        record.log(RECORD + "from=" + from + " to=" + to + " hybrid");
+        record.log("deploymentMode=HYBRID");
+        record.log("cloudProvider=" + from);
+        record.log(AgentBurst.STANDBY_MARK + key);
+        record.log("migrate: database none");
+        record.status(Build.Status.DEPLOYING, "migrate: started");
+        store.save(record);
+        try {
+            record.log(STEP + "STANDBY");
+            CicdClient.Passthrough removed = cicd(from).remove(app, false);
+            if (removed.status() != 200 && removed.status() != 404) {
+                throw new IllegalStateException(from + " 대기 배포를 지우지 못했다: " + removed.status() + " " + removed.body());
+            }
+            record.log("migrate: " + from + " 대기 배포 정리 " + removed.status());
+        } catch (RuntimeException e) {
+            record.log("migrate: failed at STANDBY: " + e.getMessage());
+            record.status(Build.Status.FAILED, "failed: " + e.getMessage());
+            store.save(record);
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+        record.log(COMMITTED);
+        record.log("cloudProvider=" + to);
+        record.log("migrate: downtime 0ms");
+        record.log(FINALIZED);
+        record.status(Build.Status.SUCCEEDED, "migrate: 다음 내 PC 배포가 " + to + " 에 대기 Pod 를 만든다");
+        store.save(record);
+        log.info("hybrid migration committed: app={} {} -> {}", app, from, to);
+        return record;
+    }
+
+    /**
+     * HOLD 를 되돌린다: 원본을 다시 올리고 주소를 원본으로 바꾼 뒤 (반영을 기다려) 새 쪽 앱과 DB 를 지운다.
+     * 옮긴 뒤 새 쪽에 쓴 데이터는 버린다 (원본 DB 는 옮길 때의 상태다). 반영 대기로 1~2분 걸려서 뒤에서 하고,
+     * 진행은 {@link #status} 로 본다 (RUNNING, 단계 ROLLBACK)
      */
     public Build rollback(String app) {
         Build record = holding(app);
@@ -331,6 +423,26 @@ public class AppMigration {
         if (!moving.add(app)) {
             throw new IllegalStateException(app + " 은 이미 옮기는 중이다");
         }
+        record.log(STEP + "ROLLBACK");
+        record.status(Build.Status.DEPLOYING, "migrate: " + plan.from() + " 로 되돌리는 중");
+        store.save(record);
+        try {
+            runner.run(() -> {
+                try {
+                    rollBack(record, plan);
+                } finally {
+                    moving.remove(app);
+                }
+            });
+        } catch (RuntimeException e) {
+            moving.remove(app);
+            throw e;
+        }
+        return record;
+    }
+
+    private void rollBack(Build record, Plan plan) {
+        String app = plan.app();
         try {
             CicdClient.Passthrough started = cicd(plan.from()).start(app);
             if (started.status() != 200) {
@@ -338,17 +450,21 @@ public class AppMigration {
             }
             awaitReady(cicd(plan.from()), app);
             addresses.pointCloud(app, origin(plan.from()));
-            // 반영이 늦은 엣지가 아직 새 쪽으로 보낸다. 기다린 뒤 지운다
-            sleep(switchGrace);
-            quietly(record, plan.to() + " 앱 지우기", () -> cicd(plan.to()).remove(app, plan.database() != null));
-            record.log(ROLLED_BACK);
-            record.log("cloudProvider=" + plan.from());
-            record.status(Build.Status.ROLLED_BACK, "migrate: " + plan.from() + " 로 되돌렸다 (" + plan.to() + " 에 쓴 데이터는 버렸다)");
+        } catch (RuntimeException e) {
+            // 주소를 바꾸기 전이라 새 쪽이 계속 받는다. HOLD 로 두고 다시 할 수 있게 한다
+            log.warn("rollback failed: app={} message={}", app, e.getMessage());
+            record.log("migrate: rollback failed: " + e.getMessage());
+            record.status(Build.Status.SUCCEEDED, "migrate: hold (되돌리지 못했다: " + e.getMessage() + ")");
             store.save(record);
-            return record;
-        } finally {
-            moving.remove(app);
+            return;
         }
+        // 반영이 늦은 엣지가 아직 새 쪽으로 보낸다. 기다린 뒤 지운다
+        sleep(switchGrace);
+        quietly(record, plan.to() + " 앱 지우기", () -> cicd(plan.to()).remove(app, plan.database() != null));
+        record.log(ROLLED_BACK);
+        record.log("cloudProvider=" + plan.from());
+        record.status(Build.Status.ROLLED_BACK, "migrate: " + plan.from() + " 로 되돌렸다 (" + plan.to() + " 에 쓴 데이터는 버렸다)");
+        store.save(record);
     }
 
     /** HOLD 를 끝낸다: 원본 클러스터의 앱과 DB 를 지운다. 공개 주소는 건드리지 않는다 */
@@ -398,13 +514,15 @@ public class AppMigration {
                     .reduce((a, b) -> b).map(l -> l.substring(STEP.length())).orElse("");
             Long downtime = record.getLogs().stream().filter(l -> l.startsWith("migrate: downtime "))
                     .map(l -> Long.parseLong(l.replaceAll("\\D+", ""))).findFirst().orElse(null);
-            return new View(app, record.getId(), plan.from(), plan.to(), state, step, downtime,
+            boolean hybrid = record.getLogs().stream().anyMatch(l -> l.startsWith(RECORD) && l.endsWith(" hybrid"));
+            return new View(app, record.getId(), plan.from(), plan.to(), state, step, downtime, hybrid,
                     record.getCreatedAt(), record.getUpdatedAt(), record.getLogs());
         });
     }
 
+    /** @param hybrid 내 PC 앱의 클라우드를 바꿨다. 화면이 내 PC 로 다시 배포해야 새 클라우드에 대기 Pod 가 생긴다 */
     public record View(String appName, String id, String from, String to, String state, String step,
-                       Long downtimeMs, Instant startedAt, Instant updatedAt, List<String> logs) {
+                       Long downtimeMs, boolean hybrid, Instant startedAt, Instant updatedAt, List<String> logs) {
     }
 
     /** 옮기는 중이다. 배포·롤백·내리기를 막는다 */
@@ -449,8 +567,14 @@ public class AppMigration {
             }
             Plan plan = planOf(record);
             if (record.getLogs().contains(COMMITTED)) {
-                record.status(Build.Status.SUCCEEDED, "migrate: hold");
-                store.save(record);
+                if (record.getLogs().contains(STEP + "ROLLBACK")) {
+                    // 되돌리는 도중에 다시 떴다. 각 동작은 여러 번 해도 같으니 처음부터 다시 되돌린다
+                    log.warn("rollback interrupted, resuming: app={}", plan.app());
+                    rollBack(record, plan);
+                } else {
+                    record.status(Build.Status.SUCCEEDED, "migrate: hold");
+                    store.save(record);
+                }
                 continue;
             }
             Set<Step> started = java.util.EnumSet.noneOf(Step.class);
