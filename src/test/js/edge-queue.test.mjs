@@ -618,3 +618,26 @@ test("큐가_비어_있고_PC가_정상이면_POST_두_개를_줄_세우지_않�
   assert.equal(a.response.status, 201);
   assert.equal(b.response.status, 201);
 });
+
+async function setSplit(gcpPercent, host = HOST) {
+  const { response } = await submit(new Request("https://" + ADMIN + "/apps/" + host + "/queue/config", {
+    method: "PUT",
+    headers: { authorization: "Bearer " + ADMIN_TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({ gcpPercent }),
+  }));
+  return response;
+}
+
+test("멀티클라우드_비율은_0에서_100_정수만_받고_null이면_끄며_다른_설정은_그대로_둔다", async () => {
+  assert.equal((await setSplit(30)).status, 200);
+  assert.equal((await adminState()).split, 30);
+  assert.deepEqual((await adminState()).paths, ["/posts"]);
+
+  assert.equal((await setSplit(101)).status, 400);
+  assert.equal((await setSplit(12.5)).status, 400);
+  assert.equal((await setSplit("50")).status, 400);
+  assert.equal((await adminState()).split, 30);
+
+  assert.equal((await setSplit(null)).status, 200);
+  assert.equal((await adminState()).split, null);
+});

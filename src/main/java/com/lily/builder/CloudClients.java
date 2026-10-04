@@ -1,5 +1,7 @@
 package com.lily.builder;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -15,8 +17,20 @@ public class CloudClients {
     private final CloudProfiles profile;
     private final CicdClient cicd;
     private final ProvisionerClient provisioner;
+    /** AWS 클러스터에서 Cloud SQL 로 가는 DB 릴레이 (멀티클라우드 앱의 AWS 쪽 Pod 가 붙는다) */
+    private final String relayHost;
+    private final int relayPort;
 
     public CloudClients(CloudProfiles profile) {
+        this(profile, "db-relay-gcp.lily-builds.svc.cluster.local", 5432);
+    }
+
+    @Autowired
+    public CloudClients(CloudProfiles profile,
+                        @Value("${lily.builder.gcp.relay-host:db-relay-gcp.lily-builds.svc.cluster.local}") String relayHost,
+                        @Value("${lily.builder.gcp.relay-port:5432}") int relayPort) {
+        this.relayHost = relayHost;
+        this.relayPort = relayPort;
         this.profile = profile;
         this.cicd = profile.deployConfigured() ? CicdClient.forUrl(profile.cicdUrl()) : null;
         this.provisioner = profile.provisionerConfigured()
@@ -38,6 +52,14 @@ public class CloudClients {
 
     public String registrySecret() {
         return profile.registrySecret().isBlank() ? "gcp-pull" : profile.registrySecret();
+    }
+
+    public String relayHost() {
+        return relayHost;
+    }
+
+    public int relayPort() {
+        return relayPort;
     }
 
     public boolean deployConfigured() {

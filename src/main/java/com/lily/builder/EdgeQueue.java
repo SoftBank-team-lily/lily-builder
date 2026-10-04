@@ -164,6 +164,26 @@ public class EdgeQueue {
         return json(reply);
     }
 
+    /**
+     * 멀티클라우드 앱의 GCP 비율. worker.js 가 요청마다 이 비율로 {app}-gcp·{app}-aws 를 고른다
+     *
+     * @param gcpPercent 0~100. null 이면 멀티클라우드를 끈다
+     * @throws IllegalArgumentException 값이 맞지 않다 (Worker 가 400)
+     */
+    public JsonNode split(String app, Integer gcpPercent) {
+        ObjectNode change = MAPPER.createObjectNode();
+        if (gcpPercent == null) {
+            change.putNull("gcpPercent");
+        } else {
+            change.put("gcpPercent", gcpPercent);
+        }
+        Reply reply = admin.call("PUT", queueUrl(app) + "/config", adminToken(), change.toString());
+        if (reply.status() == 400) {
+            throw new IllegalArgumentException("비율이 맞지 않다: " + reply.body());
+        }
+        return json(reply);
+    }
+
     /** 앱을 지운 뒤. 쌓인 요청과 등록 경로를 지운다 */
     public void clear(String app) {
         json(admin.call("DELETE", queueUrl(app), adminToken(), null));

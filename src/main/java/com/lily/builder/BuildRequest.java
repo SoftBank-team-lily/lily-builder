@@ -38,7 +38,8 @@ import java.util.Map;
  * @param deploymentMode 배포 모드. HYBRID(기본): 거점만 바뀐다. 클라우드 DB 는 cloudProvider 쪽이다.
  *                      ONPREM_ONLY: DB 와 요청 모두 내 PC. 버스팅·거점 전환·클라우드 DB 프로비저닝을 하지 않는다
  * @param sourceCommit 분석 후 고정한 40자리 SHA. 비우면 branch의 최신 커밋을 사용한다
- * @param cloudProvider 하이브리드의 클라우드. AWS(기본) 또는 GCP. 온프레미스 전용은 쓰지 않는다. 만든 뒤에는 바꾸지 않는다
+ * @param cloudProvider 하이브리드의 클라우드. AWS(기본) 또는 GCP. 온프레미스 전용은 쓰지 않는다. 만든 뒤에는 바꾸지 않는다.
+ *                      MULTI: 클라우드 전용 앱을 GCP 와 AWS 에 같이 띄운다. DB 는 GCP(Cloud SQL) 하나이고 AWS 는 DB 릴레이로 붙는다
  * @param edgeSnapshot 온프레미스 앱. PC 장애 때 엣지 읽기 사본(Cache API)을 쓰는가. 비우면 앱의 지금 설정을 그대로 둔다 (쓴다가 기본)
  * @param edgeQueue    온프레미스 앱. PC 장애 때 POST 를 엣지 쓰기 큐(DO)에 쌓는가 (켜면 모든 POST). 비우면 앱의 지금 설정을 그대로 둔다
  */
@@ -63,7 +64,7 @@ public record BuildRequest(
         Map<String, String> databaseEnv,
         Boolean importDatabase,
         @Pattern(regexp = "HYBRID|ONPREM_ONLY|") String deploymentMode,
-        @Pattern(regexp = "AWS|GCP|") String cloudProvider,
+        @Pattern(regexp = "AWS|GCP|MULTI|") String cloudProvider,
         @Pattern(regexp = "[0-9a-f]{40}") String sourceCommit,
         Boolean edgeSnapshot,
         Boolean edgeQueue) {
@@ -220,7 +221,20 @@ public record BuildRequest(
         if (onPremOnly()) {
             return "AWS";
         }
-        return "GCP".equals(cloudProvider) ? "GCP" : "AWS";
+        // 멀티클라우드는 DB 를 가진 GCP 가 주인이다 (스키마·DB·주소의 기본값)
+        return "GCP".equals(cloudProvider) || "MULTI".equals(cloudProvider) ? "GCP" : "AWS";
+    }
+
+    /** GCP 와 AWS 에 같이 띄운다 ({@link BuildService} 의 멀티클라우드 배포). 온프레미스 앱에는 없다 */
+    public boolean multiCloud() {
+        return !onPremOnly() && "MULTI".equals(cloudProvider);
+    }
+
+    /** 다른 클라우드의 DB 를 쓴다. DB 를 만들지 않고 이 접속 정보를 슬롯에 넣는다 */
+    public BuildRequest withGivenDatabase(Map<String, String> databaseEnv) {
+        return new BuildRequest(repoUrl, branch, token, rootDir, appName, targetPort, database, readinessPath,
+                livenessPath, env, host, standby, migrationsPath, migrate, canaryPath, databaseMode, databaseUrl,
+                databaseEnv, importDatabase, deploymentMode, cloudProvider, sourceCommit, edgeSnapshot, edgeQueue);
     }
 
     /** 호출자가 DB 접속 정보를 정해 보냈다 */

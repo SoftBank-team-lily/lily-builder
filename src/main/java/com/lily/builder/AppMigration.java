@@ -187,6 +187,9 @@ public class AppMigration {
         if (history.isEmpty()) {
             throw new IllegalStateException(app + " 의 배포 기록이 없다");
         }
+        if (deploys.multiCloud(app)) {
+            throw new IllegalStateException("멀티클라우드(AWS + GCP) 앱은 옮기지 않는다. 이미 두 클라우드에 떠 있다");
+        }
         if (history.stream().anyMatch(b -> RUNNING.contains(b.getStatus()))) {
             throw new IllegalStateException(app + " 은 배포가 진행 중이다");
         }

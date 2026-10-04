@@ -116,6 +116,45 @@ public class TunnelCertificates {
         }
     }
 
+    /**
+     * 클러스터에 상주하는 DB 릴레이(-L 만)의 키와 인증서. 키는 처음 한 번 만들고, 인증서만 주기적으로 다시 서명한다
+     * ({@link DatabaseRelay}). key ID 는 {@code relay-{name}}.
+     *
+     * @param privateKey 지금 쓰는 개인키. null 이면 새로 만든다
+     * @param hours      인증서 유효 시간
+     */
+    public JobKey relayKey(String name, String privateKey, int hours) {
+        if (!enabled()) {
+            throw new IllegalStateException("DB 터널 CA 가 설정되지 않았다");
+        }
+        if (!name.matches("[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")) {
+            throw new IllegalArgumentException("릴레이 이름이 아니다: " + name);
+        }
+        Path dir = null;
+        try {
+            dir = Files.createTempDirectory("lily-relay-key");
+            Path key = dir.resolve("id");
+            if (privateKey == null || privateKey.isBlank()) {
+                run(List.of("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "relay-" + name, "-f", key.toString()));
+            } else {
+                Files.writeString(key, privateKey.trim() + "\n", StandardCharsets.UTF_8);
+                Files.setPosixFilePermissions(key, PosixFilePermissions.fromString("rw-------"));
+                Files.writeString(dir.resolve("id.pub"), output(List.of("ssh-keygen", "-y", "-f", key.toString())));
+            }
+            run(List.of("ssh-keygen", "-q", "-s", ca().toString(),
+                    "-I", "relay-" + name,
+                    "-n", settings.sshUser(),
+                    "-V", "-5m:+" + Math.max(1, hours) + "h",
+                    "-O", "clear", "-O", "permit-port-forwarding",
+                    dir.resolve("id.pub").toString()));
+            return new JobKey(Files.readString(key), Files.readString(dir.resolve("id-cert.pub")).trim());
+        } catch (IOException e) {
+            throw new IllegalStateException("릴레이 키를 만들지 못했다: " + e.getMessage(), e);
+        } finally {
+            deleteQuietly(dir);
+        }
+    }
+
     /** @param privateKey OpenSSH 개인키 본문, @param certificate 그 공개키의 인증서 한 줄 */
     public record JobKey(String privateKey, String certificate) {
     }
@@ -134,6 +173,11 @@ public class TunnelCertificates {
     }
 
     private static void run(List<String> command) {
+        output(command);
+    }
+
+    /** ssh-keygen 의 표준 출력 */
+    private static String output(List<String> command) {
         ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
         try {
             Process process = builder.start();
@@ -145,6 +189,7 @@ public class TunnelCertificates {
             if (process.exitValue() != 0) {
                 throw new IllegalStateException("ssh-keygen 실패: " + output.trim());
             }
+            return output;
         } catch (IOException e) {
             throw new IllegalStateException("ssh-keygen 을 실행하지 못했다: " + e.getMessage(), e);
         } catch (InterruptedException e) {
