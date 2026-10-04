@@ -147,6 +147,9 @@ public class BuildService {
                 + (build.getRootDir() == null ? "" : " dir=" + build.getRootDir()));
         build.log("deploymentMode=" + request.deploymentModeOrDefault());
         build.log("cloudProvider=" + request.cloudProviderOrDefault());
+        if (request.multiCloud()) {
+            build.log(MULTI_CLOUD);
+        }
         if (note != null && !note.isBlank()) {
             build.log(note);
         }
@@ -225,6 +228,11 @@ public class BuildService {
     private void finishFromProgress(Build build) {
         build.log("deploy: builder restarted, following progress");
         store.save(build);
+        if (build.getLogs().contains(MULTI_CLOUD)) {
+            // 두 클라우드 중 어디까지 갔는지 이어서 맞추지 않는다. 다시 배포하면 두 쪽 다 같은 버전이 된다
+            fail(build, "builder 가 다시 떠서 멀티클라우드 배포를 끝까지 따라가지 못했다. 다시 배포한다");
+            return;
+        }
         try {
             boolean gcp = build.getLogs().stream().anyMatch(line -> line.startsWith("cloudProvider=GCP"));
             DeployFollow watching = follow;
@@ -275,6 +283,10 @@ public class BuildService {
             build.log(migrations.isEmpty()
                     ? "source: migrations none (" + (request.migrateOrDefault() ? GitHubSource.folder(request) : "migrate=false") + ")"
                     : "source: migrations " + migrations.keySet());
+            if (request.multiCloud()) {
+                executeMulti(build, request, commit, dockerfile, migrations, tag, prepared);
+                return;
+            }
             String provider = request.cloudProviderOrDefault();
             boolean gcp = "GCP".equals(provider);
             CicdClient targetCicd = cicd;
@@ -378,6 +390,134 @@ public class BuildService {
                 return;
             }
             failDiagnosed(build, attempt, e.getMessage());
+        }
+    }
+
+    /** 멀티클라우드 빌드 표시. 앱의 클라우드 판정({@link AgentDeployService#multiCloud})이 본다 */
+    static final String MULTI_CLOUD = "multiCloud=true";
+    /** 멀티클라우드 앱이 처음 받는 GCP 비율. 화면에서 바꾸면 그 값을 그대로 둔다 */
+    static final int INITIAL_GCP_PERCENT = 50;
+
+    /**
+     * 멀티클라우드 배포: 한 번 빌드해 Artifact Registry 와 ECR 에 올리고, DB 를 가진 GCP 에 먼저 배포한다
+     * (DB 생성, 마이그레이션·pgroll, canary). 그다음 AWS 에 같은 이미지를 마이그레이션 없이, GCP DB 접속 정보의 호스트를
+     * AWS 클러스터의 DB 릴레이로 바꿔 배포한다. AWS 가 실패하면 GCP 를 되돌린다 (둘 다 바뀌거나 둘 다 그대로).
+     * 끝나면 {app}-gcp·{app}-aws 별칭과 엣지 Worker 비율을 건다.
+     */
+    private void executeMulti(Build build, BuildRequest request, String commit, String dockerfile,
+                              Map<String, String> migrations, String tag, Prepared prepared) {
+        String app = request.appName();
+        if (prepared != null) {
+            throw new IllegalStateException("멀티클라우드 앱은 다른 클라우드로 옮기지 않는다");
+        }
+        if (request.isStandby()) {
+            throw new IllegalStateException("멀티클라우드는 클라우드 전용 앱만 된다 (버스팅 대기 배포가 아니다)");
+        }
+        if ("mysql".equals(request.database())) {
+            throw new IllegalStateException("멀티클라우드는 PostgreSQL 만 된다");
+        }
+        if (clouds == null || !clouds.deployConfigured()) {
+            throw new IllegalStateException(CloudClients.MISSING);
+        }
+        if (!edge.multiReady()) {
+            throw new IllegalStateException("멀티클라우드에는 엣지 Worker, 쓰기 큐 DO, GCP 오리진이 필요하다");
+        }
+        CicdClient gcp = clouds.cicd();
+        if (ecr.ensure(app)) {
+            build.log("build: created ecr repository " + app);
+        }
+        advance(build, Build.Status.BUILDING, "build: kaniko job build-" + build.getId());
+        List<String> images = kaniko.build(build.getId(), request, tag, commit, dockerfile, List.of(
+                new KanikoBuilder.Destination(clouds.registry(), clouds.registrySecret()),
+                kaniko.defaultDestination()));
+        String gcpImage = images.get(0);
+        String awsImage = images.get(1);
+        build.image(gcpImage);
+        build.log("build: pushed " + gcpImage);
+        build.log("build: pushed " + awsImage);
+
+        advance(build, Build.Status.DEPLOYING, "deploy: lily-cicd"
+                + (build.getDatabase() == null ? "" : " database=" + build.getDatabase()) + " (gcp, then aws)");
+        CicdClient.Result gcpResult = deployTo(build, gcp, "gcp", request, gcpImage, tag, migrations,
+                List.of(edge.multiHost(app, "gcp")), false);
+        build.log("multicloud: gcp deployed");
+
+        BuildRequest second = request;
+        boolean database = request.database() != null && !request.database().isBlank();
+        try {
+            if (database) {
+                // GCP provisioner 가 방금 만든(또는 있던) DB 의 접속 정보. 호스트만 AWS 쪽 릴레이로 바꾼다
+                Map<String, String> env = clouds.provisioner()
+                        .ensure(app, request.database(), clouds.relayHost(), clouds.relayPort()).env();
+                second = request.withGivenDatabase(env);
+                build.log("multicloud: aws uses the gcp database via " + clouds.relayHost() + ":" + clouds.relayPort());
+            }
+            deployTo(build, cicd, "aws", second, awsImage, tag, Map.of(), List.of(edge.multiHost(app, "aws")), database);
+        } catch (RuntimeException e) {
+            undoGcp(build, gcp, app);
+            throw e;
+        }
+        build.log("multicloud: aws deployed");
+
+        try {
+            build.log(edge.attachMulti(app, INITIAL_GCP_PERCENT));
+            if (addresses.enabled()) {
+                // 공개 주소는 Worker 가 앞에서 받는다. CNAME 은 Worker 가 없을 때의 기본값 (DB 를 가진 GCP)
+                AppAddress.State state = addresses.ensureCloud(app, clouds.origin());
+                build.log("address: " + state.host() + " -> " + state.content());
+            }
+        } catch (RuntimeException e) {
+            // 두 클라우드는 이미 새 버전이다. 주소만 다시 걸면 된다
+            log.warn("multicloud address {} failed: {}", app, e.getMessage());
+            build.log("multicloud: address failed " + e.getMessage());
+        }
+        build.url(gcpResult == null ? null : gcpResult.targetHostUrl());
+        update(build, Build.Status.SUCCEEDED, "done: " + build.getUrl());
+    }
+
+    /**
+     * 한 클라우드의 lily-cicd 에 배포하고 결과를 기다린다. 응답이 끊기면 진행 상태를 따라간다.
+     * canary 판정으로 되돌려졌으면 예외 (멀티클라우드는 한쪽만 바뀐 채로 끝내지 않는다)
+     */
+    private CicdClient.Result deployTo(Build build, CicdClient client, String cloud, BuildRequest request, String image,
+                                       String tag, Map<String, String> migrations, List<String> aliases,
+                                       boolean followPgroll) {
+        Instant started = Instant.now();
+        CicdClient.Result result;
+        try (ProgressWatch ignored = watchProgress(build, client)) {
+            try {
+                result = client.deploy(request, image, tag, migrations, aliases, followPgroll);
+            } catch (RestClientResponseException e) {
+                throw e;
+            } catch (RestClientException e) {
+                build.log("deploy: " + cloud + " response lost, following progress");
+                store.save(build);
+                DeployFollow.Outcome outcome = new DeployFollow(client).await(build, started);
+                if (outcome.rolledBackReason() != null) {
+                    throw new IllegalStateException(cloud + " canary 가 되돌렸다: " + outcome.rolledBackReason());
+                }
+                result = outcome.success();
+            }
+        }
+        if (result != null && result.logs() != null) {
+            result.logs().forEach(line -> build.log("cicd(" + cloud + "): " + line));
+        }
+        return result;
+    }
+
+    /** AWS 배포가 실패했다. GCP 를 이전 릴리스로 (스키마 포함) 되돌린다. 첫 릴리스면 GCP 앱을 지운다 (DB 는 남긴다) */
+    private void undoGcp(Build build, CicdClient gcp, String app) {
+        try {
+            CicdClient.Passthrough rolled = gcp.rollback(app, false);
+            if (rolled.status() == 200) {
+                build.log("multicloud: aws failed, gcp rolled back");
+                return;
+            }
+            CicdClient.Passthrough removed = gcp.remove(app, false);
+            build.log("multicloud: aws failed, gcp first release removed (" + removed.status() + ")");
+        } catch (RuntimeException e) {
+            log.warn("multicloud undo gcp {} failed: {}", app, e.getMessage());
+            build.log("multicloud: aws failed and gcp undo failed: " + e.getMessage());
         }
     }
 

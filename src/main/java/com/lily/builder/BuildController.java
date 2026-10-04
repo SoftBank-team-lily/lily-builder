@@ -2,6 +2,7 @@ package com.lily.builder;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -20,9 +21,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @RestController
@@ -161,7 +164,17 @@ public class BuildController {
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(rejected(e.getMessage()));
         }
-        return passthrough(clouds.cicdOf(appName).rollback(appName, request != null && request.appOnly()));
+        boolean appOnly = request != null && request.appOnly();
+        if (clouds.multi(appName)) {
+            // AWS 는 스키마를 기록하지 않아 앱만 되돌린다. 스키마는 DB 를 가진 GCP 가 되돌린다.
+            // GCP 가 스키마를 먼저 되돌리면 아직 새 버전인 AWS Pod 가 사라진 버전 스키마를 보게 되므로 AWS 부터
+            CicdClient.Passthrough aws = clouds.awsCicd().rollback(appName, false);
+            if (aws.status() != 200) {
+                return passthrough(aws);
+            }
+            return passthrough(clouds.cicdOf(appName).rollback(appName, appOnly));
+        }
+        return passthrough(clouds.cicdOf(appName).rollback(appName, appOnly));
     }
 
     /** 앱을 내린다 (모든 슬롯 0). Service·Ingress·DB 가 남아서 start 로 되살린다. 배포 중이면 409 */
@@ -172,6 +185,9 @@ public class BuildController {
         }
         if (moving(appName) != null) {
             return moving(appName);
+        }
+        if (clouds.multi(appName)) {
+            return both(clouds.awsCicd().stop(appName), () -> clouds.cicdOf(appName).stop(appName));
         }
         return passthrough(clouds.cicdOf(appName).stop(appName));
     }
@@ -184,6 +200,9 @@ public class BuildController {
         }
         if (moving(appName) != null) {
             return moving(appName);
+        }
+        if (clouds.multi(appName)) {
+            return both(clouds.cicdOf(appName).start(appName), () -> clouds.awsCicd().start(appName));
         }
         return passthrough(clouds.cicdOf(appName).start(appName));
     }
@@ -214,6 +233,13 @@ public class BuildController {
                         .body(rejected(e.getMessage()));
             } catch (JsonProcessingException e) {
                 return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body("{\"status\":\"REMOVED\"}");
+            }
+        }
+        if (clouds.multi(appName)) {
+            // AWS 는 GCP DB 를 빌려 쓴다. AWS 앱만 지우고 DB 는 GCP 쪽에서 지운다
+            CicdClient.Passthrough aws = clouds.awsCicd().remove(appName, false);
+            if (aws.status() != 200 && aws.status() != 404) {
+                return passthrough(aws);
             }
         }
         CicdClient.Passthrough removed = clouds.cicdOf(appName).remove(appName, database);
@@ -385,7 +411,77 @@ public class BuildController {
         if (!APP_NAME.matcher(appName).matches()) {
             return ResponseEntity.badRequest().build();
         }
-        return passthrough(clouds.cicdOf(appName).release(appName));
+        CicdClient.Passthrough release = clouds.cicdOf(appName).release(appName);
+        if (release.status() == 200 && clouds.multi(appName)) {
+            // GCP 릴리스(스키마 포함)에 AWS 릴리스를 aws 로 붙인다
+            try {
+                ObjectNode merged = (ObjectNode) json.readTree(release.body());
+                CicdClient.Passthrough aws = clouds.awsCicd().release(appName);
+                merged.set("aws", aws.status() == 200 ? json.readTree(aws.body()) : json.nullNode());
+                merged.put("multiCloud", true);
+                return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(json.writeValueAsString(merged));
+            } catch (JsonProcessingException | ClassCastException e) {
+                return passthrough(release);
+            }
+        }
+        return passthrough(release);
+    }
+
+    /**
+     * 멀티클라우드 앱의 클라우드별 비율과 상태. 비율은 GCP 로 보내는 몫(0~100)이고 나머지가 AWS 다.
+     * 멀티클라우드가 아니면 404
+     */
+    @GetMapping("/api/apps/{appName}/traffic")
+    public ResponseEntity<?> traffic(@PathVariable String appName) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        if (!clouds.multi(appName)) {
+            return ResponseEntity.notFound().build();
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("appName", appName);
+        body.put("gcpPercent", edge.splitOf(appName));
+        body.put("gcp", status(clouds.cicdOf(appName), appName));
+        body.put("aws", status(clouds.awsCicd(), appName));
+        return ResponseEntity.ok(body);
+    }
+
+    /** 비율을 바꾼다. 엣지 Worker 가 isolate 마다 30초 안에 새 값을 읽는다 */
+    @PutMapping("/api/apps/{appName}/traffic")
+    public ResponseEntity<?> traffic(@PathVariable String appName, @Valid @RequestBody TrafficRequest request) {
+        if (!APP_NAME.matcher(appName).matches()) {
+            return ResponseEntity.badRequest().build();
+        }
+        if (!clouds.multi(appName)) {
+            return ResponseEntity.notFound().build();
+        }
+        edge.split(appName, request.gcpPercent());
+        return traffic(appName);
+    }
+
+    public record TrafficRequest(@NotNull @Min(0) @Max(100) Integer gcpPercent) {
+    }
+
+    private static Map<String, Object> status(CicdClient client, String appName) {
+        try {
+            CicdClient.AppStatus status = client.status(appName);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("replicas", status == null ? 0 : status.replicas());
+            out.put("readyReplicas", status == null ? 0 : status.readyReplicas());
+            return out;
+        } catch (RuntimeException e) {
+            return Map.of("error", String.valueOf(e.getMessage()));
+        }
+    }
+
+    /** 두 클라우드에 차례로. 먼저 부른 쪽이 실패하면 거기서 멈추고 그 응답을 준다 */
+    private static ResponseEntity<String> both(CicdClient.Passthrough first,
+                                               Supplier<CicdClient.Passthrough> second) {
+        if (first.status() / 100 != 2) {
+            return passthrough(first);
+        }
+        return passthrough(second.get());
     }
 
     /** 스키마 이력(pgroll·Flyway)과 열린 pgroll 롤백 창. 프로젝트 상세의 스키마 이력 패널이 쓴다 */

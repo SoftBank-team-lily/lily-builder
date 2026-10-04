@@ -90,6 +90,9 @@ public class AgentDeployService {
 
     /** @throws IllegalArgumentException 에이전트 규칙에 맞지 않는 앱 이름 */
     public Build start(String agentKey, BuildRequest request) {
+        if ("MULTI".equals(request.cloudProvider())) {
+            throw new IllegalArgumentException("내 PC 앱은 멀티클라우드(AWS + GCP)로 배포하지 않는다. AWS 나 GCP 하나를 고른다");
+        }
         if (!APP_NAME.matcher(request.appName()).matches()) {
             throw new IllegalArgumentException("온프레미스 앱 이름은 영문 소문자로 시작하고 31자 이하여야 한다: " + request.appName());
         }
@@ -532,6 +535,16 @@ public class AgentDeployService {
                 .max(Comparator.comparing(Build::getCreatedAt))
                 .map(AgentDeployService::lastCloudProvider)
                 .orElse("AWS");
+    }
+
+    /** 이 앱의 가장 최근 빌드가 멀티클라우드(GCP + AWS)다. 옮기는 중에 만든 빌드는 뺀다 */
+    public boolean multiCloud(String app) {
+        return store.findAll().stream()
+                .filter(build -> app.equals(build.getAppName()))
+                .filter(build -> build.getLogs().stream().noneMatch(line -> line.startsWith(AppMigration.PART)))
+                .max(Comparator.comparing(Build::getCreatedAt))
+                .map(build -> build.getLogs().contains(BuildService.MULTI_CLOUD))
+                .orElse(false);
     }
 
     static String lastCloudProvider(Build build) {

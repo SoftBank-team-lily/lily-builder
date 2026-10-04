@@ -34,6 +34,16 @@ public class CloudRouting {
         return new CloudRouting(null, cicd, null, "");
     }
 
+    /** GCP(DB) 와 AWS 에 같이 떠 있는 앱 ({@link BuildService} 멀티클라우드 배포) */
+    public boolean multi(String app) {
+        return deploys != null && deploys.multiCloud(app);
+    }
+
+    /** 멀티클라우드 앱의 AWS 쪽 lily-cicd (DB 없이 GCP DB 를 따라가는 클러스터) */
+    public CicdClient awsCicd() {
+        return aws;
+    }
+
     public boolean gcp(String app) {
         return deploys != null && "GCP".equals(deploys.cloudProvider(app));
     }

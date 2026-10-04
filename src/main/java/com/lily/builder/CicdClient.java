@@ -46,6 +46,15 @@ public class CicdClient {
     /** @param aliases 같은 Service 로 보내는 추가 Ingress 호스트 (엣지 Worker 의 클라우드 주소). 비어 있으면 보내지 않는다 */
     public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations,
                          List<String> aliases) {
+        return deploy(request, image, version, migrations, aliases, false);
+    }
+
+    /**
+     * @param followPgroll 주어진 DB(databaseEnv)를 다른 클라우드의 lily-cicd 가 pgroll 로 관리한다 (멀티클라우드 두 번째 클라우드).
+     *                     이 lily-cicd 는 최신 버전 스키마로 접속만 한다
+     */
+    public Result deploy(BuildRequest request, String image, String version, Map<String, String> migrations,
+                         List<String> aliases, boolean followPgroll) {
         Map<String, Object> body = new HashMap<>();
         body.put("appName", request.appName());
         body.put("imageUrl", image);
@@ -64,6 +73,9 @@ public class CicdClient {
             // 온프레미스 DB 를 역방향 터널로 쓴다. lily-cicd 는 DB 를 만들지 않고 이 값을 슬롯 Secret 에 넣는다
             body.put("database", null);
             body.put("databaseEnv", request.databaseEnv());
+            if (followPgroll) {
+                body.put("followPgroll", true);
+            }
         } else if (migrations != null && !migrations.isEmpty()) {
             body.put("migrations", migrations);
         }

@@ -1,10 +1,14 @@
 package com.lily.builder;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.api.model.batch.v1.Job;
 import io.fabric8.kubernetes.api.model.batch.v1.JobBuilder;
@@ -14,7 +18,9 @@ import io.fabric8.kubernetes.client.KubernetesClientException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -111,6 +117,95 @@ public class KanikoBuilder {
         }
     }
 
+    /**
+     * 이미지를 올릴 레지스트리 하나
+     *
+     * @param registry   레지스트리 주소. 이미지는 {registry}/{appName}:{tag}
+     * @param authSecret 그 레지스트리의 dockerconfigjson 시크릿 (lily-builds namespace)
+     */
+    public record Destination(String registry, String authSecret) {
+    }
+
+    /** 빌더 기본 레지스트리(ECR)와 그 인증 시크릿 */
+    public Destination defaultDestination() {
+        return new Destination(props.registry(), REGISTRY_AUTH_SECRET);
+    }
+
+    /**
+     * 한 번 빌드해서 여러 레지스트리에 올린다 (멀티클라우드: Artifact Registry 와 ECR). 각 레지스트리의 인증을
+     * 이 빌드용 dockerconfigjson 하나로 합쳐 마운트하고 끝나면 지운다.
+     *
+     * @return destinations 와 같은 순서의 이미지 주소
+     */
+    public List<String> build(String buildId, BuildRequest request, String tag, String commit, String dockerfile,
+                              List<Destination> destinations) {
+        List<String> images = destinations.stream()
+                .map(d -> d.registry() + "/" + request.appName() + ":" + tag)
+                .toList();
+        String jobName = "build-" + buildId;
+        String authName = jobName + "-registry";
+        String ns = props.namespace();
+        boolean hasToken = request.token() != null && !request.token().isBlank();
+        try {
+            k8s.secrets().inNamespace(ns).resource(new SecretBuilder()
+                    .withNewMetadata().withName(authName).endMetadata()
+                    .withType("kubernetes.io/dockerconfigjson")
+                    .addToStringData(".dockerconfigjson", mergedAuth(ns, destinations))
+                    .build()).create();
+            if (hasToken) {
+                k8s.secrets().inNamespace(ns).resource(new SecretBuilder()
+                        .withNewMetadata().withName(jobName).endMetadata()
+                        .addToStringData("GIT_USERNAME", "x-access-token")
+                        .addToStringData("GIT_PASSWORD", request.token())
+                        .build()).create();
+            }
+            if (dockerfile != null) {
+                k8s.configMaps().inNamespace(ns).resource(new ConfigMapBuilder()
+                        .withNewMetadata().withName(jobName).endMetadata()
+                        .addToData("Dockerfile", dockerfile)
+                        .build()).create();
+            }
+            k8s.batch().v1().jobs().inNamespace(ns)
+                    .resource(job(jobName, request, images, hasToken, commit, dockerfile != null, authName)).create();
+            Job done = awaitFinished(ns, jobName);
+            if (!succeeded(done)) {
+                throw new IllegalStateException("kaniko build failed\n" + tail(ns, jobName));
+            }
+            return images;
+        } catch (KubernetesClientException e) {
+            throw new IllegalStateException("kaniko build error: " + e.getMessage() + "\n" + tail(ns, jobName), e);
+        } finally {
+            k8s.secrets().inNamespace(ns).withName(authName).delete();
+            if (hasToken) {
+                k8s.secrets().inNamespace(ns).withName(jobName).delete();
+            }
+            if (dockerfile != null) {
+                k8s.configMaps().inNamespace(ns).withName(jobName).delete();
+            }
+        }
+    }
+
+    /** 각 레지스트리 시크릿의 auths 를 하나로 합친다 */
+    String mergedAuth(String ns, List<Destination> destinations) {
+        ObjectMapper json = new ObjectMapper();
+        ObjectNode merged = json.createObjectNode();
+        ObjectNode auths = merged.putObject("auths");
+        for (Destination destination : destinations) {
+            Secret secret = k8s.secrets().inNamespace(ns).withName(destination.authSecret()).get();
+            String encoded = secret == null || secret.getData() == null ? null : secret.getData().get(".dockerconfigjson");
+            if (encoded == null) {
+                throw new IllegalStateException("레지스트리 인증 시크릿이 없다: " + destination.authSecret());
+            }
+            try {
+                JsonNode config = json.readTree(new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8));
+                config.path("auths").fields().forEachRemaining(entry -> auths.set(entry.getKey(), entry.getValue()));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("레지스트리 인증을 읽지 못했다: " + destination.authSecret(), e);
+            }
+        }
+        return merged.toString();
+    }
+
     /** 빌드 중인 Job 을 지운다 (Pod 까지). 기다리던 {@link #build} 는 Job 이 사라졌다며 끝난다 */
     public void cancel(String buildId) {
         k8s.batch().v1().jobs().inNamespace(props.namespace()).withName("build-" + buildId)
@@ -134,10 +229,16 @@ public class KanikoBuilder {
      */
     Job job(String name, BuildRequest request, String image, boolean hasToken, String commit, boolean generated,
             String authSecret) {
+        return job(name, request, List.of(image), hasToken, commit, generated, authSecret);
+    }
+
+    /** @param images 같은 이미지를 올릴 주소 (Kaniko --destination 을 여러 번 준다) */
+    Job job(String name, BuildRequest request, List<String> images, boolean hasToken, String commit, boolean generated,
+            String authSecret) {
         List<String> args = new ArrayList<>(List.of(
                 "--context=" + request.gitContext(commit),
-                "--dockerfile=" + (generated ? GENERATED_DOCKERFILE : "Dockerfile"),
-                "--destination=" + image));
+                "--dockerfile=" + (generated ? GENERATED_DOCKERFILE : "Dockerfile")));
+        images.forEach(image -> args.add("--destination=" + image));
         if (request.rootDir() != null && !request.rootDir().isBlank()) {
             args.add("--context-sub-path=" + request.rootDir().replaceAll("^/+|/+$", ""));
         }
