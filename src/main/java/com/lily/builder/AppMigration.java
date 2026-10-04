@@ -503,6 +503,20 @@ public class AppMigration {
                 .max(Comparator.comparing(Build::getCreatedAt));
     }
 
+    /**
+     * 옮긴 적 있는 앱마다 가장 최근 기록. 화면이 프로젝트 목록을 읽을 때 한 번에 받아 프로젝트 클라우드를 맞춘다
+     * (되돌리기처럼 뒤에서 끝난 결과를 패널을 열지 않아도 반영한다)
+     */
+    public List<View> latestAll() {
+        return store.findAll().stream()
+                .filter(AppMigration::isRecord)
+                .map(Build::getAppName)
+                .distinct()
+                .map(this::status)
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
     /** 화면에 보일 상태 */
     public Optional<View> status(String app) {
         return latest(app).map(record -> {
